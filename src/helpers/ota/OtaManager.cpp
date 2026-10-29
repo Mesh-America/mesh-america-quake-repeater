@@ -6,19 +6,44 @@
 #include "OtaDebug.h"
 #include <string.h>
 #include <stdlib.h>   // malloc/free for the (transient) leaf-diff buffer
+#if OTA_BOUNDED_SOURCE_PROOFS
+#include <new>
+#endif
 
 namespace mesh {
 namespace ota {
 
+namespace {
+// Construction and transfer state belong to the single mesh-loop owner. This
+// process token outlives heap/shared context recreation, without another queue.
+uint32_t direct_epoch = 0;
+}
+
+OtaManager::OtaManager() {
+  invalidateDirectTransport();
+}
+
+void OtaManager::invalidateDirectTransport() {
+  direct_epoch = ota_advance_direct_epoch(direct_epoch);
+  _direct_transport_epoch = direct_epoch;
+}
+
 OtaManager::~OtaManager() {
   free(_catalog_heap);
   free(_leaves_buf);
-#if defined(ESP32_PLATFORM)
-  // A shared Companion workspace is destroyed between mOTA sessions. Return
-  // the lazy source/proof buffers before its queue slots are reused.
+#if OTA_BOUNDED_SOURCE_PROOFS
+  if (_source_proofs) _source_proofs->~BoundedSourceProof();
+  free(_source_proofs);
+#else
   free(_src_leaves);
-  free(_scratch);
 #endif
+  free(_scratch);
+}
+
+void OtaManager::set_direct_transport_enabled(bool on) {
+  if (_direct_transport_enabled != on) invalidateDirectTransport();
+  _direct_transport_enabled = on;
+  if (!on && _direct_session) downgradeDirectTransport();
 }
 
 bool OtaManager::set_speed(float speed) {
@@ -54,6 +79,10 @@ bool OtaManager::set_speed(float speed) {
 
 bool OtaManager::expandCatalog() {
   if (_catalog_heap || OTA_INLINE_CATALOG >= OTA_MAX_CATALOG) return false;
+  // Passive on-air discovery never claims a 255-row heap. Large catalogs are
+  // an explicit browse/archive/automatic-fetch resource choice.
+  if (!_catalog_browse_requested && !_archive_interest && _autofetch == AUTOFETCH_OFF &&
+      !_have_desired_mid && _desired_target == 0) return false;
   CatRow* expanded = static_cast<CatRow*>(malloc(sizeof(CatRow) * OTA_MAX_CATALOG));
   if (!expanded) return false;
   memcpy(expanded, _catalog_inline, sizeof(CatRow) * _n_cat);
@@ -61,22 +90,83 @@ bool OtaManager::expandCatalog() {
   return true;
 }
 
-uint8_t* OtaManager::ensureSourceLeaves() {
-#if defined(ESP32_PLATFORM)
-  if (!_src_leaves) {
-    _src_leaves = static_cast<uint8_t*>(malloc(OTA_PROOFGEN_SCRATCH));
-  }
-#endif
-  return _src_leaves;
+void OtaManager::releaseSmallCatalog() {
+  if (!_catalog_heap || _n_cat > OTA_INLINE_CATALOG) return;
+  memcpy(_catalog_inline, _catalog_heap, sizeof(CatRow) * _n_cat);
+  free(_catalog_heap);
+  _catalog_heap = nullptr;
 }
 
-uint8_t* OtaManager::ensureScratch() {
-#if defined(ESP32_PLATFORM)
-  if (!_scratch) {
-    _scratch = static_cast<uint8_t*>(malloc(OTA_PROOFGEN_SCRATCH));
+#if OTA_BOUNDED_SOURCE_PROOFS
+OtaManager::BoundedSourceProof* OtaManager::ensureSourceProofs() {
+  if (!_source_proofs) {
+    void* memory = malloc(sizeof(BoundedSourceProof));
+    if (memory) _source_proofs = new (memory) BoundedSourceProof;
   }
+  return _source_proofs;
+}
+#else
+uint8_t* OtaManager::ensureSourceLeaves(uint32_t bytes) {
+  if (!bytes || bytes > OTA_PROOFGEN_SCRATCH) return nullptr;
+  if (_src_leaves_capacity < bytes) {
+    // loadSource revoked the cached view first. Free before growing, so even
+    // an allocation failure cannot overlap two images' maximum leaf caches.
+    free(_src_leaves);
+    _src_leaves = nullptr;
+    _src_leaves_capacity = 0;
+    _src_leaves = static_cast<uint8_t*>(malloc(bytes));
+    if (_src_leaves) _src_leaves_capacity = bytes;
+  }
+  return _src_leaves;
+}
 #endif
+
+uint8_t* OtaManager::ensureScratch() {
+  if (!_scratch) {
+    _scratch = static_cast<uint8_t*>(malloc(OTA_MAX_BLOCK));
+  }
   return _scratch;
+}
+
+void OtaManager::releaseColdBuffers() {
+  // Both queues pin their selected source and any encoded DATA behind radio
+  // backpressure. No cached view or wire pointer may outlive its allocation.
+  if (_n_serve_jobs || _n_manifest_jobs) return;
+  _srcv.valid = false;
+  _srcv.m.leaves = nullptr;
+  _srcv.scratch = nullptr;
+  _srcv.scratch_sz = 0;
+  if (_view0.scratch == _scratch) {
+    _view0.scratch = nullptr;
+    _view0.scratch_sz = 0;
+  }
+  _serve_block_loaded = false;
+  _serve_wire_block = nullptr;
+  _serve_wire_len = 0;
+#if OTA_BOUNDED_SOURCE_PROOFS
+  if (_source_proofs) _source_proofs->~BoundedSourceProof();
+  free(_source_proofs);
+  _source_proofs = nullptr;
+#else
+  free(_src_leaves);
+  _src_leaves = nullptr;
+  _src_leaves_capacity = 0;
+#endif
+  free(_scratch);
+  _scratch = nullptr;
+}
+
+void OtaManager::releaseIdleColdBuffers() {
+  if ((
+#if OTA_BOUNDED_SOURCE_PROOFS
+       _source_proofs ||
+#else
+       _src_leaves ||
+#endif
+       _scratch) &&
+      (uint32_t)(_now_ms - _source_buffer_used_at) >= OTA_SOURCE_BUFFER_IDLE_MS) {
+    releaseColdBuffers();
+  }
 }
 
 void OtaManager::begin(uint32_t my_target_id, OtaSend send, void* ctx) {
@@ -85,15 +175,21 @@ void OtaManager::begin(uint32_t my_target_id, OtaSend send, void* ctx) {
   _fstate = IDLE; _have = 0; _fbc = 0;
   _paused_from = IDLE;
   _fetch_error = FETCH_ERROR_NONE;
+  _direct_session = false; _direct_confirmed = false; _fetch_route = {};
   _archive_fetch = false; _validate = false;
   clearFetchIntent();
   _resume_verify_idx = 0; _resume_invalidated = false;
   _resume_merkle.reset();
   _n_serve = 0; _n_src_obj = 0; _view0.valid = false; _srcv.valid = false;
+  _sources_complete = true; _source_announce_pending = false;
   memset(_src_offered, 0, sizeof(_src_offered));
   memset(_src_advertised, 0, sizeof(_src_advertised));
   _n_src = 0; _n_cat = 0;
+  releaseSmallCatalog();
+  _catalog_browse_requested = false;
+  _auto_failure_at = 0; _auto_failure_delay = 0;
   clearPendingEgress();
+  releaseColdBuffers();
   _adaptive_packet_speed = 1.0f;
   _pace_clean_blocks = 0;
   _pace_has_mid = false;
@@ -112,17 +208,16 @@ bool OtaManager::serve(const uint8_t* mota, uint32_t len) {
   if (!mota || !mota_parse(mota, len, parsed)) return false;
   if (parsed.block_size() == 0 || parsed.block_size() > OTA_MAX_BLOCK ||
       (uint64_t)parsed.block_count * 4 > OTA_PROOFGEN_SCRATCH) return false;
-  uint8_t* scratch = ensureScratch();
-  if (!scratch) return false;
   // Parsing can fail after writing fields and pointers. Publish the replacement
   // only after all checks pass, preserving the old image and its queued replies.
   _view0.m = parsed;
   _view0.mfl = (uint16_t)(_view0.m.leaves - _view0.m.manifest_start);  // contiguous container
   _view0.read = nullptr; _view0.read_ctx = nullptr;                    // payload is contiguous _view0.m.payload
   _view0.read_deflated = nullptr; _view0.deflate_ctx = nullptr;
-  _view0.scratch = scratch; _view0.scratch_sz = OTA_PROOFGEN_SCRATCH;  // <=1024 leaves/blocks
+  _view0.scratch = nullptr; _view0.scratch_sz = 0; // allocate only if compressed DATA is requested
   _view0.valid = true;
   clearPendingEgress();
+  releaseColdBuffers();
   if (_n_src_obj) refresh_sources(); else registerSelfEntry();
   return true;
 }
@@ -131,7 +226,7 @@ bool OtaManager::serve_self(const uint8_t* manifest, uint16_t mfl, const uint8_t
                             uint32_t block_count, uint8_t* proof_scratch, uint32_t proof_scratch_sz,
                             ServeReadFn read, void* ctx) {
   if (!manifest || mfl != MOTA_MFL || !leaves || !proof_scratch || !read) return false;
-  if (proof_scratch_sz < (uint64_t)block_count * 4) return false;   // proof-gen needs count*4 working bytes
+  if (proof_scratch_sz == 0) return false;
   MotaManifest parsed;
   if (!mota_parse_manifest(manifest, mfl, parsed)) return false;  // fixed fields: root, image_hash, sizes
   if (parsed.block_size() == 0 || parsed.block_size() > OTA_MAX_BLOCK ||
@@ -143,9 +238,10 @@ bool OtaManager::serve_self(const uint8_t* manifest, uint16_t mfl, const uint8_t
   _view0.m.block_count = block_count;
   _view0.mfl = mfl; _view0.read = read; _view0.read_ctx = ctx;
   _view0.read_deflated = nullptr; _view0.deflate_ctx = nullptr;
-  _view0.scratch = proof_scratch; _view0.scratch_sz = proof_scratch_sz;   // sized for our (large) image
+  _view0.scratch = proof_scratch; _view0.scratch_sz = proof_scratch_sz; // optional compression output
   _view0.valid = true;
   clearPendingEgress();
+  releaseColdBuffers();
   if (_n_src_obj) refresh_sources(); else registerSelfEntry();
   return true;
 }
@@ -202,7 +298,12 @@ bool OtaManager::remove_source(MotaSource* src) {
 }
 
 void OtaManager::refresh_sources() {
+  uint8_t previous_digest[4];
+  setDigest(previous_digest);
+  const bool was_complete = _sources_complete;
+  bool complete = true;
   clearPendingEgress();
+  releaseColdBuffers();
   _n_serve = 0;
   if (_view0.valid) registerSelfEntry();
   for (uint8_t s = 0; s < _n_src_obj; s++) {
@@ -215,7 +316,7 @@ void OtaManager::refresh_sources() {
     for (uint8_t i = 0; i < cnt; i++) {
       if (_n_serve >= OTA_MAX_SERVE) break;
       MotaDesc d;
-      if (!src->describe(i, d)) continue;
+      if (!src->describe(i, d)) { complete = false; continue; }
       if (d.block_count == 0 || (uint64_t)d.block_count * 4 > OTA_PROOFGEN_SCRATCH) continue;
       // A legacy serial descriptor left the geometry byte zero. Inspect its fixed manifest once so it is
       // either proven servable before advertisement or excluded from the registry.
@@ -224,7 +325,7 @@ void OtaManager::refresh_sources() {
         MotaManifest parsed;
         if (!src->read(i, 8, mf, sizeof(mf)) || !mota_parse_manifest(mf, sizeof(mf), parsed) ||
             memcmp(parsed.merkle_root, d.mid, 4) != 0 || parsed.block_count != d.block_count ||
-            parsed.payload_size != d.payload_size) continue;
+            parsed.payload_size != d.payload_size) { complete = false; continue; }
         d.block_size_log2 = parsed.block_size_log2;
       }
       if (d.block_size_log2 >= 32 || (1UL << d.block_size_log2) > OTA_MAX_BLOCK) continue;
@@ -241,6 +342,15 @@ void OtaManager::refresh_sources() {
     }
   }
   _srcv.valid = false;                        // a loaded source view may now be stale; reloads on demand
+  _sources_complete = complete;
+  uint8_t digest[4];
+  setDigest(digest);
+  // Host compression/attachment can finish after the TempRadio boot burst.
+  // Keep one signal until the normal mesh loop can announce the ready set;
+  // unchanged rescans coalesce, and failed metadata never starts a burst.
+  if (!complete || !_n_serve) _source_announce_pending = false;
+  else if (!was_complete || memcmp(previous_digest, digest, 4) != 0)
+    _source_announce_pending = true;
 }
 
 bool OtaManager::sourceStats(const MotaSource* src, uint16_t& offered, uint16_t& advertised) const {
@@ -258,17 +368,21 @@ bool OtaManager::sourceStats(const MotaSource* src, uint16_t& offered, uint16_t&
 
 void OtaManager::clear_sources() {
   clearPendingEgress();
+  releaseColdBuffers();
   _n_src_obj = 0; _srcv.valid = false;
   memset(_src_list, 0, sizeof(_src_list));
   memset(_src_offered, 0, sizeof(_src_offered));
   memset(_src_advertised, 0, sizeof(_src_advertised));
   _n_serve = 0;
+  _sources_complete = true;
+  _source_announce_pending = false;
   if (_view0.valid) registerSelfEntry();
 }
 
 void OtaManager::clear_primary() {
   clearPendingEgress();
   _view0.valid = false;
+  releaseColdBuffers();
   if (_n_src_obj) refresh_sources();
   else _n_serve = 0;
 }
@@ -281,17 +395,19 @@ int OtaManager::serveEntryIndex(const uint8_t* mid) const {
 
 OtaManager::ServeView* OtaManager::resolve(const uint8_t* mid) {
   if (_view0.valid && memcmp(mid, _view0.m.merkle_root, 4) == 0) return &_view0;
-  if (_srcv.valid  && memcmp(mid, _srcv_mid, 4) == 0)             return &_srcv;
+  if (_srcv.valid  && memcmp(mid, _srcv_mid, 4) == 0) {
+    _source_buffer_used_at = _now_ms;
+    return &_srcv;
+  }
   int i = serveEntryIndex(mid);
   if (i < 0) return nullptr;
   if (_serve[i].is_self) return _view0.valid ? &_view0 : nullptr;
   return loadSource(_serve[i]) ? &_srcv : nullptr;
 }
 
-// Load an external mota into the on-demand _srcv: read its manifest-minus-leaves + leaves[] from the
-// source into RAM, parse, and wire a payload reader that streams blocks from the source on REQ. (The
-// payload itself is NOT held in RAM - only the small head and the leaves, bounded by the configured
-// proof-generation scratch size.)
+// Load an external source's fixed manifest and wire its payload reader. Legacy
+// builds also cache leaves here; bounded builds acquire proof metadata through
+// cooperative egress steps, without delaying request admission on a full table.
 bool OtaManager::loadSource(const ServeEntry& e) {
   const MotaDesc& d = e.desc;
   if (d.leaves_off < 8) return false;
@@ -299,21 +415,28 @@ bool OtaManager::loadSource(const ServeEntry& e) {
   uint16_t mfl = (uint16_t)(d.leaves_off - 8);
   if (mfl == 0 || mfl > sizeof(_src_manifest)) return false;
   if (d.block_count == 0 || (uint64_t)d.block_count * 4 > OTA_PROOFGEN_SCRATCH) return false;
-  uint8_t* src_leaves = ensureSourceLeaves();
-  uint8_t* scratch = ensureScratch();
-  if (!src_leaves || !scratch) return false;
   // Both images share these buffers. Even a failed read can overwrite part of
   // the old manifest/leaves, so its cached MID must stop resolving immediately.
   _srcv.valid = false;
+#if !OTA_BOUNDED_SOURCE_PROOFS
+  uint8_t* src_leaves = ensureSourceLeaves(d.block_count * 4u);
+  if (!src_leaves) return false;
+#endif
+  _source_buffer_used_at = _now_ms;
   bool ok = e.src->read(e.src_idx, 8, _src_manifest, mfl);
   if (!ok || !mota_parse_manifest(_src_manifest, mfl, _srcv.m)) return false;
   if (_srcv.m.block_size() == 0 || _srcv.m.block_size() > OTA_MAX_BLOCK) return false;
   if (memcmp(_srcv.m.merkle_root, d.mid, 4) != 0) return false;       // descriptor/bytes disagree
   if (_srcv.m.block_count != d.block_count) return false;
+  _srcv.m.manifest_start = _src_manifest;
+#if OTA_BOUNDED_SOURCE_PROOFS
+  _srcv.m.leaves = nullptr;
+  _src_leaves_off = d.leaves_off;
+#else
   ok = e.src->read(e.src_idx, d.leaves_off, src_leaves, d.block_count * 4);
   if (!ok) return false;
-  _srcv.m.manifest_start = _src_manifest;
   _srcv.m.leaves   = src_leaves;
+#endif
   _srcv.m.payload  = nullptr;
   _srcv.mfl = mfl;
   _srcv_rdctx.src = e.src; _srcv_rdctx.idx = e.src_idx;
@@ -322,7 +445,7 @@ bool OtaManager::loadSource(const ServeEntry& e) {
   _srcv.read_deflated = (d.source_caps & MOTA_SOURCE_CAP_DEFLATE_BLOCK)
       ? srcDeflateReadTramp : nullptr;
   _srcv.deflate_ctx = _srcv.read_deflated ? &_srcv_rdctx : nullptr;
-  _srcv.scratch = scratch; _srcv.scratch_sz = OTA_PROOFGEN_SCRATCH;
+  _srcv.scratch = nullptr; _srcv.scratch_sz = 0;
   memcpy(_srcv_mid, d.mid, 4);
   _srcv.valid = true;
   return true;
@@ -454,24 +577,21 @@ bool OtaManager::handleGetManifest(const uint8_t* m, uint16_t n) {
 // Serve the target's merkle leaves[] in fragments (for a motatool folder-capture warm-start). Only the
 // fragments set in want_mask are emitted, so a want_mask retry re-sends just the holes - never a full burst
 // (same anti-deadlock rationale as OTA_MANIFEST). This is the only leaf-diff piece that runs on every node.
-void OtaManager::handleGetLeaves(const uint8_t* m, uint16_t n) {
+bool OtaManager::handleGetLeaves(const uint8_t* m, uint16_t n) {
   GetLeavesMsg gl;
-  if (!decode_get_leaves(m, n, gl)) return;
+  if (!decode_get_leaves(m, n, gl) || gl.want_mask == 0) return false;
   ServeView* v = resolve(gl.manifest_id);
-  if (!v || !v->m.leaves) return;
-  uint32_t leaves_len = v->m.block_count * 4;
-  uint8_t ftotal = (uint8_t)((leaves_len + OTA_LEAVES_FRAG - 1) / OTA_LEAVES_FRAG); if (ftotal == 0) ftotal = 1;
-  for (uint8_t fi = 0; fi < ftotal; fi++) {
-    if (!(gl.want_mask & (1u << fi))) continue;      // fetcher didn't ask for this leaves fragment
-    uint32_t off = (uint32_t)fi * OTA_LEAVES_FRAG;
-    uint32_t fl = leaves_len - off; if (fl > OTA_LEAVES_FRAG) fl = OTA_LEAVES_FRAG;
-    LeavesMsg lm;
-    memcpy(lm.manifest_id, v->m.merkle_root, 4);
-    lm.frag_idx = fi; lm.frag_total = ftotal;
-    lm.bytes = v->m.leaves + off; lm.len = (uint16_t)fl;
-    uint8_t b[MAX_PACKET_PAYLOAD];
-    emit(b, encode_leaves(b, sizeof(b), lm), false);
-  }
+  if (!v || (!v->m.leaves
+#if OTA_BOUNDED_SOURCE_PROOFS
+             && v != &_srcv
+#endif
+            ) || v->m.block_count == 0 ||
+      v->m.block_count > OTA_DIFF_MAX_BLOCKS) return false;
+  const uint32_t total = (v->m.block_count * 4 + OTA_LEAVES_FRAG - 1) / OTA_LEAVES_FRAG;
+  if (total == 0 || total > OTA_LEAVES_MAXFRAG) return false;
+  const uint16_t valid_mask = total == 16 ? 0xFFFFu : (uint16_t)((1u << total) - 1u);
+  const uint16_t wanted = (uint16_t)(gl.want_mask & valid_mask);
+  return wanted && queueManifestJob(v->m.merkle_root, wanted, true);
 }
 
 // Smallest mask covering `nf` fragments: bit k set for k in [0, nf). Caps at 16 (matches each pipeline
@@ -513,10 +633,11 @@ bool OtaManager::queueServeJob(const uint8_t* mid, uint16_t block, uint16_t want
   return true;
 }
 
-bool OtaManager::queueManifestJob(const uint8_t* mid, uint16_t want_mask) {
+bool OtaManager::queueManifestJob(const uint8_t* mid, uint16_t want_mask, bool leaves) {
   for (uint8_t i = 0; i < _n_manifest_jobs; i++) {
     ManifestServeJob& job = _manifest_jobs[i];
-    if (memcmp(job.mid, mid, 4) != 0 || !(job.route == _request_route)) continue;
+    if (memcmp(job.mid, mid, 4) != 0 || !(job.route == _request_route) ||
+        job.leaves != leaves) continue;
     job.pending_mask |= (uint16_t)(want_mask & ~job.emitted_mask);
     return true;
   }
@@ -527,6 +648,7 @@ bool OtaManager::queueManifestJob(const uint8_t* mid, uint16_t want_mask) {
   job.pending_mask = want_mask;
   job.emitted_mask = 0;
   job.ready_at = _now_ms + manifestEgressGapMs();
+  job.leaves = leaves;
   return true;
 }
 
@@ -554,6 +676,7 @@ uint32_t OtaManager::proofEgressGapMs() const {
 }
 
 void OtaManager::clearPendingEgress() {
+  invalidateDirectTransport();
   _n_manifest_jobs = 0;
   _n_serve_jobs = 0;
   _serve_block_len = 0;
@@ -562,6 +685,10 @@ void OtaManager::clearPendingEgress() {
   _serve_wire_len = 0;
   _serve_wire_deflated = false;
   memset(_serve_wire_id, 0, sizeof(_serve_wire_id));
+  // Explicit cancellation also runs when the temporary OTA radio ends, when
+  // loop() is no longer called. Keep source descriptors advertised, but drop
+  // their reloadable working cache rather than pinning heap until next use.
+  releaseColdBuffers();
 }
 
 void OtaManager::popManifestJob() {
@@ -586,8 +713,18 @@ bool OtaManager::serviceManifestEgress(OtaReplyRouteValid route_valid, void* rou
     return true;
   }
 
-  const uint32_t mfl = v->mfl;
-  uint8_t ftotal = (uint8_t)((mfl + OTA_MF_FRAG - 1) / OTA_MF_FRAG);
+  const uint32_t mfl = job.leaves ? v->m.block_count * 4u : v->mfl;
+  const uint16_t fragment_size = job.leaves ? OTA_LEAVES_FRAG : OTA_MF_FRAG;
+  const uint32_t total = (mfl + fragment_size - 1u) / fragment_size;
+  if ((job.leaves && ((!v->m.leaves
+#if OTA_BOUNDED_SOURCE_PROOFS
+                       && v != &_srcv
+#endif
+                      ) || total > OTA_LEAVES_MAXFRAG)) || total > 16u) {
+    popManifestJob();
+    return true;
+  }
+  uint8_t ftotal = (uint8_t)total;
   if (ftotal == 0) ftotal = 1;
   const uint16_t valid_mask = frag_full_mask(ftotal);
   job.pending_mask &= valid_mask;
@@ -603,19 +740,41 @@ bool OtaManager::serviceManifestEgress(OtaReplyRouteValid route_valid, void* rou
     return true;
   }
 
-  const uint32_t off = (uint32_t)fragment * OTA_MF_FRAG;
+  const uint32_t off = (uint32_t)fragment * fragment_size;
   uint32_t len = mfl - off;
-  if (len > OTA_MF_FRAG) len = OTA_MF_FRAG;
-  ManifestMsg message;
-  memcpy(message.manifest_id, v->m.merkle_root, 4);
-  message.frag_idx = fragment;
-  message.frag_total = ftotal;
-  message.bytes = v->m.manifest_start + off;
-  message.len = (uint16_t)len;
+  if (len > fragment_size) len = fragment_size;
   uint8_t wire[MAX_PACKET_PAYLOAD];
-  const uint16_t wire_len = encode_manifest(wire, sizeof(wire), message);
+  uint16_t wire_len = 0;
+  if (job.leaves) {
+    LeavesMsg message;
+    memcpy(message.manifest_id, v->m.merkle_root, 4);
+    message.frag_idx = fragment; message.frag_total = ftotal;
+    message.bytes = v->m.leaves ? v->m.leaves + off : nullptr;
+#if OTA_BOUNDED_SOURCE_PROOFS
+    if (!message.bytes) {
+      BoundedSourceProof* workspace = ensureSourceProofs();
+      if (!workspace) { popManifestJob(); return true; }
+      _source_buffer_used_at = _now_ms;
+      const auto step = workspace->fragment(_srcv_rdctx.src, _srcv_rdctx.idx,
+          _src_leaves_off + off, (uint16_t)len, message.bytes);
+      if (step == BoundedSourceProof::Step::Pending) return true;
+      if (step == BoundedSourceProof::Step::Failed) { popManifestJob(); return true; }
+    }
+#endif
+    message.len = (uint16_t)len;
+    wire_len = encode_leaves(wire, sizeof(wire), message);
+  } else {
+    ManifestMsg message;
+    memcpy(message.manifest_id, v->m.merkle_root, 4);
+    message.frag_idx = fragment; message.frag_total = ftotal;
+    message.bytes = v->m.manifest_start + off; message.len = (uint16_t)len;
+    wire_len = encode_manifest(wire, sizeof(wire), message);
+  }
   if (emit(wire, wire_len, false, &job.route)) {
-    OTA_DBG("OTA: MANIFEST tx frag=%u/%u len=%u\n",
+#if OTA_BOUNDED_SOURCE_PROOFS
+    if (job.leaves && _source_proofs) _source_proofs->releaseFragment();
+#endif
+    OTA_DBG("OTA: %s tx frag=%u/%u len=%u\n", job.leaves ? "LEAVES" : "MANIFEST",
             (unsigned)fragment, (unsigned)ftotal, (unsigned)len);
     const uint16_t bit = (uint16_t)(1u << fragment);
     job.pending_mask &= (uint16_t)~bit;
@@ -652,33 +811,51 @@ bool OtaManager::loadActiveServeBlock() {
   if (bs == 0 || bs > OTA_MAX_BLOCK) return false;
   uint32_t off = (uint32_t)job.block * bs;
   uint32_t blen = (off + bs <= v->m.payload_size) ? bs : (v->m.payload_size - off);
-  if (v->read) {
-    if (!v->read(v->read_ctx, off, _serve_block, blen)) return false;
-  } else {
-    memcpy(_serve_block, v->m.payload + off, blen);
-  }
   _serve_block_len = (uint16_t)blen;
-  _serve_wire_block = _serve_block;
+  _serve_wire_block = nullptr;
   _serve_wire_len = _serve_block_len;
   _serve_wire_deflated = false;
 
   // A host-backed MotaSource can provide a pre-compressed block without putting an encoder in firmware.
-  // Other sources may opt into a caller-supplied encoder. Both write into the proof scratch, which is safe
-  // until every DATA fragment has left; proof generation reuses it only after that point.
-  if (job.wire_v2 && job.allow_deflate && v->scratch && v->scratch_sz >= blen) {
+  // Only device encoders need separate raw input and compressed output. Host
+  // output can use the existing outbound cache, which remains pinned until
+  // every DATA fragment has left. Streaming proofs need no output buffer.
+  if (job.wire_v2 && job.allow_deflate && !v->read_deflated && _deflate_encode && !v->scratch) {
+    v->scratch = ensureScratch();
+    v->scratch_sz = v->scratch ? OTA_MAX_BLOCK : 0;
+  }
+  _source_buffer_used_at = _now_ms;
+  // A host-precompressed representation is enough to serve DATA: proofs use
+  // authenticated leaves. Do not pull the same raw block over BLE/USB first.
+  if (job.wire_v2 && job.allow_deflate && v->read_deflated) {
     uint16_t encoded_len = 0;
-    bool encoded = false;
-    if (v->read_deflated) {
-      encoded = v->read_deflated(v->deflate_ctx, job.block, v->scratch,
-                                  (uint16_t)blen, &encoded_len);
-    } else if (_deflate_encode) {
-      encoded = _deflate_encode(_deflate_encode_ctx, _serve_block, (uint16_t)blen,
-                                v->scratch, (uint16_t)blen, &encoded_len);
-    }
+    const bool encoded = v->read_deflated(v->deflate_ctx, job.block, _serve_block,
+                                         (uint16_t)blen, &encoded_len);
     if (encoded && encoded_len > 0 && encoded_len < blen) {
-      _serve_wire_block = v->scratch;
+      _serve_wire_block = _serve_block;
       _serve_wire_len = encoded_len;
       _serve_wire_deflated = true;
+    }
+  }
+  if (!_serve_wire_block) {
+    if (v->read) {
+      if (!v->read(v->read_ctx, off, _serve_block, blen)) return false;
+    } else {
+      memcpy(_serve_block, v->m.payload + off, blen);
+    }
+    _serve_wire_block = _serve_block;
+    // Device encoders need raw input; host codec failures retain the existing
+    // raw fallback instead of allocating another encoder workspace.
+    if (job.wire_v2 && job.allow_deflate && !v->read_deflated && _deflate_encode &&
+        v->scratch && v->scratch_sz >= blen) {
+      uint16_t encoded_len = 0;
+      if (_deflate_encode(_deflate_encode_ctx, _serve_block, (uint16_t)blen,
+                          v->scratch, (uint16_t)blen, &encoded_len) &&
+          encoded_len > 0 && encoded_len < blen) {
+        _serve_wire_block = v->scratch;
+        _serve_wire_len = encoded_len;
+        _serve_wire_deflated = true;
+      }
     }
   }
   mh4(_serve_wire_id, _serve_wire_block, _serve_wire_len);
@@ -739,15 +916,16 @@ bool OtaManager::handleReq(const uint8_t* m, uint16_t n) {
     const uint32_t off = idx * block_size;
     if (off + blen > v->m.payload_size) blen = v->m.payload_size - off;
     const bool wire_v2 = ota_req_is_v2(rq.items[i].want_mask);
+    if (_request_route.direct && !wire_v2) continue;
     const bool allow_deflate = wire_v2 &&
         (rq.items[i].want_mask & OTA_REQ_V2_ALLOW_DEFLATE) != 0;
     const bool extended_length = wire_v2 &&
         ota_req_v2_extended_length(rq.items[i].want_mask);
     const bool block_requires_extended = v->m.block_size() > OTA_DATA_V2_LEGACY_MAX_ENCODED;
     if (wire_v2 && extended_length != block_requires_extended) continue;
-    const uint16_t valid_mask = frag_full_mask((blen +
-        (wire_v2 ? OTA_FRAG_DATA_V2 : OTA_FRAG_DATA) - 1) /
-        (wire_v2 ? OTA_FRAG_DATA_V2 : OTA_FRAG_DATA));
+    const uint16_t fragment_data = _request_route.direct ? OTA_DIRECT_FRAG_DATA :
+        (wire_v2 ? OTA_FRAG_DATA_V2 : OTA_FRAG_DATA);
+    const uint16_t valid_mask = frag_full_mask((blen + fragment_data - 1) / fragment_data);
     const uint16_t requested = wire_v2
         ? ota_req_v2_fragments(rq.items[i].want_mask) : rq.items[i].want_mask;
     const uint16_t want = (uint16_t)(requested & valid_mask);
@@ -765,11 +943,14 @@ bool OtaManager::handleReqProof(const uint8_t* m, uint16_t n) {
   if (!decode_req_proof(m, n, rp)) return false;
   ServeView* v = resolve(rp.manifest_id);
   if (!v || rp.block_idx >= v->m.block_count) return false;
-  if ((uint64_t)v->m.block_count * 4 > v->scratch_sz) return false;
   return queueServeJob(v->m.merkle_root, rp.block_idx, 0); // proof-only, or merge with queued DATA
 }
 
 void OtaManager::serviceEgress(OtaReplyRouteValid route_valid, void* route_ctx) {
+  if (_fstate == FETCHING && _fetch_route.profile < 2 && route_valid &&
+      !route_valid(route_ctx, _fetch_route)) {
+    failFetch(FETCH_ERROR_RADIO_SESSION);
+  }
   // Metadata comes first so an older receiver gets every manifest fragment before its retry horizon. The
   // send callback supplies radio-queue backpressure, and a rejected fragment remains in this descriptor.
   if (serviceManifestEgress(route_valid, route_ctx)) return;
@@ -796,23 +977,38 @@ void OtaManager::serviceEgress(OtaReplyRouteValid route_valid, void* route_ctx) 
     return;
   }
   ServeView* v = resolve(job.mid);
-  if (!v || job.block >= v->m.block_count
-      || (uint64_t)v->m.block_count * 4 > v->scratch_sz) {
+  if (!v || job.block >= v->m.block_count) {
     popServeJob();
     return;
   }
 
   if (job.pending_mask != 0) {
+    const bool was_loaded = _serve_block_loaded;
     if (!_serve_block_loaded && !loadActiveServeBlock()) {
       popServeJob();
       return;
     }
-    const uint16_t fragment_data = job.wire_v2 ? OTA_FRAG_DATA_V2 : OTA_FRAG_DATA;
+#if OTA_BOUNDED_SOURCE_PROOFS
+    // Warm proof metadata while DATA waits behind radio backpressure. Never
+    // combine this new read with the existing payload load in the same pass.
+    if (was_loaded && v == &_srcv) {
+      BoundedSourceProof* workspace = ensureSourceProofs();
+      if (!workspace || !workspace->bind(_srcv_rdctx.src, _srcv_rdctx.idx,
+          _src_leaves_off, v->m.block_count, v->m.merkle_root) ||
+          workspace->prepare() == BoundedSourceProof::Step::Failed) {
+        popServeJob(); return;
+      }
+    }
+#else
+    (void)was_loaded;
+#endif
+    const uint16_t fragment_data = job.route.direct ? OTA_DIRECT_FRAG_DATA :
+        (job.wire_v2 ? OTA_FRAG_DATA_V2 : OTA_FRAG_DATA);
     const uint16_t valid_mask = frag_full_mask(
         (_serve_wire_len + fragment_data - 1u) / fragment_data);
     job.pending_mask &= valid_mask;
     if (job.pending_mask == 0) {
-      job.proof_ready_at = armedDeadline(_now_ms, proofEgressGapMs());
+      job.proof_ready_at = job.route.direct ? 0 : armedDeadline(_now_ms, proofEgressGapMs());
       return;
     }
     uint8_t fragment = 0;
@@ -827,7 +1023,7 @@ void OtaManager::serviceEgress(OtaReplyRouteValid route_valid, void* route_ctx) 
     DataMsg dm;
     memcpy(dm.manifest_id, job.mid, 4);
     dm.block_idx = job.block;
-    uint8_t v2_data[OTA_DATA_V2_STREAM_ID_BYTES + OTA_FRAG_DATA_V2];
+    uint8_t v2_data[OTA_DATA_V2_STREAM_ID_BYTES + OTA_DIRECT_FRAG_DATA];
     if (job.wire_v2) {
       const bool packed = job.extended_length
           ? ota_data_v2_pack_extended(fragment, _serve_wire_len, dm.frag_off)
@@ -845,7 +1041,7 @@ void OtaManager::serviceEgress(OtaReplyRouteValid route_valid, void* route_ctx) 
       dm.data = _serve_block + frag_off;
       dm.data_len = (uint16_t)frag_len;
     }
-    uint8_t b[MAX_PACKET_PAYLOAD];
+    uint8_t b[OTA_DIRECT_MESSAGE_MAX];
     if (emit(b, encode_data(b, sizeof(b), dm), false, &job.route)) {
       const uint16_t bit = (uint16_t)(1u << fragment);
       job.pending_mask &= (uint16_t)~bit;
@@ -855,7 +1051,7 @@ void OtaManager::serviceEgress(OtaReplyRouteValid route_valid, void* route_ctx) 
         // proactive proof into the radio queue at the same instant: the two half-duplex transmissions would
         // collide and force the receiver onto its multi-second retry tick. Include every response that the
         // adapter can already have admitted ahead of this proof, then retain a bounded fast-link floor.
-        job.proof_ready_at = armedDeadline(_now_ms, proofEgressGapMs());
+        job.proof_ready_at = job.route.direct ? 0 : armedDeadline(_now_ms, proofEgressGapMs());
       }
     }
     return;
@@ -868,7 +1064,21 @@ void OtaManager::serviceEgress(OtaReplyRouteValid route_valid, void* route_ctx) 
       && (int32_t)(_now_ms - job.proof_ready_at) < 0) return;
 
   uint8_t proof[32 * 4];
-  uint8_t np = merkle_gen_proof(v->m.leaves, v->m.block_count, job.block, v->scratch, proof);
+  uint8_t np = 0;
+#if OTA_BOUNDED_SOURCE_PROOFS
+  if (v == &_srcv) {
+    BoundedSourceProof* workspace = ensureSourceProofs();
+    if (!workspace || !workspace->bind(_srcv_rdctx.src, _srcv_rdctx.idx,
+        _src_leaves_off, v->m.block_count, v->m.merkle_root)) { popServeJob(); return; }
+    _source_buffer_used_at = _now_ms;
+    const auto step = workspace->proof(job.block, proof, np);
+    if (step == BoundedSourceProof::Step::Pending) return;
+    if (step == BoundedSourceProof::Step::Failed) { popServeJob(); return; }
+  } else
+#endif
+  {
+    np = merkle_gen_proof(v->m.leaves, v->m.block_count, job.block, v->scratch, proof);
+  }
   ProofMsg pm;
   memcpy(pm.manifest_id, job.mid, 4);
   pm.block_idx = job.block;
@@ -913,6 +1123,7 @@ void OtaManager::invalidateCatalogSeeder(const uint8_t* seeder) {
     }
     i++;
   }
+  releaseSmallCatalog();
 }
 
 // A tiny per-node BEACON: record the source; ask it for its catalog (OTA_QUERY) only when we're
@@ -1009,6 +1220,7 @@ bool OtaManager::sendQuery(const uint8_t* seeder, const uint8_t* digest, uint32_
 // User-initiated browse (`ota neighbors`): immediately ask every incomplete/changed source. A complete
 // digest-tagged catalog is already current, so paging through a 255-row list must not re-flood it each time.
 void OtaManager::queryAll() {
+  _catalog_browse_requested = true;
   for (uint8_t i = 0; i < _n_src; i++) {
     Source& s = _sources[i];
     if (s.have_catalog) continue;
@@ -1078,6 +1290,7 @@ void OtaManager::handleHave(const uint8_t* m, uint16_t n) {
     const uint8_t* mid = row;
     uint32_t target = rd_u32le(row + 4), fwver = rd_u32le(row + 8);
     uint8_t codec = row[12], flags = row[13];
+    if (flags & ~MFLAG_KNOWN) continue;
     uint32_t have_count = rd_u16le(row + 14);   // this source's progress
     CatRow* catalog = catalogData();
     int slot = -1, lru = 0;                                           // upsert into the catalog (dedup by mid)
@@ -1088,7 +1301,23 @@ void OtaManager::handleHave(const uint8_t* m, uint16_t n) {
     }
     if (slot < 0) {
       if (_n_cat >= catalogCapacity() && expandCatalog()) catalog = catalogData();
-      slot = (_n_cat < catalogCapacity()) ? _n_cat++ : lru;
+      if (_n_cat < catalogCapacity()) slot = _n_cat++;
+      else {
+        slot = lru;
+        // A page is no longer complete when an LRU replacement loses any of
+        // its rows. An eventual explicit browse must request those pages too,
+        // instead of expanding a cache whose old holes remain suppressed.
+        const CatRow& evicted = catalog[slot];
+        for (uint8_t source = 0; source < _n_src; ++source) {
+          for (uint8_t seeder = 0; seeder < evicted.n_seeders; ++seeder) {
+            if (memcmp(_sources[source].seeder, evicted.seeders[seeder], 4) == 0) {
+              _sources[source].have_mask = 0;
+              _sources[source].have_catalog = false;
+              break;
+            }
+          }
+        }
+      }
       catalog[slot] = CatRow{};
       memcpy(catalog[slot].mid, mid, 4);
       memcpy(catalog[slot].seeders[0], hv.seeder_id, 4);
@@ -1146,6 +1375,8 @@ bool OtaManager::wantRow(const uint8_t* mid, uint32_t target, uint32_t fw_versio
     return memcmp(mid, _desired_mid, 4) == 0 && (_desired_target == 0 || target == _desired_target);
   if (_desired_target) return target == _desired_target;                          // cross-target want (role switch)
   if (_autofetch == AUTOFETCH_OFF) return false;                                  // discover only
+  if (_auto_failure_delay &&
+      (uint32_t)(_now_ms - _auto_failure_at) < _auto_failure_delay) return false;
   const uint32_t auto_target = _migration_target ? _migration_target : _target;
   if (target != auto_target) return false;                                        // own target or one-way successor
   if (_autofetch == AUTOFETCH_SIGNED && !(flags & MFLAG_SIGNED)) return false;    // signed-only policy
@@ -1160,6 +1391,7 @@ void OtaManager::clearReassemblySlot(uint8_t slot) {
   _reasm[slot].mask = 0;
   _reasm[slot].need = 0;
   _reasm[slot].awaiting_proof = false;
+  _reasm[slot].proof_failed = false;
   _reasm[slot].proof_request_at = 0;
   _reasm[slot].encoded_len = 0;
   _reasm[slot].wire_v2 = false;
@@ -1188,6 +1420,7 @@ bool OtaManager::anyWireDataReceived() const {
 
 void OtaManager::downgradeWireToLegacy() {
   if (!_wire_v2_session) return;
+  if (_direct_session) downgradeDirectTransport();
   _wire_v2_session = false;
   _wire_v2_confirmed = false;
   _wire_allow_deflate = false;
@@ -1206,6 +1439,26 @@ void OtaManager::downgradeWireToLegacy() {
     slot.wire_stalls = 0;
   }
   OTA_DBG("OTA: source uses legacy 160-byte DATA geometry\n");
+}
+
+void OtaManager::downgradeDirectTransport() {
+  if (!_direct_session) return;
+  invalidateDirectTransport();
+  _direct_session = false;
+  _direct_confirmed = false;
+  _fetch_route.direct = false; // keep the original physical session binding
+  _wire_v2_confirmed = false;
+  _wire_empty_stalls = 0;
+  for (uint8_t i = 0; i < OTA_FETCH_PIPELINE; ++i) {
+    const uint32_t block = _reasm[i].block;
+    clearReassemblySlot(i);
+    if (block == NO_BLOCK) continue;
+    _reasm[i].block = block;
+    const uint16_t fragment_data = fetchFragmentData();
+    _reasm[i].need = frag_full_mask((blockLen(block) + fragment_data - 1u) / fragment_data);
+  }
+  _flight_dirty = true;
+  OTA_DBG("OTA: direct source unavailable; retain blocks and use routed DATA geometry\n");
 }
 
 int OtaManager::findReassemblySlot(uint32_t block) const {
@@ -1259,7 +1512,7 @@ uint32_t OtaManager::fetchRetryTimeoutMs() const {
         : (uint32_t)count_mask_bits((uint16_t)(slot.need & ~slot.mask)) + 1u;
   }
   if (active == 0) {
-    const uint32_t fragment_data = _wire_v2_session ? OTA_FRAG_DATA_V2 : OTA_FRAG_DATA;
+    const uint32_t fragment_data = fetchFragmentData();
     const uint32_t fragments = (_fbs + fragment_data - 1) / fragment_data;
     packets += (fragments + 1) * _pipeline_width;
   }
@@ -1343,8 +1596,18 @@ void OtaManager::clearFetchIntent() {
 }
 
 void OtaManager::failFetch(FetchError error) {
+  invalidateDirectTransport();
   if (error == FETCH_ERROR_STORAGE && _fetch && _fetch->canReconnect()
       && pauseFetchForDisconnect()) return;
+  if (!_have_desired_mid && _desired_target == 0 && !_archive_fetch) {
+    // Global as well as per-image: changing a forged MID must not bypass the
+    // cooldown. Explicit operator pulls retain their intentional override.
+    _auto_failure_at = _now_ms;
+    if (_auto_failure_delay == 0) _auto_failure_delay = OTA_AUTOFETCH_FAILURE_BACKOFF_MS;
+    else if (_auto_failure_delay > OTA_AUTOFETCH_FAILURE_MAX_BACKOFF_MS / 2u)
+      _auto_failure_delay = OTA_AUTOFETCH_FAILURE_MAX_BACKOFF_MS;
+    else _auto_failure_delay *= 2u;
+  }
   _fetch_error = error;
   _fstate = FAILED;
   _paused_from = IDLE;
@@ -1356,6 +1619,8 @@ void OtaManager::failFetch(FetchError error) {
 }
 
 void OtaManager::completeFetch() {
+  invalidateDirectTransport();
+  _auto_failure_delay = 0;
   _fetch_error = FETCH_ERROR_NONE;
   _fstate = COMPLETE;
   _paused_from = IDLE;
@@ -1405,14 +1670,27 @@ OtaManager::PullResult OtaManager::startFetch(const uint8_t* mid, uint32_t targe
   _wire_v2_confirmed = false;
   _wire_allow_deflate = _wire_v2_session && _deflate_decode != nullptr;
   _wire_empty_stalls = 0;
+  _direct_session = false; _direct_confirmed = false; _fetch_route = {};
   _fexpected_target = target;
   _validate = validate;                          // motatool folder-capture warm-start (seed leaf-diff)
   // A validate pull is a FRESH seed capture, not a resume: the store already holds the seed's payload (not a
   // real partial), so never adopt it via resumeStaged - always re-begin and run the manifest->leaves->diff.
-  if (!validate && resumeStaged(mid)) return PULL_RESUMED; // adopt a partial container left in the store
+  const bool automatic = !_have_desired_mid && _desired_target == 0 && !_archive_fetch;
   memcpy(_fid, mid, 4);
   _have = 0; _fbc = 0; _ftotal = 0; _fflags = 0;
   _observed_path_transmissions = 0;              // learn the actual source/relay path from this fetch's replies
+  if (!validate) {
+    if (resumeStagedFor(mid, automatic)) return PULL_RESUMED;
+    if (_fetch_error == FETCH_ERROR_STORAGE) {
+      // A failed host read cannot authorize BEGIN to erase a valid partial.
+      // IDLE records that adoption itself must be retried on reconnect; no
+      // fresh-container initialization has been authorized yet.
+      _fstate = PAUSED;
+      _paused_from = IDLE;
+      clearReassembly();
+      return PULL_STARTED;
+    }
+  }
   _fstate = WANT_MANIFEST;
   _mf_total = 0; _mf_mask = 0; _mf_len = 0; _mf_retries = 0; _loop_last_mfmask = 0;   // fresh manifest reassembly
   memset(_mf_buf, 0, sizeof(_mf_buf));
@@ -1429,6 +1707,7 @@ bool OtaManager::resumeStagedExplicit(const uint8_t* want_mid, uint32_t expected
   _wire_v2_confirmed = false;
   _wire_allow_deflate = _wire_v2_session && _deflate_decode != nullptr;
   _wire_empty_stalls = 0;
+  _direct_session = false; _direct_confirmed = false; _fetch_route = {};
   _validate = false;
   _archive_fetch = false;
   _desired_target = expected_target;
@@ -1442,6 +1721,7 @@ bool OtaManager::resumeStagedExplicit(const uint8_t* want_mid, uint32_t expected
 
 bool OtaManager::pauseFetchForDisconnect() {
   if (!fetchActive()) return false;
+  invalidateDirectTransport();
   if (_fstate != PAUSED) _paused_from = _fstate;
   _fetch_error = FETCH_ERROR_STORAGE;
   _fstate = PAUSED;
@@ -1451,7 +1731,14 @@ bool OtaManager::pauseFetchForDisconnect() {
 
 bool OtaManager::resumeFetchAfterReconnect() {
   if (_fstate != PAUSED || !_fetch) return false;
-  if (_paused_from == WANT_MANIFEST || _paused_from == WANT_LEAVES) {
+  if (_paused_from == IDLE) {
+    // The first resume probe lost its link before it could establish whether
+    // staging was usable. Retry it before allowing a fresh initialization.
+    uint8_t mid[4]; memcpy(mid, _fid, sizeof(mid));
+    _fstate = IDLE;
+    PullResult result = startFetch(mid, _fexpected_target, _validate);
+    if ((result != PULL_STARTED && result != PULL_RESUMED) || _fstate == PAUSED) return false;
+  } else if (_paused_from == WANT_MANIFEST || _paused_from == WANT_LEAVES) {
     // begin/header/manifest/trailer may only have partly reached the host.
     // Re-request the manifest and run the full initialization transaction.
     // Leaf-diff also restarts initialization: the reconnected host may have
@@ -1466,7 +1753,8 @@ bool OtaManager::resumeFetchAfterReconnect() {
   } else {
     // Reopening is bound to the original MID/target and verifies payload bytes;
     // a replacement host file must not silently become the selected capture.
-    if (!resumeStaged(_fid)) return false;
+    const bool automatic = !_have_desired_mid && _desired_target == 0 && !_archive_fetch;
+    if (!resumeStagedFor(_fid, automatic)) return false;
   }
   _paused_from = IDLE;
   _fetch_error = FETCH_ERROR_NONE;
@@ -1521,7 +1809,9 @@ void OtaManager::handleManifest(const uint8_t* m, uint16_t n) {
       !ota_trusted_auto_version_allows(_running_fw_version, parsed.fw_version)) {
     failFetch(FETCH_ERROR_VERSION); return;
   }
-  if (automatic_fetch && _autofetch == AUTOFETCH_SIGNED && !parsed.is_signed()) {
+  if (automatic_fetch && _autofetch == AUTOFETCH_SIGNED &&
+      (!parsed.is_signed() || !_admit_manifest ||
+       !_admit_manifest(_admit_manifest_ctx, parsed))) {
     failFetch(FETCH_ERROR_MANIFEST); return;
   }
   if (parsed.hash_algo != HASH_ALGO_SHA256) { failFetch(FETCH_ERROR_HASH_ALGO); return; }
@@ -1562,6 +1852,9 @@ void OtaManager::handleManifest(const uint8_t* m, uint16_t n) {
   uint8_t hdr[8];
   memcpy(hdr, MOTA_MAGIC, 4);
   wr_u32le(hdr + 4, total);
+  // Approval is local authorization, not part of the signed peer manifest.
+  // A sender must never be able to arm an install by supplying these bytes.
+  memcpy(_mf_buf + MOTA_SIGNED_LEN + 64u, APPROVAL_NOT, sizeof(APPROVAL_NOT));
   if (!_fetch->write(0, hdr, 8) ||
       !_fetch->write(8, mf, mfl) ||
       !_fetch->write(total - 5, MOTA_TRAILER, 5)) { failFetch(FETCH_ERROR_STORAGE); return; }
@@ -1570,6 +1863,17 @@ void OtaManager::handleManifest(const uint8_t* m, uint16_t n) {
   _fpoff = payload_off; _floff = leaves_off; _fpsize = payload_size; _fbc = bc; _fbs = bs;
   _ftotal = total; _have = 0;
   clearReassembly();                             // fresh transfer: drop any prior per-block state
+  // The successful legacy manifest exchange proves a local source exists on
+  // this exact radio session. A new zero-hop request probes its direct codec;
+  // old sources drop the reserved wire version and receive a normal retry.
+  _direct_session = _direct_transport_enabled && _wire_v2_session &&
+      _max_hops == 0 && _observed_path_transmissions == 1 &&
+      _request_route.profile < 2 && !_request_route.direct;
+  _direct_confirmed = false;
+  if (_direct_session) {
+    _fetch_route = _request_route;
+    _fetch_route.direct = true;
+  }
   // Warm-start (folder-capture): if requested and the image is small enough for the fixed leaves bitmap,
   // bulk-fetch the target leaves and diff the seed already staged in the store; else just transfer normally.
   if (_validate && beginLeafDiff()) {
@@ -1666,23 +1970,34 @@ void OtaManager::diffStep() {
 }
 
 bool OtaManager::resumeStaged(const uint8_t* want_mid) {
+  return resumeStagedFor(want_mid, want_mid == nullptr);
+}
+
+bool OtaManager::resumeStagedFor(const uint8_t* want_mid, bool automatic_resume) {
   if (!_fetch || _fstate == FETCHING || _fstate == WANT_MANIFEST
       || _fstate == WANT_LEAVES || _fstate == VERIFYING_STAGED) {
     return false;
   }
-  const bool automatic_resume = want_mid == nullptr;
   const uint32_t expected_target = automatic_resume
       ? (_migration_target ? _migration_target : _target)
       : _fexpected_target;
-  if (!_fetch->reopenFor(want_mid, expected_target)) return false;
+  auto readFailure = [&]() {
+    if (_fetch->canReconnect()) _fetch_error = FETCH_ERROR_STORAGE;
+    return false;
+  };
+  if (!_fetch->reopenFor(want_mid, expected_target)) {
+    return _fetch->reopenHadIoError() ? readFailure() : false;
+  }
   uint32_t total = _fetch->staged_size();
   uint8_t hdr[8];
-  if (total < 8u + MOTA_MFL + 5u || !_fetch->read(0, hdr, sizeof(hdr))
-      || memcmp(hdr, MOTA_MAGIC, 4) != 0 || rd_u32le(hdr + 4) != total) return false;
+  if (total < 8u + MOTA_MFL + 5u) return false;
+  if (!_fetch->read(0, hdr, sizeof(hdr))) return readFailure();
+  if (memcmp(hdr, MOTA_MAGIC, 4) != 0 || rd_u32le(hdr + 4) != total) return false;
   // read + parse the stored manifest (everything before leaves[]) to recompute the geometry
   uint8_t mbuf[MOTA_MFL];
   MotaManifest m;
-  if (!_fetch->read(8, mbuf, sizeof(mbuf)) || !mota_parse_manifest(mbuf, sizeof(mbuf), m)) return false;
+  if (!_fetch->read(8, mbuf, sizeof(mbuf))) return readFailure();
+  if (!mota_parse_manifest(mbuf, sizeof(mbuf), m)) return false;
   if (want_mid && memcmp(m.merkle_root, want_mid, 4) != 0) return false;   // a different fw is staged
   // A boot-time resume is an automatic fetch decision and therefore belongs
   // only to this node. An explicit pull retains target=0 as an intentional
@@ -1690,7 +2005,9 @@ bool OtaManager::resumeStaged(const uint8_t* want_mid) {
   if (expected_target != 0 && m.target_id != expected_target) return false;
   if (automatic_resume) {
     if (_autofetch == AUTOFETCH_OFF) return false;
-    if (_autofetch == AUTOFETCH_SIGNED && !m.is_signed()) return false;
+    if (_autofetch == AUTOFETCH_SIGNED &&
+        (!m.is_signed() || !_admit_manifest ||
+         !_admit_manifest(_admit_manifest_ctx, m))) return false;
     if (_enforce_auto_version &&
         !ota_trusted_auto_version_allows(_running_fw_version, m.fw_version)) return false;
   }
@@ -1709,13 +2026,14 @@ bool OtaManager::resumeStaged(const uint8_t* want_mid) {
   uint32_t payload_off = leaves_off + bc * 4;
   if ((uint64_t)payload_off + m.payload_size + 5 != total) return false;   // geometry must match the header
   uint8_t trailer[5];
-  if (!_fetch->read(total - sizeof(trailer), trailer, sizeof(trailer))
-      || memcmp(trailer, MOTA_TRAILER, sizeof(trailer)) != 0) return false;
+  if (!_fetch->read(total - sizeof(trailer), trailer, sizeof(trailer))) return readFailure();
+  if (memcmp(trailer, MOTA_TRAILER, sizeof(trailer)) != 0) return false;
 
   _wire_v2_session = _wire_v2_enabled;
   _wire_v2_confirmed = false;
   _wire_allow_deflate = _wire_v2_session && _deflate_decode != nullptr;
   _wire_empty_stalls = 0;
+  _direct_session = false; _direct_confirmed = false; _fetch_route = {};
   memcpy(_fid, m.merkle_root, 4);
   memcpy(_froot, m.merkle_root, 4);
   _fflags = m.flags;
@@ -1837,6 +2155,11 @@ bool OtaManager::handleData(const uint8_t* m, uint16_t n) {
   DataMsg dm;
   if (!decode_data(m, n, dm) || !_fetch) return false;
   if (_fstate != FETCHING || memcmp(dm.manifest_id, _fid, 4) != 0) return false;
+  if (_request_route.direct && (!_direct_session ||
+      !(_request_route == _fetch_route))) return false;
+  if (!_request_route.direct && _direct_session &&
+      (_direct_confirmed || _request_route.profile != _fetch_route.profile ||
+       _request_route.generation != _fetch_route.generation)) return false;
   if (dm.block_idx >= _fbc) return false;
   bool present;
   if (!readBlockPresent(dm.block_idx, present)) {
@@ -1850,6 +2173,7 @@ bool OtaManager::handleData(const uint8_t* m, uint16_t n) {
   uint32_t blen = blockLen(dm.block_idx);
 
   if ((dm.frag_off & OTA_DATA_V2_MARK) == 0) {
+    if (_request_route.direct) return false;                // direct wire is explicitly v2-only
     if (dm.frag_off % OTA_FRAG_DATA != 0) return false;       // canonical legacy-aligned slices only
     if ((uint32_t)dm.frag_off + dm.data_len > blen) return false;
     uint32_t expected_len = blen - dm.frag_off;
@@ -1857,6 +2181,7 @@ bool OtaManager::handleData(const uint8_t* m, uint16_t n) {
     if (dm.data_len != expected_len) return false;            // do not mark a short slice as complete
     uint32_t kf = dm.frag_off / OTA_FRAG_DATA;
     if (kf >= 16) return false;
+    if (_direct_session) downgradeDirectTransport();       // canonical old response, no geometry mixing
     // A deployed source ignores the v2 request bits, masks them against its seven-fragment geometry, and
     // responds here. Only a fully canonical legacy slice may select that profile; malformed matching-MID
     // traffic must not force a session-wide downgrade. Never mix it with already accepted v2 bytes.
@@ -1881,11 +2206,13 @@ bool OtaManager::handleData(const uint8_t* m, uint16_t n) {
     if (!unpacked) return false;
     if (encoded_len > blen || (deflated ? encoded_len >= blen : encoded_len != blen)) return false;
     const uint16_t fragment_len = (uint16_t)(dm.data_len - OTA_DATA_V2_STREAM_ID_BYTES);
-    const uint32_t fragment_off = (uint32_t)fragment * OTA_FRAG_DATA_V2;
+    const uint16_t fragment_data = _request_route.direct ? OTA_DIRECT_FRAG_DATA : OTA_FRAG_DATA_V2;
+    const uint32_t fragment_off = (uint32_t)fragment * fragment_data;
     if (fragment_off >= encoded_len || fragment_off + fragment_len > encoded_len) return false;
     uint32_t expected_len = encoded_len - fragment_off;
-    if (expected_len > OTA_FRAG_DATA_V2) expected_len = OTA_FRAG_DATA_V2;
+    if (expected_len > fragment_data) expected_len = fragment_data;
     if (fragment_len != expected_len) return false;
+    if (_direct_session && !_request_route.direct) downgradeDirectTransport();
     _wire_v2_confirmed = true;
 
     const uint8_t* stream_id = dm.data;
@@ -1895,7 +2222,7 @@ bool OtaManager::handleData(const uint8_t* m, uint16_t n) {
       slot.deflated = deflated;
       memcpy(slot.stream_id, stream_id, sizeof(slot.stream_id));
       slot.mask = 0;
-      slot.need = frag_full_mask((encoded_len + OTA_FRAG_DATA_V2 - 1) / OTA_FRAG_DATA_V2);
+      slot.need = frag_full_mask((encoded_len + fragment_data - 1) / fragment_data);
     } else if (!slot.wire_v2 || slot.encoded_len != encoded_len || slot.deflated != deflated ||
                memcmp(slot.stream_id, stream_id, sizeof(slot.stream_id)) != 0) {
       return false;                                          // another seeder's representation; never mix
@@ -1903,6 +2230,7 @@ bool OtaManager::handleData(const uint8_t* m, uint16_t n) {
     _wire_empty_stalls = 0;                                  // a valid v2 source is still serving this flight
     const uint16_t bit = (uint16_t)(1u << fragment);
     if (!(slot.need & bit)) return false;
+    if (_request_route.direct) _direct_confirmed = true;
     if (slot.mask & bit) return true;
     memcpy(slot.buf + fragment_off, dm.data + OTA_DATA_V2_STREAM_ID_BYTES, fragment_len);
     slot.mask |= bit;
@@ -1936,7 +2264,8 @@ bool OtaManager::handleData(const uint8_t* m, uint16_t n) {
       if (!decoded || decoded_len != blen) {
         _wire_allow_deflate = false;                         // retry this/future blocks as raw v2
         slot.mask = 0;
-        slot.need = frag_full_mask((blen + OTA_FRAG_DATA_V2 - 1) / OTA_FRAG_DATA_V2);
+        const uint16_t fragment_data = fetchFragmentData();
+        slot.need = frag_full_mask((blen + fragment_data - 1) / fragment_data);
         slot.encoded_len = 0;
         slot.wire_v2 = false;
         slot.deflated = false;
@@ -1959,6 +2288,8 @@ bool OtaManager::handleProof(const uint8_t* m, uint16_t n) {
   ProofMsg pm;
   if (!decode_proof(m, n, pm) || !_fetch) return false;
   if (_fstate != FETCHING || memcmp(pm.manifest_id, _fid, 4) != 0) return false;
+  if (_request_route.direct != _direct_session ||
+      (_request_route.direct && !(_request_route == _fetch_route))) return false;
   if (pm.block_idx >= _fbc) return false;
   int slot_index = findReassemblySlot(pm.block_idx);
   if (slot_index < 0 || !_reasm[slot_index].awaiting_proof) {
@@ -1972,13 +2303,14 @@ bool OtaManager::handleProof(const uint8_t* m, uint16_t n) {
   ReassemblySlot& slot = _reasm[slot_index];
   uint32_t block = slot.block;
   uint32_t blen = blockLen(block);
-  noteFetchActivity();
   if (!merkle_verify(slot.buf, blen, block, pm.proof, pm.n_proof, _froot, _fbc)) {
-    notePipelineStall();
-    clearReassemblySlot((uint8_t)slot_index);                   // bad -> drop and re-fetch only this block
-    if (activePipelineSlots() == 0) { finishFlight(); requestMissing(); }
+    // A forged proof must not discard valid in-flight DATA or cause an
+    // immediate request burst. Accept a later valid proof; repair a genuinely
+    // damaged block only at the ordinary airtime-aware recovery deadline.
+    slot.proof_failed = true;
     return true;
   }
+  noteFetchActivity();
   // Commit payload before its present marker. Preserve the selected store and
   // checkpoint on failure: reconnectable stores pause, while local storage
   // reports a retryable failure instead of waiting for a nonexistent link.
@@ -2037,7 +2369,7 @@ bool OtaManager::requestSlot(uint8_t slot_index) {
   if (slot.awaiting_proof) {
     ReqProofMsg rp; memcpy(rp.manifest_id, _fid, 4); rp.block_idx = (uint16_t)slot.block;
     uint8_t b[16];
-    bool sent = emit(b, encode_req_proof(b, sizeof(b), rp), false);
+    bool sent = emit(b, encode_req_proof(b, sizeof(b), rp), false, fetchReplyRoute());
     if (sent) {
       slot.proof_request_at = 0;
       noteFetchActivity();
@@ -2053,7 +2385,7 @@ bool OtaManager::requestSlot(uint8_t slot_index) {
   OTA_DBG("OTA: REQ block=%u want=%04x (have=%u/%u mask=%04x window=%u)\n",
           (unsigned)slot.block, (unsigned)want, (unsigned)_have, (unsigned)_fbc,
           (unsigned)slot.mask, (unsigned)_req_count);
-  bool sent = emit(b, encode_req(b, sizeof(b), rq), false);
+  bool sent = emit(b, encode_req(b, sizeof(b), rq), false, fetchReplyRoute());
   if (sent) noteFetchActivity();
   return sent;
 }
@@ -2076,7 +2408,7 @@ bool OtaManager::requestFlight() {
   OTA_DBG("OTA: REQ flight first=%u blocks=%u width=%u/%u\n",
           (unsigned)_req_start, (unsigned)_req_count,
           (unsigned)_pipeline_width, (unsigned)OTA_FETCH_PIPELINE);
-  bool sent = emit(b, encode_req_window(b, sizeof(b), request), false);
+  bool sent = emit(b, encode_req_window(b, sizeof(b), request), false, fetchReplyRoute());
   _flight_request_pending = !sent;
   if (sent) noteFetchActivity();
   return sent;
@@ -2094,7 +2426,7 @@ bool OtaManager::fillPipeline() {
     ReassemblySlot& slot = _reasm[slot_index];
     slot.block = block;
     slot.mask = 0;
-    const uint16_t fragment_data = _wire_v2_session ? OTA_FRAG_DATA_V2 : OTA_FRAG_DATA;
+    const uint16_t fragment_data = fetchFragmentData();
     slot.need = frag_full_mask((blockLen(block) + fragment_data - 1) / fragment_data);
     slot.awaiting_proof = false;
     slot.proof_request_at = 0;
@@ -2112,6 +2444,18 @@ void OtaManager::requestMissing() {
   // Admission backpressure is not evidence that the source ignored v2.
   // Keep the original flight and retry it before evaluating network loss.
   if (_flight_request_pending) { requestFlight(); return; }
+
+  // An unanswered first probe must still reach old sources promptly. Once
+  // direct DATA has proved support, one lost request/burst is not evidence of
+  // a legacy source: use the sparse retry below before changing geometry. Its
+  // existing empty-flight counter advances only after local admission, and
+  // valid DATA resets it, so backpressure never consumes this one retry.
+  if (_direct_session && !anyWireDataReceived() &&
+      (!_direct_confirmed || _wire_empty_stalls >= 1)) {
+    downgradeDirectTransport();
+    requestFlight();
+    return;
+  }
 
   // No v2 DATA at all means the request may have reached only deployed sources which ignored its profile
   // bits (or the first response burst was lost). Retry once in the universal legacy profile instead of
@@ -2142,13 +2486,21 @@ void OtaManager::requestMissing() {
     uint8_t slot = (uint8_t)((_retry_slot + offset) % OTA_FETCH_PIPELINE);
     if (_reasm[slot].block == NO_BLOCK) continue;
     ReassemblySlot& reassembly = _reasm[slot];
+    if (reassembly.proof_failed) {
+      const uint32_t block = reassembly.block;
+      clearReassemblySlot(slot);
+      reassembly.block = block;
+      const uint16_t fragment_data = fetchFragmentData();
+      reassembly.need = frag_full_mask((blockLen(block) + fragment_data - 1u) / fragment_data);
+    }
     const bool partial_v2 = _wire_v2_session && reassembly.wire_v2 && reassembly.mask != 0 &&
         !reassembly.awaiting_proof;
     if (partial_v2 && reassembly.wire_stalls >= 1) {
       // A v2 seeder may disappear after establishing a representation while only deployed legacy seeders
       // remain. Keep one sparse retry, then fall back the whole flight to the universal profile. Clearing
       // every slot prevents geometry/representation mixing and guarantees that old sources can take over.
-      downgradeWireToLegacy();
+      if (_direct_session) downgradeDirectTransport();
+      else downgradeWireToLegacy();
     }
     if (requestSlot(slot)) {
       // Advance fallback evidence only when the sparse retry enters the
@@ -2179,6 +2531,7 @@ uint32_t OtaManager::pickMissingBlock() {
 }
 
 void OtaManager::loop() {
+  releaseIdleColdBuffers();
   // Each source owns its own pending/retry state, so a burst of advertisements cannot overwrite another
   // seeder's query. Initial requests ask for all; recovery asks only for missing HAVE fragments.
   for (uint8_t i = 0; i < _n_src; i++) {
@@ -2259,6 +2612,8 @@ void OtaManager::loop() {
 // ---------------- dispatch ----------------
 
 bool OtaManager::on_message(const uint8_t* msg, uint16_t len, OtaReplyRoute route) {
+  if (route.direct && (!_direct_transport_enabled || route.profile >= 2 ||
+      len > OTA_DIRECT_MESSAGE_MAX)) return false;
   const OtaReplyRoute previous = _request_route;
   _request_route = route;
   const bool consumed = dispatchMessage(msg, len);
@@ -2273,7 +2628,7 @@ bool OtaManager::dispatchMessage(const uint8_t* msg, uint16_t len) {
     case OTA_HAVE:         handleHave(msg, len); return false;
     case OTA_GET_MANIFEST: return handleGetManifest(msg, len);
     case OTA_MANIFEST:     handleManifest(msg, len); return false;
-    case OTA_GET_LEAVES:   handleGetLeaves(msg, len); return false;
+    case OTA_GET_LEAVES:   return handleGetLeaves(msg, len);
     case OTA_LEAVES:       handleLeaves(msg, len); return false;
     case OTA_REQ:          return handleReq(msg, len);
     case OTA_DATA:         return handleData(msg, len);

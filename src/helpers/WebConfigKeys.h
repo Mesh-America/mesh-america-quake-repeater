@@ -18,18 +18,19 @@
 // separately, see wcIsAdminPasswordKey below.
 static const char* const WC_ALLOWED_SET_KEYS[] = {
   // NodePrefs (radio / node)
-  "name", "bluetooth.name", "bluetooth.mac", "bluetooth.stealth",
+  "name", "bluetooth.name", "bluetooth.mac", "bluetooth.stealth", "lost.reply",
   "lat", "lon", "radio", "tx", "af", "rxdelay", "txdelay",
-  "cad", "radio.rxgain", "radio.fem.rxgain", "radio.fem.txgain", "radio.rxps", "powersaving",
+  "cad", "radio.rxgain", "radio.fem.rxgain", "radio.fem.txgain", "radio.rxps", "powersaving", "cpu.freq",
+  "mcu.regulator", "radio.regulator",
   "repeat",
   "display.mode", "display.timeout", "display.usb.mode", "display.usb.timeout",
-  "display.inbox",
+  "display.inbox", "display.rotation",
   "advert.interval", "flood.advert.interval",
   "flood.max", "flood.max.advert", "flood.max.unscoped", "loop.detect",
   // MQTTPrefs (WiFi / MQTT / misc observer)
   "wifi.ssid", "wifi.pwd", "wifi.powersave", "espnow.channel",
   "mqtt.enabled", "mqtt.origin", "mqtt.iata", "mqtt.status", "mqtt.packets", "mqtt.raw",
-  "mqtt.tx", "mqtt.rx", "mqtt.interval", "mqtt.neighbors", "mqtt.neighbors.interval",
+  "mqtt.tx", "mqtt.rx", "mqtt.advert.verify", "mqtt.interval", "mqtt.neighbors", "mqtt.neighbors.interval",
   "mqtt.ntp", "mqtt.owner", "mqtt.email",
   "timezone", "timezone.offset", "snmp", "snmp.community",
 };
@@ -70,7 +71,9 @@ static inline bool wcSetKeyRequiresReboot(const char* key) {
   return key != NULL
       && (wcIsEspNowChannelKey(key)
           || strcmp(key, "bluetooth.mac") == 0
-          || strcmp(key, "bluetooth.stealth") == 0);
+          || strcmp(key, "bluetooth.stealth") == 0
+          || strcmp(key, "mcu.regulator") == 0
+          || strcmp(key, "radio.regulator") == 0);
 }
 
 // The admin password maps to the top-level `password` command, not a setter, so

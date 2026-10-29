@@ -10,6 +10,11 @@
 #include <helpers/BluetoothMac.h>
 #include <helpers/CommonRadioPrefs.h>
 #include <helpers/DynamicConfigSerializer.h>
+#include <helpers/CompanionTrafficPrefs.h>
+#include <helpers/CompanionTimezonePrefs.h>
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/CpuClockPolicy.h>
+#endif
 
 #include "BluetoothName.h"
 
@@ -47,8 +52,12 @@ public:
   float rx_delay_base = 0;
   uint32_t ble_pin = 0;
   uint8_t advert_loc_policy = 0;
-  uint8_t buzzer_quiet = 0;
+  uint8_t buzzer_quiet = 1;
   uint8_t gps_enabled = 0;       // GPS enabled flag (0=disabled, 1=enabled)
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  // Uses existing alignment space; stored in the reserved wire byte at 79.
+  uint8_t leds_quiet = 0;
+#endif
   uint32_t gps_interval = 0;     // seconds; 0 uses the 1-second default
   uint8_t autoadd_config = 0;    // bitmask for auto-add contacts config
   uint8_t rx_boosted_gain = 0;   // SX126x RX boosted gain mode
@@ -89,7 +98,9 @@ public:
   float direct_tx_delay_factor = 0.2f;
   uint8_t interference_threshold = 0;
   uint8_t agc_reset_interval = 0;  // seconds / 4
-  int8_t tz_offset = 0;
+  // Storage-only shadow for the published one-byte integer timezone slot.
+  // Fractional precision lives in the checked footer, never in this prefix.
+  int8_t tz_offset_legacy = 0;
 #ifdef TBEAM_1W
   char fan_mode[5] = "auto";
   uint8_t fan_lo = 30;
@@ -115,6 +126,18 @@ public:
   // Debug verbosity is independent of the packet/output master switch. Keep
   // this after the published GPS cadence so legacy images default to quiet.
   uint8_t usb_debug_enabled = 0;
+  // Appended opt-in private-message response: 0=off, 1=no, 2=yes.
+  uint8_t lost_reply = 0;
+#if defined(RAK_4631)
+  // A checked footer follows every existing on-flash field, never an insertion.
+  uint8_t peripherals_shared = 0; // applied at boot, not on a live CLI save
+#endif
+  // Checked footer after all previously published fields/board footers.
+#if defined(ESP32_PLATFORM)
+  uint16_t cpu_freq_mhz = 0; // 0=Auto; ESP32-only CPU footer, no legacy offset moves
+#endif
+  uint8_t tx_media = mesh::RADIO_TX_AUTO;
+  uint8_t tx_ssh = mesh::RADIO_TX_AUTO;
 
 private:
   class RadioPrefs : public CommonRadioPrefs {
@@ -139,6 +162,11 @@ private:
       def("agc_int", _parent->agc_reset_interval);
       def("hash_mode", _parent->path_hash_mode);
       def("multi_ack", _parent->multi_acks);
+      def("rxps_en", _parent->rx_powersaving_enabled);
+      def("rxps_rx_us", _parent->rx_ps_rx_us);
+      def("rxps_sleep_us", _parent->rx_ps_sleep_us);
+      def("rxps_level", _parent->rx_ps_level);
+      def("rxps_preamble", _parent->rx_ps_preamble);
       def("usb_debug", _parent->usb_debug_enabled);
 #ifdef TBEAM_1W
       def("fan", _parent->fan_mode, sizeof(_parent->fan_mode));
@@ -149,6 +177,10 @@ private:
 
   public:
     explicit RadioPrefs(CompanionNodePrefs* parent) : _parent(parent) { }
+    RxPowerSavingConfig readRxPowerSavingConfig() const override {
+      return {_parent->rx_powersaving_enabled, _parent->rx_ps_rx_us,
+              _parent->rx_ps_sleep_us, _parent->rx_ps_level, _parent->rx_ps_preamble};
+    }
 
     bool getByKey(const char* key, char* value, size_t max_len) override {
       if (key != nullptr && strcmp(key, "usb_debug") == 0) {
@@ -245,30 +277,36 @@ private:
   DynamicConfigSerializer custom;
 
 public:
+  // Keep the widened runtime value after the adapters: widening the historic
+  // one-byte member in place would move the compact ARM preference offsets.
+  float tz_offset = 0;
+
   CompanionNodePrefs() : radio(this), custom(&radio) { }
 
-  // Only the scalar/array value prefix is a snapshot. Copying the complete
-  // object also copies adapter owner/fallback pointers and costs two large
-  // memberwise copies in the transactional loader. Keep both live adapters
-  // untouched, and leave a normally constructed snapshot's adapters local.
+  // Snapshot the scalar/array prefix and the separate runtime timezone.
+  // Copying the complete object also copies adapter owner/fallback pointers
+  // and costs two large memberwise copies in the transactional loader. Keep
+  // both live adapters untouched and a scratch snapshot's adapters local.
   bool copyPersistedValuesFrom(const CompanionNodePrefs& source) {
     if (&source == this) return true;
-    static_assert(sizeof(usb_debug_enabled) == sizeof(uint8_t),
-                  "The published USB debug preference is one byte");
+    const auto& last_value = tx_ssh;
+    static_assert(sizeof(tx_ssh) == sizeof(uint8_t),
+                  "The last persisted traffic policy is one byte");
     const uintptr_t first = reinterpret_cast<uintptr_t>(&airtime_factor);
-    const uintptr_t last = reinterpret_cast<uintptr_t>(&usb_debug_enabled);
+    const uintptr_t last = reinterpret_cast<uintptr_t>(&last_value);
     if (last < first
-        || last - first > sizeof(*this) - sizeof(usb_debug_enabled)) {
+        || last - first > sizeof(*this) - sizeof(tx_ssh)) {
       return false;
     }
     const size_t size = static_cast<size_t>(last - first)
-        + sizeof(usb_debug_enabled);
+        + sizeof(tx_ssh);
     const auto bounded = [size](const CompanionNodePrefs& values) -> bool {
       const uintptr_t object = reinterpret_cast<uintptr_t>(&values);
       const uintptr_t begin =
           reinterpret_cast<uintptr_t>(&values.airtime_factor);
-      const uintptr_t end =
-          reinterpret_cast<uintptr_t>(&values.usb_debug_enabled);
+      const uintptr_t end = reinterpret_cast<uintptr_t>(
+          &values.tx_ssh
+      );
       const uintptr_t radio_begin = reinterpret_cast<uintptr_t>(&values.radio);
       const uintptr_t custom_begin = reinterpret_cast<uintptr_t>(&values.custom);
       // Subtractions happen only after the corresponding ordering checks.
@@ -276,12 +314,13 @@ public:
       return begin >= object && begin - object <= sizeof(values)
           && size <= sizeof(values) - static_cast<size_t>(begin - object)
           && end >= begin
-          && end - begin == size - sizeof(values.usb_debug_enabled)
+          && end - begin == size - sizeof(values.tx_ssh)
           && radio_begin >= begin && size <= radio_begin - begin
           && custom_begin >= begin && size <= custom_begin - begin;
     };
     if (!bounded(*this) || !bounded(source)) return false;
     memcpy(&airtime_factor, &source.airtime_factor, size);
+    tz_offset = source.tz_offset;
     return true;
   }
 
@@ -289,6 +328,7 @@ public:
   void setRepeatEn(bool enabled) { client_repeat = enabled ? 1 : 0; }
 
   CommonRadioPrefs* getRadioPrefs() { return &radio; }
+  const CommonRadioPrefs* getRadioPrefs() const { return &radio; }
   KeyValueStore* getCustom() { return &custom; }
 
   bool isDirty() const {

@@ -22,7 +22,7 @@ in this audit.
 One format gap was fixed: Seeed's T1000-E **LoRaWAN development-board** bootloader
 declares `UF2 Bootloader 1.00`. The reader now accepts that two-component version
 and returns `1.00` unchanged. It does not invent `1.00.0`. That development image
-is separate from Seeed's Meshtastic/MeshCore recovery image, which reports
+is separate from Seeed's T1000-E recovery image, which reports
 `0.9.1-5-g488711a` and already worked.
 
 All other tested images already expose a readable UF2 bootloader record.
@@ -48,7 +48,7 @@ layout and expected strings are pinned in
 | Seeed XIAO nRF52840 Plus and Sense Plus | `0.9.2-29-g6a9a6a3` |
 | Seeed Wio Tracker 1110 SDK/conversion bootloader | `0.6.2-26-g949425a-dirty` |
 | Seeed Wio Tracker L1 vendor recovery ZIP | `0.7.0-22-g277a0c8` |
-| Seeed T1000-E Meshtastic/MeshCore recovery ZIP | `0.9.1-5-g488711a` |
+| Seeed T1000-E recovery ZIP | `0.9.1-5-g488711a` |
 | Seeed T1000-E LoRaWAN development-board HEX | `1.00` (newly supported) |
 | Seeed MeshTracker X1 recovery ZIP | `0.10.0-18-gb93789f` |
 | MTools Tec MeshTiny vendor bootloader UF2 | `0.4.5` |

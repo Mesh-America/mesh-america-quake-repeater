@@ -1,5 +1,7 @@
 """Execute Companion debug persistence/CLI and bounded packet logging paths."""
 from pathlib import Path
+import hashlib
+import json
 import os
 import subprocess
 import tempfile
@@ -12,6 +14,7 @@ from test_radio_receive_contract import method
 ROOT = Path(__file__).resolve().parents[1]
 
 PREFERENCE_HARNESS = r'''
+#include <helpers/CLICommandUtils.h>
 struct ConfigText : Stream {
  std::string text;size_t offset=0;
  int available() override{return int(text.size()-offset);}
@@ -55,15 +58,17 @@ int main(){
  assert(node.savePrefs());
  const auto original=node.store.fs.files["/new_prefs"];
 #if defined(TBEAM_1W)
- assert(original.size()==242);
+ assert(original.size()==251);
 #elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
- assert(original.size()==332);
+ assert(original.size()==341);
 #else
- assert(original.size()==235);
+ assert(original.size()==244);
 #endif
- assert(original.back()==0&&original[original.size()-4]==0);
- assert(original[original.size()-3]==1&&original[original.size()-2]==1);
- assert(original[original.size()-5]==1&&original[158]==1);
+ const size_t debug_offset=original.size()-mesh::companion::traffic::FooterSize-2;
+ assert(original[debug_offset]==0&&original[debug_offset-3]==0);
+ assert(original[debug_offset-2]==1&&original[debug_offset-1]==1);
+ assert(original[debug_offset-4]==1&&original[158]==1);
+ assert(original[debug_offset+1]==0);
  char reply[160]={};
  for(const char* malformed : {"set usb.debug","set usb.debug ",
      "set usb.debug 1","set usb.debug ON","set usb.debug on ",
@@ -81,8 +86,9 @@ int main(){
  assert(!strncmp(reply,"OK - USB debug on (saved)",24));
  assert(node._prefs.usb_debug_enabled==1&&mesh::debug_enabled);
  const auto enabled_disk=node.store.fs.files["/new_prefs"];
- assert(enabled_disk.back()==1);
- for(size_t i=0;i+1<original.size();++i)assert(enabled_disk[i]==original[i]);
+ assert(enabled_disk[debug_offset]==1);
+ for(size_t i=0;i<original.size();++i)
+   if(i!=debug_offset)assert(enabled_disk[i]==original[i]);
  assert(node.command("get usb.debug",reply,sizeof(reply)));
 #if MESH_DEBUG
  assert(!strcmp(reply,"usb.debug on"));
@@ -121,7 +127,7 @@ int main(){
  }
  // Existing complete tails retain their established offsets and always start
  // quiet, even if the object was already using verbose runtime diagnostics.
- for(unsigned size : {84u,156u,215u,226u,unsigned(original.size()-1)}){
+ for(unsigned size : {84u,156u,215u,226u,unsigned(debug_offset)}){
    DataStore legacy;legacy.fs.files["/new_prefs"]=enabled_disk;
    legacy.fs.files["/new_prefs"].resize(size);
    CompanionNodePrefs loaded;loaded.usb_debug_enabled=1;
@@ -132,7 +138,7 @@ int main(){
  // Normalize the new boolean only after the entire persisted image validates.
  for(uint8_t byte : {2,255}){
    DataStore corrupt;corrupt.fs.files["/new_prefs"]=enabled_disk;
-   corrupt.fs.files["/new_prefs"].back()=byte;
+   corrupt.fs.files["/new_prefs"][debug_offset]=byte;
    CompanionNodePrefs loaded;double lat=0,lon=0;
    assert(corrupt.loadPrefsInt("/new_prefs",loaded,lat,lon));
    assert(loaded.usb_debug_enabled==0);
@@ -313,12 +319,14 @@ class CompanionUsbLoggingTests(unittest.TestCase):
             '-include', str(work / 'platform_shim.h'),
             '-I', str(work), '-I', str(ROOT / 'test/fixtures/radio_profiles/mocks'),
             '-I', str(ROOT / 'test/mocks'), '-I', str(ROOT / 'src'),
-            '-I', str(ROOT / 'src/helpers'), '-I', str(ROOT), str(source),
+            '-I', str(ROOT / 'src/helpers'),
+            '-I', str(ROOT / 'examples/companion_radio'), '-I', str(ROOT), str(source),
             *[str(ROOT / 'src/helpers' / name) for name in extra],
             '-o', str(binary)], capture_output=True, text=True)
         self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
         ran = subprocess.run([str(binary)], capture_output=True, text=True)
         self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        return ran.stdout
 
     def prepare(self, work):
         (work / 'Utils.h').write_text('''#pragma once
@@ -365,7 +373,8 @@ inline char* utoa(unsigned int value,char* output,int base){
                             [flag + '=1' for flag in platform.split(',')] +
                             ['MESH_USB_LOGGING_AVAILABLE=1', 'MESH_DEBUG=' + str(debug)],
                             ('ConfigSerializer.cpp', 'DynamicConfigSerializer.cpp',
-                             'CommonRadioPrefs.cpp', 'TxtDataHelpers.cpp'))
+                             'CommonRadioPrefs.cpp', 'radiolib/RXPowerSaving.cpp',
+                             'radiolib/RXPowerSavingCLI.cpp', 'TxtDataHelpers.cpp'))
 
     def test_real_raw_emitter_master_gate_compact_and_other_transports(self):
         source = (ROOT / 'examples/companion_radio/MyMesh.cpp').read_text()
@@ -404,6 +413,7 @@ inline char* utoa(unsigned int value,char* output,int base){
         end = source.index('  } else if (handleCommand(command, 0, local_reply))', start)
         harness = r'''
 #include <cassert>
+#include <cstdio>
 #include <cstring>
 #include <string>
 struct Port {
@@ -423,32 +433,46 @@ int main(){
    const auto& text=node.port.output;
    assert(text.find("Commands:\r\n  stats-core / stats-radio / stats-radio-diag / stats-packets\r\n")==0);
    assert(text.find("  get public.key\r\n")!=std::string::npos);
-   assert(text.find("  get usb.debug\r\n  set usb.debug <on|off>\r\n")!=std::string::npos);
-#if MESH_USB_CONSOLE_COOPERATIVE
-   assert(text.find("  get usb.watchdog\r\n  get usb.watchdog.last\r\n  set usb.watchdog <off|on|auto> (saved; default auto)\r\n")!=std::string::npos);
+#if MESH_ENABLE_LOST_REPLY
+   assert(text.find("  get/set lost.reply <off|no|yes>\r\n")!=std::string::npos);
+#else
+   assert(text.find("lost.reply")==std::string::npos);
+#endif
+#if MESH_USB_LOGGING_AVAILABLE
+   assert(text.find("  get/set usb.debug <on|off>\r\n")!=std::string::npos);
+#else
+   assert(text.find("usb.debug")==std::string::npos);
+#endif
+#if MESH_USB_LOGGING_AVAILABLE && MESH_USB_CONSOLE_COOPERATIVE
+   assert(text.find("  get usb.watchdog.last\r\n  get/set usb.watchdog <off|on|auto> (saved; default auto)\r\n")!=std::string::npos);
 #else
    assert(text.find("usb.watchdog")==std::string::npos);
 #endif
    assert(text.find("  reboot\r\n  ver\r\n")!=std::string::npos);
    assert(text.find("  +++MESHCORE-TERM-STOP\r\n")!=std::string::npos ? terminal : !terminal);
-   assert(text.find("  disconnect (closes the network terminal)\r\n")!=std::string::npos ? !terminal : terminal);
+   assert(text.find("  disconnect (network terminal)\r\n")!=std::string::npos ? !terminal : terminal);
+   for(unsigned char value : text) printf("%02x",value);
+   printf("\n");
  }
 }
 '''.replace('@HELP@', source[start:end])
-        features = ['MESH_USB_LOGGING_AVAILABLE', 'COMPANION_FEATURE_READER',
-                    'COMPANION_FEATURE_MEMORY_DIAGNOSTICS', 'COMPANION_FEATURE_NOTIFICATIONS',
-                    'COMPANION_RADIO_FULL', 'COMPANION_EXCLUSIVE_WIFI_BLE',
-                    'WITH_WEBCONFIG', 'MESH_PRIMARY_ESPNOW', 'COMPANION_FEATURE_TEMP_RADIO',
-                    'COMPANION_FEATURE_OTA_CLI', 'BLE_PIN_CODE', 'ESP32', 'NRF52_PLATFORM',
-                    'EXTRAFS']
+        # These reviewed hashes cover the production shared help fragments.
+        # Compare the complete output bytes, including every conditional line,
+        # rather than duplicating a second help implementation in this test.
+        fixture = json.loads((ROOT / 'test/fixtures/companion_help_output.sha256.json').read_text())
+        self.assertEqual(fixture['schema'], 1)
+        self.assertEqual(len(fixture['profiles']), 16)
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             self.prepare(work)
-            for native in (0, 1):
-                with self.subTest(native=native):
-                    self.compile_and_run(work, harness,
-                        [flag + '=1' for flag in features] + ['WIFI_SSID="test"',
-                         'MESH_USB_CONSOLE_COOPERATIVE=' + str(native)])
+            for name, expected in fixture['profiles'].items():
+                with self.subTest(profile=name):
+                    raw = self.compile_and_run(work, harness, expected['flags'])
+                    outputs = [bytes.fromhex(line) for line in raw.splitlines()]
+                    self.assertEqual(len(outputs), 2)
+                    self.assertEqual([len(value) for value in outputs], expected['output_bytes'])
+                    self.assertEqual([hashlib.sha256(value).hexdigest() for value in outputs], expected['output_sha256'])
+
 
 
 if __name__ == '__main__':

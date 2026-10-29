@@ -1,4 +1,5 @@
 #include "UITask.h"
+#include <helpers/MorseLoopPolicy.h>
 #if UI_SMALL_MESSAGE_FONT == 1
   #include <helpers/ui/SmallMessageText.h>
 #endif
@@ -110,16 +111,12 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
     _display->servicePower(_board->isExternalPowered() || _board->isUsbHostConnected(), hasConnection());
   }
 
-  // strip off dash and commit hash by changing dash to null terminator
+  // strip off dash and commit hash without allocating a mutable version copy
   // e.g: v1.2.3-abcdef -> v1.2.3
-  char *version = strdup(FIRMWARE_VERSION);
-  char *dash = strchr(version, '-');
-  if (dash) {
-    *dash = 0;
-  }
-
   // v1.2.3 (1 Jan 2025)
-  sprintf(_version_info, "%s (%s)", version, FIRMWARE_BUILD_DATE);
+  const size_t version_len = strcspn(FIRMWARE_VERSION, "-");
+  snprintf(_version_info, sizeof(_version_info), "%.*s (%s)",
+           static_cast<int>(version_len), FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
 
 #ifdef PIN_BUZZER
   buzzer.begin();
@@ -127,11 +124,9 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
   buzzer.startup();
 #endif
 
-#ifdef HAS_DRV2605
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   vibration.begin();
   vibration.quiet(_node_prefs->vibe_quiet);
-#elif defined(PIN_VIBRATION)
-  vibration.begin();
 #endif
 
   // Initialize digital button if available
@@ -162,6 +157,8 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
   _userButtonAnalog->onAnyPress([this]() { handleButtonAnyPress(); });
 #endif
   ui_started_at = millis();
+  _startup_complete = false;
+  _next_refresh = ui_started_at;
 }
 
 void UITask::resetRadioProfileDisplayPage() {
@@ -354,7 +351,8 @@ void UITask::renderCurrScreen() {
     _display->print(tmp);
 #endif
     _display->setColor(UIColor::secondary_txt); // last color will be kept on T114
-  } else if (!pairing_screen_active && (millis() - ui_started_at) < BOOT_SCREEN_MILLIS) { // boot screen
+  } else if (!pairing_screen_active && !_startup_complete
+      && static_cast<uint32_t>(millis() - ui_started_at) < BOOT_SCREEN_MILLIS) { // boot screen
     // meshcore logo
     _display->setColor(UIColor::corp_blue);
     int logoWidth = 128;
@@ -451,6 +449,7 @@ void UITask::renderCurrScreen() {
 
 #ifdef STATUS_LED_RGB
 static void statusLedWrite(uint8_t r, uint8_t g, uint8_t b) {
+  if (!mesh::leds::enabled()) r = g = b = 0;
   analogWrite(PIN_STATUS_LED_R, r);
   analogWrite(PIN_STATUS_LED_G, g);
   analogWrite(PIN_STATUS_LED_B, b);
@@ -470,64 +469,74 @@ static void statusLedWheel(uint8_t pos) {   // smooth hue sweep, 0..255
 #endif
 
 void UITask::userLedHandler() {
+  if (!mesh::leds::enabled()) return;
   if (_notification_led_owned || !(_notification_outputs & mesh::notify::Led)) return;
 #ifdef STATUS_LED_RGB
-  static bool booted = false;
-  static bool flourish_active = false;
-  static unsigned long flourish_until = 0;
+  enum class FlourishState : uint8_t { Unseen, Boot, Message, Idle };
+  static FlourishState flourish = FlourishState::Unseen;
+  static uint32_t flourish_started = 0;
   static int prev_msgcount = 0;
   static int state = 0;
-  static unsigned long next_change = 0;
-  static int last_increment = 0;
-  static unsigned long next_batt_check = 0;
-  static bool low_batt = false;
+  static uint32_t last_change = 0;
+  static uint32_t phase_millis = 0;
+  static uint32_t last_batt_check = 0;
+  enum class BatteryState : uint8_t { Unseen, Normal, Low };
+  static BatteryState battery_state = BatteryState::Unseen;
 
-  unsigned long cur_time = millis();
+  const uint32_t cur_time = millis();
 
-  if (!booted) {   // color sweep on boot
-    booted = true;
-    flourish_until = cur_time + 1200;
-    flourish_active = true;
+  if (flourish == FlourishState::Unseen) {   // color sweep on boot
+    flourish_started = cur_time;
+    flourish = FlourishState::Boot;
   }
   if (_msgcount > prev_msgcount) {   // color sweep when a new message arrives
-    flourish_until = cur_time + 800;
-    flourish_active = true;
+    flourish_started = cur_time;
+    flourish = FlourishState::Message;
   }
   prev_msgcount = _msgcount;
 
-  if (flourish_active) {
-    if (cur_time < flourish_until) {
+  if (flourish == FlourishState::Boot || flourish == FlourishState::Message) {
+    const uint32_t duration = flourish == FlourishState::Boot ? 1200 : 800;
+    if (static_cast<uint32_t>(cur_time - flourish_started) < duration) {
       statusLedWheel((cur_time % 1200) * 255 / 1200);
       return;
     }
     statusLedWrite(0, 0, 0);
-    flourish_active = false;
+    flourish = FlourishState::Idle;
     state = 0;
-    next_change = cur_time;
+    last_change = cur_time;
+    phase_millis = 0;
   }
 
-  if (cur_time > next_batt_check) {   // battery reads are not free, keep them rare
+  // Keep the cached entry-time cadence, including across wrap and long idle.
+  // Sample state distinguishes an initial check from a completed check at zero.
+  if (battery_state == BatteryState::Unseen ? cur_time > 0
+      : static_cast<uint32_t>(cur_time - last_batt_check) > 60000) {
     uint16_t low_batt_mv = LOW_BATT_MILLIVOLTS;
 #if defined(NRF52_POWER_MANAGEMENT)
     low_batt_mv = mesh::power::remapBatteryWarningMillivolts(
         LOW_BATT_MILLIVOLTS, BATT_MIN_MILLIVOLTS, BATT_MAX_MILLIVOLTS,
         mesh::power::configuredEmpty(), mesh::power::configuredFull());
 #endif
-    low_batt = _board->getBattMilliVolts() < low_batt_mv;
-    next_batt_check = cur_time + 60000;
+    battery_state = _board->getBattMilliVolts() < low_batt_mv
+        ? BatteryState::Low : BatteryState::Normal;
+    last_batt_check = cur_time;
   }
 
 #ifdef EXT_CHRG_DETECT
   // charge status display while docked (skipped when messages are waiting,
   // so the unread indication is never masked)
-  static unsigned long next_pwr_check = 0;
-  static bool ext_powered = false, ext_charging = false;
-  if (cur_time > next_pwr_check) {
-    ext_powered = _board->isExternalPowered();
-    ext_charging = ext_powered && digitalRead(EXT_CHRG_DETECT) == LOW;
-    next_pwr_check = cur_time + 1000;
+  static uint32_t last_pwr_check = 0;
+  enum class PowerState : uint8_t { Unseen, No, Yes };
+  static PowerState power_state = PowerState::Unseen;
+  static bool ext_charging = false;
+  if (power_state == PowerState::Unseen ? cur_time > 0
+      : static_cast<uint32_t>(cur_time - last_pwr_check) > 1000) {
+    power_state = _board->isExternalPowered() ? PowerState::Yes : PowerState::No;
+    ext_charging = power_state == PowerState::Yes && digitalRead(EXT_CHRG_DETECT) == LOW;
+    last_pwr_check = cur_time;
   }
-  if (ext_powered && _msgcount == 0) {
+  if (power_state == PowerState::Yes && _msgcount == 0) {
     if (ext_charging) {
       // amber breathing while charging
       int ph = cur_time % 2000;
@@ -538,17 +547,17 @@ void UITask::userLedHandler() {
       statusLedWrite(0, 40, 0);   // dim solid green: charge complete
     }
     state = 0;
-    next_change = cur_time;
+    last_change = cur_time;
+    phase_millis = 0;
     return;
   }
 #endif
 
-  if (cur_time > next_change) {
+  if (static_cast<uint32_t>(cur_time - last_change) > phase_millis) {
     if (state == 0) {
       state = 1;
-      last_increment = (_msgcount > 0) ? LED_ON_MSG_MILLIS : LED_ON_MILLIS;
-      next_change = cur_time + last_increment;
-      if (low_batt) {
+      phase_millis = (_msgcount > 0) ? LED_ON_MSG_MILLIS : LED_ON_MILLIS;
+      if (battery_state == BatteryState::Low) {
         statusLedWrite(255, 0, 0);      // red: battery low
       } else if (_msgcount > 0) {
         statusLedWrite(255, 90, 0);     // amber: unread messages
@@ -559,29 +568,31 @@ void UITask::userLedHandler() {
       }
     } else {
       state = 0;
-      next_change = cur_time + LED_CYCLE_MILLIS - last_increment;
+      phase_millis = LED_CYCLE_MILLIS - phase_millis;
       statusLedWrite(0, 0, 0);
     }
+    last_change = cur_time;
   }
 #elif defined(PIN_STATUS_LED)
   static int state = 0;
-  static int next_change = 0;
-  static int last_increment = 0;
+  static uint32_t last_change = 0;
+  static uint32_t phase_millis = 0;
 
-  int cur_time = millis();
-  if (cur_time > next_change) {
+  const uint32_t cur_time = millis();
+  // Phase age also survives long notification-owned or disabled intervals.
+  if (static_cast<uint32_t>(cur_time - last_change) > phase_millis) {
     if (state == 0) {
       state = 1;
       if (_msgcount > 0) {
-        last_increment = LED_ON_MSG_MILLIS;
+        phase_millis = LED_ON_MSG_MILLIS;
       } else {
-        last_increment = LED_ON_MILLIS;
+        phase_millis = LED_ON_MILLIS;
       }
-      next_change = cur_time + last_increment;
     } else {
       state = 0;
-      next_change = cur_time + LED_CYCLE_MILLIS - last_increment;
+      phase_millis = LED_CYCLE_MILLIS - phase_millis;
     }
+    last_change = cur_time;
     digitalWrite(PIN_STATUS_LED, state == LED_STATE_ON);
   }
 #endif
@@ -669,7 +680,7 @@ void UITask::showPairingPin() {
   const unsigned long now = millis();
   _pairing_screen_until = now + BLE_PAIRING_DISPLAY_MILLIS;
   _need_refresh = true;
-  _next_refresh = 0;
+  _next_refresh = millis();
   if (_display != NULL && !_display->isOn()) {
     _display->servicePower(_board->isExternalPowered() || _board->isUsbHostConnected(), hasConnection(), true);
   }
@@ -678,7 +689,7 @@ void UITask::showPairingPin() {
 void UITask::finishPairingScreen(bool timed_out) {
   _pairing_screen_until = 0;
   _need_refresh = true;
-  _next_refresh = 0;
+  _next_refresh = millis();
   if (_display == NULL) return;
 
   if (timed_out) {
@@ -701,16 +712,41 @@ void UITask::servicePairingState() {
   if (_display != NULL && _display->servicePower(
       _board->isExternalPowered() || _board->isUsbHostConnected(),
       hasConnection(), isPairingScreenActive())) {
-    _next_refresh = 0;
+    _next_refresh = millis();
     _need_refresh = true;
   }
 }
 
+void UITask::syncAlertPreferences() {
+  if (!_node_prefs) return;
+#ifdef PIN_BUZZER
+  if (buzzer.isQuiet() != bool(_node_prefs->buzzer_quiet))
+    buzzer.quiet(_node_prefs->buzzer_quiet);
+#endif
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
+  if (vibration.isQuiet() != bool(_node_prefs->vibe_quiet))
+    vibration.quiet(_node_prefs->vibe_quiet);
+#endif
+}
+
 void UITask::loop() {
-#ifdef PIN_VIBRATION
+  syncAlertPreferences();
+  // Observe startup expiry before button callbacks and optional rendering.
+  if (!_startup_complete && static_cast<uint32_t>(millis() - ui_started_at) >= 8000u) {
+    _startup_complete = true;
+  }
+  const bool morse_timing = mesh::morseTimingActive(&radio_driver);
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   vibration.loop();
 #endif
   servicePairingState();
+
+  // Keep an already-due refresh due while clean or asleep, without moving
+  // a future throttle. It must not age past the signed clock's half range.
+  const uint32_t refresh_now = millis();
+  if (static_cast<int32_t>(refresh_now - _next_refresh) >= 0) {
+    _next_refresh = refresh_now;
+  }
 
   #ifdef PIN_USER_BTN
     if (_userButton) {
@@ -731,17 +767,17 @@ void UITask::loop() {
   servicePendingShutdown();
 #endif
 
-  if (_display != NULL && _display->isOn()) {
+  if (!morse_timing && _display != NULL && _display->isOn()) {
     if (!isPairingScreenActive() && !_alert[0] && !(_origin[0] && _msg[0])
-        && (millis() - ui_started_at) >= BOOT_SCREEN_MILLIS) {
+        && (_startup_complete || static_cast<uint32_t>(millis() - ui_started_at) >= BOOT_SCREEN_MILLIS)) {
       serviceRadioProfileDisplayPage();
     }
     static bool _firstBoot = true;
-    if(_firstBoot && (millis() - ui_started_at) >= BOOT_SCREEN_MILLIS) {
+    if(_firstBoot && (_startup_complete || static_cast<uint32_t>(millis() - ui_started_at) >= BOOT_SCREEN_MILLIS)) {
       _need_refresh = true;
       _firstBoot = false;
     }
-    if (millis() >= _next_refresh && _need_refresh) {
+    if (static_cast<int32_t>(millis() - _next_refresh) >= 0 && _need_refresh) {
       _display->startFrame();
       renderCurrScreen();
       _display->endFrame();
@@ -978,7 +1014,7 @@ void UITask::handleButtonLongPress() {
   _button_notification_cleared = false;
 #endif
   MESH_DEBUG_PRINTLN("UITask: long press triggered");
-  if (millis() - ui_started_at < 8000) {   // long press in first 8 seconds since startup -> CLI/rescue
+  if (!_startup_complete && static_cast<uint32_t>(millis() - ui_started_at) < 8000u) { // early-boot CLI/rescue only
     the_mesh.enterCLIRescue();
 #if defined(PIN_BUZZER) && MESH_GPS_VOICE
     // enterCLIRescue is supported independently of the framed USB interface.
@@ -1107,18 +1143,14 @@ void UITask::notificationScreen(int8_t mode) {
   _need_refresh = true;
 }
 void UITask::notificationVibration(bool on) {
-#ifdef HAS_DRV2605
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
 #if defined(PIN_BUZZER) && MESH_GPS_VOICE
-  // The saved physical alert mode stays authoritative even if the separate
-  // notification-mask write fails. Off callbacks must still stop the driver.
+  // Keep the committed physical mode authoritative if a mask save failed.
   if (on && _node_prefs && _node_prefs->vibe_quiet) {
     vibration.stop();
     return;
   }
 #endif
   vibration.pulse(on);
-#elif defined(PIN_VIBRATION)
-  vibration.stop();
-  digitalWrite(PIN_VIBRATION, on ? HIGH : LOW);
 #endif
 }

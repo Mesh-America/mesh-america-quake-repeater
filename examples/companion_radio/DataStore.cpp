@@ -4,6 +4,12 @@
 #include <new>
 #include "DataStore.h"
 #include "PrefsStorageLayout.h"
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/CpuClockPolicy.h>
+#endif
+#if defined(RAK_4631)
+#include <helpers/PeripheralModePrefs.h>
+#endif
 #include <helpers/FileRead.h>
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/LazyPersistence.h>
@@ -338,8 +344,19 @@ int _countLfsBlock(void *p, lfs_block_t block){
 }
 
 lfs_ssize_t _getLfsUsedBlockCount(FILESYSTEM* fs) {
-  LfsTraversalState state = {0, fs->_getFS()->cfg->block_count};
-  int err = lfs_traverse(fs->_getFS(), _countLfsBlock, &state);
+  if (fs == nullptr) return -1;
+  // Raw LittleFS traversal touches the same metadata/cache as file writes.
+  // Hold this filesystem's lock, separately from the physical flash lock.
+  fs->_lockFS();
+  lfs_t* raw_fs = fs->_getFS();
+  if (raw_fs == nullptr || raw_fs->cfg == nullptr
+      || raw_fs->cfg->block_count == 0) {
+    fs->_unlockFS();
+    return -1;
+  }
+  LfsTraversalState state = {0, raw_fs->cfg->block_count};
+  int err = lfs_traverse(raw_fs, _countLfsBlock, &state);
+  fs->_unlockFS();
   if (err) {
     MESH_DEBUG_PRINTLN("ERROR: lfs_traverse() error: %d", err);
     return -1;
@@ -360,7 +377,7 @@ static void cleanupAtomicTempFiles(FILESYSTEM* fs) {
       "/_main.id.tmp", "/new_prefs.tmp", "/channels2.tmp",
       "/contacts3.tmp", "/contacts4.mig.tmp", "/adv_blobs.tmp",
       "/.extrafs.mig.tmp", "/extrafs.badpages.tmp",
-      "/extrafs.badpages.bak.tmp"};
+      "/extrafs.badpages.bak.tmp", "/mesh_mt.tmp"};
   for (size_t i = 0; i < sizeof(fixed_temp_paths) / sizeof(fixed_temp_paths[0]); i++) {
     if (fs->exists(fixed_temp_paths[i])) fs->remove(fixed_temp_paths[i]);
   }
@@ -560,7 +577,58 @@ void DataStore::useVolatilePrimaryFS(FILESYSTEM& fs) {
   _secondary_authority_unknown = false;
   _identity_creation_blocked = false;
   _contact_load_incomplete = false;
+  _channel_load_incomplete = false;
   _prefs_load_incomplete = false;
+}
+
+bool DataStore::loadMeshtextSettings(uint8_t image[40], size_t& size) {
+  size = 0;
+  if (image == nullptr || _fs == nullptr || _primary_storage_unavailable
+      || _volatile_primary_fs) return false;
+  bool present = false;
+  uint32_t stored_size = 0;
+  if (!contactPathPresence(_fs, "/mesh_mt", present, &stored_size)) return false;
+  if (!present) return true;
+  // This backend has never stored the legacy ESP32-only NVS formats. Do not
+  // accept a truncated image, directory or uncommitted .tmp as fresh defaults.
+  if (stored_size != 40) return false;
+  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    File file = openRead(_fs, "/mesh_mt");
+    if (!file) continue;
+    uint8_t loaded[40];
+    const bool ok = !file.isDirectory() && file.size() == sizeof(loaded)
+        && file.read(loaded, sizeof(loaded)) == sizeof(loaded);
+    file.close();
+    if (ok) {
+      memcpy(image, loaded, sizeof(loaded));
+      size = sizeof(loaded);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool DataStore::saveMeshtextSettings(const uint8_t image[40]) {
+  if (image == nullptr || _fs == nullptr || _primary_storage_unavailable
+      || _volatile_primary_fs) return false;
+  bool present = false;
+  if (!contactPathPresence(_fs, "/mesh_mt", present)) return false;
+  if (!contactPathPresence(_fs, "/mesh_mt.tmp", present)) return false;
+  if (present && !_fs->remove("/mesh_mt.tmp")) return false;
+  mesh::AtomicFileWriter file(_fs, "/mesh_mt");
+  return file && file.write(image, 40) == 40 && file.commit();
+}
+
+bool DataStore::eraseMeshtextSettings() {
+  if (_fs == nullptr || _primary_storage_unavailable || _volatile_primary_fs) return false;
+  bool present = false;
+  // A staging file must never become a recovery source after explicit erase.
+  for (const char* path : {"/mesh_mt.tmp", "/mesh_mt"}) {
+    if (!contactPathPresence(_fs, path, present)) return false;
+    if (present && !_fs->remove(path)) return false;
+    if (!contactPathPresence(_fs, path, present) || present) return false;
+  }
+  return true;
 }
 #endif
 
@@ -695,6 +763,27 @@ bool DataStore::saveReaderBookmark(mesh::bible::Position pos) {
 }
 #endif
 
+#if UI_POCKET_GUI
+bool DataStore::loadPocketGuiSettings(mesh::ui::pocket::Settings& settings) {
+  if (_primary_storage_unavailable || _fs == nullptr) return false;
+  File file = openRead(_fs, "/pocket.ui");
+  if (!file) return false;
+  uint8_t bytes[mesh::ui::pocket::SETTINGS_RECORD_SIZE];
+  const bool read = file.size() == sizeof(bytes)
+      && file.read(bytes, sizeof(bytes)) == sizeof(bytes);
+  file.close();
+  return read && mesh::ui::pocket::decodeSettings(settings, bytes, sizeof(bytes), MAX_GROUP_CHANNELS);
+}
+
+bool DataStore::savePocketGuiSettings(const mesh::ui::pocket::Settings& settings) {
+  if (_primary_storage_unavailable || _volatile_primary_fs || _fs == nullptr) return false;
+  uint8_t bytes[mesh::ui::pocket::SETTINGS_RECORD_SIZE];
+  if (!mesh::ui::pocket::encodeSettings(settings, bytes, sizeof(bytes), MAX_GROUP_CHANNELS)) return false;
+  mesh::AtomicFileWriter file(_fs, "/pocket.ui");
+  return file && file.write(bytes, sizeof(bytes)) == sizeof(bytes) && file.commit();
+}
+#endif
+
 File DataStore::openRead(FILESYSTEM* fs, const char* filename) {
   return mesh::openFileRead(fs, filename);
 }
@@ -730,6 +819,16 @@ bool DataStore::removeFile(FILESYSTEM* fs, const char* filename) {
 }
 
 bool DataStore::formatFileSystem() {
+#if defined(NRF52_PLATFORM) && defined(QSPIFLASH)
+  // An explicit erase must cover every configured store. A quarantined QSPI
+  // chip may still hold authoritative contacts/channels, and its disabled
+  // peripheral cannot safely be formatted through the configured pointer.
+  // Refuse before changing primary storage or any in-memory recovery state.
+  if (_configuredFsExtra != nullptr && _fsExtra != _configuredFsExtra) {
+    MESH_DEBUG_PRINTLN("DataStore: erase refused while QSPI storage is unavailable");
+    return false;
+  }
+#endif
 #if defined(ESP32_PLATFORM)
   // A failed format keeps the latest accepted RAM packets available to retry.
   _advert_write.pause();
@@ -765,11 +864,13 @@ bool DataStore::formatFileSystem() {
       || _fsExtra == nullptr || _fsExtra->format();
 #endif
   const bool success = primary_success && secondary_success;
+  if (success) _contact_recovery = 0;
 #if defined(NRF52_PLATFORM)
   // A successful explicit erase creates a new empty authoritative store. A
   // failed erase must keep the boot's load quarantine latched.
   if (success) {
     _contact_load_incomplete = false;
+    _channel_load_incomplete = false;
 #if MESH_CONTACT_CACHE
     _cache_load_incomplete = false;
 #endif
@@ -790,6 +891,7 @@ bool DataStore::formatFileSystem() {
 #elif defined(RP2040_PLATFORM)
   const bool success = LittleFS.format();
   if (success) {
+    _contact_recovery = 0;
     _identity_creation_blocked = false;
     _prefs_load_incomplete = false;
     _channel_load_incomplete = false;
@@ -800,6 +902,7 @@ bool DataStore::formatFileSystem() {
   bool fs_success = ((fs::SPIFFSFS *)_fs)->format();
   esp_err_t nvs_err = nvs_flash_erase(); // no need to reinit, will be done by reboot
   if (fs_success && nvs_err == ESP_OK) {
+    _contact_recovery = 0;
     _advert_write.clear();
     _identity_creation_blocked = false;
     _prefs_load_incomplete = false;
@@ -881,7 +984,15 @@ bool DataStore::formatInternalExtraFSHealth(char* reply,
 #endif
 
 bool DataStore::loadMainIdentity(mesh::LocalIdentity &identity) {
-#if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+#if defined(ESP32_PLATFORM)
+  // A missing SPIFFS file can still have its original identity staged in NVS
+  // by partition migration. Let the migration-aware, tri-state loader decide
+  // whether absence is safe before startup is allowed to generate a new key.
+  const IdentityLoadResult result = identity_store.loadResult("_main", identity);
+  _identity_creation_blocked = result == IdentityLoadResult::Unreadable;
+  return result == IdentityLoadResult::Loaded;
+#else
+#if defined(RP2040_PLATFORM)
   if (!identity_store.recover("_main")) {
     _identity_creation_blocked = true;
     return false;
@@ -925,6 +1036,7 @@ bool DataStore::loadMainIdentity(mesh::LocalIdentity &identity) {
   }
   _identity_creation_blocked = false;
   return true;
+#endif
 #endif
 }
 
@@ -1041,6 +1153,13 @@ bool DataStore::loadPrefsInt(const char *filename,
     // Older images have no independent debug preference. Never inherit a
     // runtime-on value when loading one of those images.
     loaded_prefs.usb_debug_enabled = 0;
+    // Old images cannot opt in using an unrelated runtime preference value.
+    loaded_prefs.lost_reply = 0;
+    loaded_prefs.tx_media = mesh::RADIO_TX_AUTO;
+    loaded_prefs.tx_ssh = mesh::RADIO_TX_AUTO;
+#if defined(RAK_4631)
+    loaded_prefs.peripherals_shared = 0;
+#endif
     double loaded_lat = node_lat;
     double loaded_lon = node_lon;
     // The original image ended after ble_pin at byte 84. Later releases only
@@ -1048,7 +1167,19 @@ bool DataStore::loadPrefsInt(const char *filename,
     // actually emitted by those releases, but reject a truncated field/group
     // or an unknown tail before any value reaches the live preferences.
     static const uint32_t MIN_PREFS_SIZE = 84;
-    static const uint16_t KNOWN_PREFS_SIZES[] = {
+#if defined(STM32_PLATFORM) || defined(NRF52_PLATFORM)
+    // All published ARM image lengths fit in one byte. The file size below
+    // remains wide so oversized files cannot alias an accepted legacy length.
+    using PrefsImageSize = uint8_t;
+    static_assert(236 + mesh::companion::traffic::FooterSize
+#if defined(RAK_4631)
+        + mesh::peripherals::FooterSize
+#endif
+        <= UINT8_MAX, "published preference sizes fit the compact allowlist");
+#else
+    using PrefsImageSize = uint16_t;
+#endif
+    static const PrefsImageSize KNOWN_PREFS_SIZES[] = {
         84, 85, 90, 91, 92, 93, 140, 141, 142, 143, 144, 155,
         156, 157, 158, 159,
         159 + sizeof(loaded_prefs.bluetooth_name),
@@ -1110,9 +1241,50 @@ bool DataStore::loadPrefsInt(const char *filename,
 #else
         235,
 #endif
+#ifdef TBEAM_1W
+        243,  // Opt-in lost reply, appended after independent USB debug
+#elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
+        333,
+#else
+        236,
+#endif
+#ifdef TBEAM_1W
+        243 + mesh::companion::traffic::FooterSize,
+#elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
+        333 + mesh::companion::traffic::FooterSize,
+#elif defined(RAK_4631)
+        236 + mesh::peripherals::FooterSize
+            + mesh::companion::traffic::FooterSize,
+#else
+        236 + mesh::companion::traffic::FooterSize,
+#endif
     };
+    // Keep the old compact allowlist unchanged. A fractional image has the
+    // complete current prefix and all existing footers, followed by TZF v1.
+    // Compare this length in a wide type (RAK's new length exceeds 255).
+    static constexpr uint32_t TIMEZONE_PREFS_SIZE =
+#ifdef TBEAM_1W
+        243
+#elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
+        333
+#else
+        236
+#endif
+#if defined(RAK_4631)
+        + mesh::peripherals::FooterSize
+#endif
+        + mesh::companion::traffic::FooterSize
+        + mesh::companion::timezone::FooterSize;
     const uint32_t prefs_size = file.size();
-    bool known_size = false;
+    bool known_size = prefs_size == TIMEZONE_PREFS_SIZE;
+#if defined(ESP32_PLATFORM)
+    const bool has_cpu_footer = prefs_size == TIMEZONE_PREFS_SIZE
+            + mesh::esp32::cpuclock::FooterSize
+        || prefs_size == TIMEZONE_PREFS_SIZE - mesh::companion::timezone::FooterSize
+            + mesh::esp32::cpuclock::FooterSize;
+    known_size = known_size || has_cpu_footer;
+    loaded_prefs.cpu_freq_mhz = 0;
+#endif
     for (size_t i = 0;
          i < sizeof(KNOWN_PREFS_SIZES) / sizeof(KNOWN_PREFS_SIZES[0]); i++) {
       if (prefs_size == KNOWN_PREFS_SIZES[i]) {
@@ -1120,12 +1292,17 @@ bool DataStore::loadPrefsInt(const char *filename,
         break;
       }
     }
+#if defined(RAK_4631)
+    // Only the RAK4631 publishes this footer. Other targets retain their
+    // exact existing image sizes, including the compact STM32 wire table.
+    known_size = known_size || prefs_size == 236 + mesh::peripherals::FooterSize;
+#endif
     if (prefs_size < MIN_PREFS_SIZE || !known_size) {
       file.close();
       return false;
     }
     bool success = true;
-#if defined(STM32_PLATFORM) && defined(__GNUC__)
+#if (defined(STM32_PLATFORM) || defined(NRF52_PLATFORM)) && defined(__GNUC__)
     using namespace mesh::companion_prefs;
     uint8_t pad[4];
     for (size_t i = 0; i < FIELD_COUNT; ++i) {
@@ -1241,7 +1418,7 @@ bool DataStore::loadPrefsInt(const char *filename,
     readOptionalField(&loaded_prefs.direct_tx_delay_factor, sizeof(loaded_prefs.direct_tx_delay_factor));
     readOptionalField(&loaded_prefs.interference_threshold, sizeof(loaded_prefs.interference_threshold));
     readOptionalField(&loaded_prefs.agc_reset_interval, sizeof(loaded_prefs.agc_reset_interval));
-    readOptionalField(&loaded_prefs.tz_offset, sizeof(loaded_prefs.tz_offset));
+    readOptionalField(&loaded_prefs.tz_offset_legacy, sizeof(loaded_prefs.tz_offset_legacy));
 #ifdef TBEAM_1W
     readOptionalField(loaded_prefs.fan_mode, sizeof(loaded_prefs.fan_mode));
     readOptionalField(&loaded_prefs.fan_lo, sizeof(loaded_prefs.fan_lo));
@@ -1270,6 +1447,55 @@ bool DataStore::loadPrefsInt(const char *filename,
                       sizeof(loaded_prefs.gps_sync_interval_hours));
     readOptionalField(&loaded_prefs.usb_debug_enabled,
                       sizeof(loaded_prefs.usb_debug_enabled));
+    readOptionalField(&loaded_prefs.lost_reply, sizeof(loaded_prefs.lost_reply));
+#endif
+    // Numeric conversion, never reinterpret the historic signed hour byte as
+    // the first byte of a float. A checked fractional footer may override it.
+    if (prefs_size >= 226) loaded_prefs.tz_offset = loaded_prefs.tz_offset_legacy;
+#if defined(RAK_4631)
+    if (file.available() != 0) {
+      uint8_t peripheral_footer[mesh::peripherals::FooterSize] = {};
+      success = success
+          && file.read(peripheral_footer, sizeof(peripheral_footer)) == sizeof(peripheral_footer)
+          && mesh::peripherals::decodeFooter(peripheral_footer,
+              sizeof(peripheral_footer), loaded_prefs.peripherals_shared);
+    }
+#endif
+
+    // Both readers end at the frozen prefix. Read the existing TXR and
+    // optional TZF records together; their wire positions and CRCs stay
+    // independent. A short read never reaches either decoder. Use the declared
+    // known image size so a premature available()==0 cannot skip validation.
+    if (prefs_size >= TIMEZONE_PREFS_SIZE - mesh::companion::timezone::FooterSize) {
+      uint8_t footers[mesh::companion::traffic::FooterSize
+          + mesh::companion::timezone::FooterSize];
+      const bool fractional = prefs_size == TIMEZONE_PREFS_SIZE
+#if defined(ESP32_PLATFORM)
+          || prefs_size == TIMEZONE_PREFS_SIZE + mesh::esp32::cpuclock::FooterSize
+#endif
+          ;
+      const size_t length = fractional ? sizeof(footers)
+          : mesh::companion::traffic::FooterSize;
+      success = success && file.read(footers, length) == length
+          && mesh::companion::traffic::decodeFooter(footers,
+              mesh::companion::traffic::FooterSize,
+              loaded_prefs.tx_media, loaded_prefs.tx_ssh)
+          && (!fractional || mesh::companion::timezone::decodeFooter(
+              footers + mesh::companion::traffic::FooterSize,
+              mesh::companion::timezone::FooterSize, loaded_prefs.tz_offset));
+    }
+#if defined(ESP32_PLATFORM)
+    if (has_cpu_footer) {
+      uint8_t cpu_footer[mesh::esp32::cpuclock::FooterSize] = {};
+      const size_t length = file.read(cpu_footer, sizeof(cpu_footer));
+      // Eight bytes of a torn TZF record have the same declared image size
+      // as a CPU footer. Never reinterpret that known timezone tag as a bad
+      // CPU override and silently lose the fractional timezone.
+      success = success && (length < 3 || memcmp(cpu_footer, "TZF", 3) != 0);
+      // A bad CPU selection must not discard valid identity/radio preferences.
+      // Missing or corrupt CPU metadata alone falls back to Auto.
+      mesh::esp32::cpuclock::decodeFooter(cpu_footer, length, loaded_prefs.cpu_freq_mhz);
+    }
 #endif
 
     // Any bytes left over form only part of a historically appended field.
@@ -1279,6 +1505,7 @@ bool DataStore::loadPrefsInt(const char *filename,
     file.close();
     if (!success) return false;
     loaded_prefs.usb_debug_enabled = loaded_prefs.usb_debug_enabled == 1 ? 1 : 0;
+    loaded_prefs.lost_reply = loaded_prefs.lost_reply <= 2 ? loaded_prefs.lost_reply : 0;
     if (!_prefs.copyPersistedValuesFrom(loaded_prefs)) return false;
     node_lat = loaded_lat;
     node_lon = loaded_lon;
@@ -1288,7 +1515,9 @@ bool DataStore::loadPrefsInt(const char *filename,
 }
 
 bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, double node_lon) {
-  if (_prefs_load_incomplete) return false;
+  if (_prefs_load_incomplete || !mesh::companion::timezone::valid(_prefs.tz_offset))
+    return false;
+  const int8_t legacy_tz_offset = static_cast<int8_t>(_prefs.tz_offset);
 #if defined(ESP32_PLATFORM)
   if (!promoteCompanionRecoveryFile(_fs, "/new_prefs", _prefs_recovery_source)) return false;
 #endif
@@ -1305,36 +1534,54 @@ bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, dou
   File file = openWrite(_fs, "/new_prefs");
 #endif
   if (file) {
+    static constexpr size_t MAX_PREFS_FOOTER_SIZE =
+        mesh::companion::traffic::FooterSize + mesh::companion::timezone::FooterSize;
+#if defined(STM32_PLATFORM)
+    static constexpr size_t PREFS_PREFIX_SIZE = 236;
+    uint8_t image[PREFS_PREFIX_SIZE + MAX_PREFS_FOOTER_SIZE];
+#endif
 #if defined(STM32_PLATFORM) && defined(__GNUC__)
     using namespace mesh::companion_prefs;
-    uint8_t image[235];
     const uint8_t pad[4] = {};
     size_t used = 0;
     for (const PrefField& field : PREF_FIELDS) {
-      if (field.length > sizeof(image) - used) {
+      if (field.length > PREFS_PREFIX_SIZE - used) {
         // Latch failure and stop before any out-of-bounds pointer arithmetic.
-        used = sizeof(image) + 1;
+        used = PREFS_PREFIX_SIZE + 1;
         break;
       }
       memcpy(image + used, prefValue(field, _prefs, node_lat, node_lon, pad),
           field.length);
       used += field.length;
     }
-    bool success = used == sizeof(image)
-        && file.write(image, sizeof(image)) == sizeof(image);
+    // STM32 stages the frozen prefix: patch its published integer hour once,
+    // rather than selecting an alternate source for every table entry.
+    image[225] = static_cast<uint8_t>(legacy_tz_offset);
+    bool success = used == PREFS_PREFIX_SIZE;
+#elif defined(NRF52_PLATFORM) && defined(__GNUC__)
+    // nRF52 retains streaming writes and its existing small stack footprint.
+    // The table is the same validated wire order used by the scalar emitter.
+    using namespace mesh::companion_prefs;
+    const uint8_t pad[4] = {};
+    bool success = true;
+    for (const PrefField& field : PREF_FIELDS) {
+      if (!success) break;
+      success = file.write(static_cast<const uint8_t*>(
+          prefValue(field, _prefs, node_lat, node_lon, pad, &legacy_tz_offset)), field.length)
+          == field.length;
+    }
 #else
 #if defined(STM32_PLATFORM)
     // Keep the explicit wire field list, but make one bounded atomic write.
     // Other platforms retain direct writes and their existing stack footprint.
-    uint8_t image[235];
     size_t image_length = 0;
     const auto writeField = [&](const void* data, size_t size) -> bool {
-      if (image_length > sizeof(image)
-          || size > sizeof(image) - image_length) {
+      if (image_length > PREFS_PREFIX_SIZE
+          || size > PREFS_PREFIX_SIZE - image_length) {
         // Latch failure without reading data or advancing past the buffer.
         // The return value only preserves the common emitter interface;
         // the exact-length check below is the authoritative write gate.
-        image_length = sizeof(image) + 1;
+        image_length = PREFS_PREFIX_SIZE + 1;
         return true;
       }
       memcpy(image + image_length, data, size);
@@ -1438,8 +1685,7 @@ bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, dou
         sizeof(_prefs.interference_threshold));
     success = success && writeField((uint8_t *)&_prefs.agc_reset_interval,
         sizeof(_prefs.agc_reset_interval));
-    success = success && writeField((uint8_t *)&_prefs.tz_offset,
-        sizeof(_prefs.tz_offset));
+    success = success && writeField(&legacy_tz_offset, sizeof(legacy_tz_offset));
 #ifdef TBEAM_1W
     success = success && writeField((uint8_t *)_prefs.fan_mode,
         sizeof(_prefs.fan_mode));
@@ -1456,19 +1702,53 @@ bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, dou
 #endif
     // Pack only the explicit persisted tail, never the class's padded layout.
     // memcpy retains the GPS field's established native byte representation.
-    uint8_t tail[9] = {
+    uint8_t tail[10] = {
         _prefs.flood_retry_attempts, _prefs.flood_retry_max_path,
         _prefs.flood_retry_group_max_path, _prefs.flood_retry_advert_enabled,
         _prefs.one_key_dm_enabled, _prefs.bluetooth_enabled, 0, 0,
-        _prefs.usb_debug_enabled};
+        _prefs.usb_debug_enabled, _prefs.lost_reply};
     memcpy(tail + 6, &_prefs.gps_sync_interval_hours,
         sizeof(_prefs.gps_sync_interval_hours));
     success = success && writeField(tail, sizeof(tail));
-
 #if defined(STM32_PLATFORM)
-    success = success && image_length == sizeof(image)
-        && file.write(image, sizeof(image)) == sizeof(image);
+    success = success && image_length == PREFS_PREFIX_SIZE;
 #endif
+#endif
+#if defined(RAK_4631)
+    uint8_t peripheral_footer[mesh::peripherals::FooterSize];
+    mesh::peripherals::encodeFooter(peripheral_footer, _prefs.peripherals_shared);
+    success = success && file.write(peripheral_footer, sizeof(peripheral_footer))
+        == sizeof(peripheral_footer);
+#endif
+#if defined(STM32_PLATFORM)
+    // Keep the frozen prefix bound separate from this larger image. Append
+    // the checked records in place, then stage the exact 244/254-byte image.
+    uint8_t* const footers = image + PREFS_PREFIX_SIZE;
+#else
+    uint8_t footers[MAX_PREFS_FOOTER_SIZE];
+#endif
+    mesh::companion::traffic::encodeFooter(footers, _prefs.tx_media, _prefs.tx_ssh);
+    size_t footer_length = mesh::companion::traffic::FooterSize;
+    // Range was checked before opening the transaction. Reuse its integer
+    // fallback instead of validating and converting the same float again.
+    if (_prefs.tz_offset != legacy_tz_offset) {
+      mesh::companion::timezone::encodeFooter(footers + footer_length, _prefs.tz_offset);
+      footer_length = MAX_PREFS_FOOTER_SIZE;
+    }
+#if defined(STM32_PLATFORM)
+    const size_t image_length_with_footers = PREFS_PREFIX_SIZE + footer_length;
+    success = success && file.write(image, image_length_with_footers) == image_length_with_footers;
+#else
+    success = success && file.write(footers, footer_length) == footer_length;
+#endif
+#if defined(ESP32_PLATFORM)
+    // Auto is represented by the legacy image without a CPU footer. Saving
+    // Auto removes an earlier explicit choice without changing old offsets.
+    if (_prefs.cpu_freq_mhz && mesh::esp32::cpuclock::validSelection(_prefs.cpu_freq_mhz)) {
+      uint8_t cpu_footer[mesh::esp32::cpuclock::FooterSize];
+      mesh::esp32::cpuclock::encodeFooter(cpu_footer, _prefs.cpu_freq_mhz);
+      success = success && file.write(cpu_footer, sizeof(cpu_footer)) == sizeof(cpu_footer);
+    }
 #endif
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM) || defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
     success = file.commit(success);
@@ -1649,7 +1929,7 @@ bool DataStore::loadContactPages(DataStoreHost* host, uint16_t minimum_slot,
                                  uint32_t expected_page_mask) {
   bool any_page_file = false;
   FILESYSTEM* fs = _getContactsChannelsFS();
-  auto quarantineUnreadPage = [this](uint8_t page) {
+  auto quarantineUnreadPage = [this](uint8_t page, bool storage_error = true) {
     // Fail closed if an otherwise present page cannot be read. Reserving its
     // slots prevents a new contact from overwriting records which a later boot
     // may recover successfully.
@@ -1658,7 +1938,10 @@ bool DataStore::loadContactPages(DataStoreHost* host, uint16_t minimum_slot,
       _contact_slots.reserve(
           (uint16_t)page * mesh::storage::CONTACTS_PER_PAGE + index);
     }
-    _unread_contact_pages.mark(page);
+    if (storage_error) {
+      _unread_contact_pages.mark(page);
+      queueContactRecovery();
+    }
     _contact_load_incomplete = true;
   };
 
@@ -1738,7 +2021,7 @@ bool DataStore::loadContactPages(DataStoreHost* host, uint16_t minimum_slot,
       MESH_DEBUG_PRINTLN(
           "DataStore: no memory to load contact page %u", page);
       file.close();
-      quarantineUnreadPage(page);
+      quarantineUnreadPage(page, false);
       continue;
     }
     const bool payload_read =
@@ -1913,7 +2196,9 @@ bool DataStore::writeContactPage(DataStoreHost* host, uint8_t page,
   }
   if (!writer.commit(wrote)) {
 #if MESH_CONTACT_CACHE
-    paths.endCommit(false);
+    // Publication may have overwritten the old backing page. Keep preserved
+    // snapshots detached, but leave dirty handles and page generation pending.
+    paths.endCommit(writer.outcome() == mesh::AtomicFileWriter::Outcome::Indeterminate);
 #endif
     MESH_DEBUG_PRINTLN("DataStore: atomic contact page %u write failed", page);
     return false;
@@ -1929,7 +2214,232 @@ bool DataStore::writeContactPage(DataStoreHost* host, uint8_t page,
 }
 #endif
 
+void DataStore::clearContactLoadFailure() {
+#if MESH_CONTACT_CACHE
+  _cache_load_incomplete = false;
+#elif !defined(NRF52_PLATFORM)
+  _uncached_contact_load_incomplete = false;
+#endif
+#if defined(NRF52_PLATFORM)
+  _contact_load_incomplete = false;
+  _unread_contact_pages.clearAll();
+#endif
+}
+
+#if !defined(NRF52_PLATFORM)
+// Validate a complete image before retiring its alternative. Legacy contacts
+// have no file CRC; retain their existing record/route repair semantics.
+// partial_tail instead requires whole records followed by part of one.
+static bool readableContactFile(FILESYSTEM* fs, const char* path,
+                                bool partial_tail = false) {
+  File file = mesh::openFileRead(fs, path);
+  bool valid = file && !file.isDirectory();
+  const size_t tail = valid ? file.size() % mesh::storage::CONTACT_RECORD_SIZE : 0;
+  valid = valid && (partial_tail ? tail != 0 && file.size() > tail : tail == 0);
+  uint8_t record[mesh::storage::CONTACT_RECORD_SIZE];
+  size_t remaining = valid ? file.size() - tail : 0;
+  while (valid && remaining != 0) {
+    valid = file.read(record, sizeof(record)) == sizeof(record);
+    remaining -= sizeof(record);
+  }
+  file.close();
+  return valid;
+}
+
+const char* DataStore::selectContactFile(bool& present) {
+  FILESYSTEM* fs = _getContactsChannelsFS();
+  present = false;
+  bool failed = false;
+#if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+  _contact_recovery &= ~ContactRecoveryBackup;
+  const char* paths[] = {"/contacts3", "/contacts3.bak"};
+#else
+  const char* paths[] = {"/contacts3"};
+#endif
+  for (const char* path : paths) {
+    for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+      bool exists = false;
+      if (!companionPathPresence(fs, path, exists)) { failed = true; continue; }
+      if (!exists) break;
+      failed = true;
+      if (!readableContactFile(fs, path)) continue;
+      present = true;
+#if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+      if (strcmp(path, "/contacts3") != 0) {
+        _contact_recovery |= ContactRecoveryBackup;
+        // A valid backup remains usable even if its promotion cannot write.
+        if (prepareContactSave()) return "/contacts3";
+      }
+#endif
+      return path;
+    }
+  }
+  if (failed) {
+    // Older firmware rewrote this file in place; a reset or full volume
+    // during that save leaves part of a record after whole ones. Keep those
+    // records while no backup exists for this incomplete image to retire.
+    bool backup = false;
+#if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+    if (!companionPathPresence(fs, "/contacts3.bak", backup)) backup = true;
+#endif
+    if (!backup && readableContactFile(fs, "/contacts3", true)) {
+      present = true;
+      return "/contacts3";
+    }
+    queueContactRecovery(true);
+    return nullptr;
+  }
+  return "/contacts3";
+}
+
+bool DataStore::prepareContactSave() {
+  if (contactsAreVolatile()) return false;
+#if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+  if (!(_contact_recovery & ContactRecoveryBackup)) return true;
+#if defined(ESP32_PLATFORM) && MESH_CONTACT_CACHE
+  _contact_path_reader.close();
+#endif
+  FILESYSTEM* fs = _getContactsChannelsFS();
+  bool present = false, backup = false;
+  if (!companionPathPresence(fs, "/contacts3", present)
+      || !companionPathPresence(fs, "/contacts3.bak", backup)) return false;
+  // The previous restore can have moved the backup despite an unreadable
+  // acknowledgement. Never delete its sole public copy on a later retry.
+  if (!backup) {
+    if (!present || !readableContactFile(fs, "/contacts3")) return false;
+    _contact_recovery &= ~ContactRecoveryBackup;
+    return true;
+  }
+  if (!readableContactFile(fs, "/contacts3.bak")) return false;
+  if (present) {
+    fs->remove("/contacts3");
+    if (!companionPathPresence(fs, "/contacts3", present) || present) return false;
+  }
+  mesh::ContactFileTransaction::recover(fs, "/contacts3", companionPathPresence);
+  backup = true;
+  if (!companionPathPresence(fs, "/contacts3", present) || !present
+      || !companionPathPresence(fs, "/contacts3.bak", backup) || backup) return false;
+  _contact_recovery &= ~ContactRecoveryBackup;
+  return true;
+#else
+  return true;
+#endif
+}
+#endif
+
+void DataStore::recoverContacts(DataStoreHost* host) {
+  if (!contactRecoveryPending()) return;
+#if MESH_CONTACT_CACHE
+  if (_contact_recovery & ContactRecoveryRawOnly) {
+    // A failed cold read did not change names/generations. Retry immutable
+    // current paths before retiring accepted, not-yet-persisted RAM changes.
+    const uint8_t previous = _contact_recovery;
+    _contact_recovery &= ~(ContactRecoveryPending | ContactRecoveryRawOnly
+        | ContactRecoveryLegacy);
+#if defined(NRF52_PLATFORM)
+    const auto unread = _unread_contact_pages;
+    _unread_contact_pages.clearAll();
+#endif
+    uint8_t path[64];
+    bool readable = true;
+    for (uint32_t i = 0;; ++i) {
+      const ContactInfo* contact = host->getContactForStore(i);
+      if (contact == nullptr) break;
+      // copyPathTo uses checksum-checked read(), not allocating/evicting view().
+      if (!contact->copyPathTo(path)) { readable = false; break; }
+    }
+    if (readable && !contactRecoveryPending()) return;
+#if defined(NRF52_PLATFORM)
+    for (uint8_t page = 0; page < mesh::storage::CONTACT_PAGE_COUNT; ++page)
+      if (unread.bits() & (1UL << page)) _unread_contact_pages.mark(page);
+#endif
+    queueContactRecovery((previous & ContactRecoveryLegacy) != 0);
+  }
+#endif
+  if (!host->resetContactsForRecovery()) return;
+#if defined(ESP32_PLATFORM)
+  cancelContactWrite();
+  _contact_write_requested = false;
+#if MESH_CONTACT_CACHE
+  _contact_path_reader.close();
+#endif
+#endif
+  _contact_recovery = 0;
+  clearContactLoadFailure();
+  loadContacts(host);  // One fresh complete load before discarding anything.
+  if (!contactRecoveryPending()) return;  // Includes non-destructive resource refusal.
+#if !defined(NRF52_PLATFORM)
+  if (!host->resetContactsForRecovery()) return;
+#endif
+  FILESYSTEM* fs = _getContactsChannelsFS();
+  bool removed = true;
+  auto discard = [fs, &removed](const char* path) {
+    // Reconcile false acknowledgements without treating them as successful
+    // reset. Failed media must not turn this into a format/reboot loop.
+    bool present = true;
+#if defined(NRF52_PLATFORM)
+    if (!contactPathPresence(fs, path, present)) { removed = false; return; }
+    if (!present) return;
+    fs->remove(path);
+    removed = contactPathPresence(fs, path, present) && !present && removed;
+#else
+    if (!companionPathPresence(fs, path, present)) { removed = false; return; }
+    if (!present) return;
+    fs->remove(path);
+    removed = companionPathPresence(fs, path, present) && !present && removed;
+#endif
+  };
+#if defined(NRF52_PLATFORM)
+  // Without a trusted migration marker, pages can be stale downgrade
+  // leftovers, not a valid tail of the unreadable legacy image.
+  const uint32_t discard_pages = (_contact_recovery & ContactRecoveryLegacy)
+      && !_legacy_migration_ready
+      ? (1UL << mesh::storage::CONTACT_PAGE_COUNT) - 1
+      : _unread_contact_pages.bits();
+  for (uint8_t page = 0; page < mesh::storage::CONTACT_PAGE_COUNT; ++page) {
+    if ((discard_pages & (1UL << page)) == 0) continue;
+    char path[24];
+    makeContactPagePath(page, path);
+    discard(path);
+    char temp[28];
+    snprintf(temp, sizeof(temp), "%s.tmp", path);
+    discard(temp);
+  }
+  if (_contact_recovery & ContactRecoveryLegacy) {
+    discard("/contacts3");
+    discard("/contacts3.tmp");
+    if (_contact_recovery & ContactMigrationDeferred) {
+      // Bad legacy plus unknown marker has no trusted alternate contact view.
+      // Clear this logical contact store, never the shared ExtraFS journal.
+      discard(CONTACT_MIGRATION_MARKER);
+      discard("/contacts4.mig.tmp");
+    }
+  }
+#else
+  for (const char* path : {"/contacts3", "/contacts3.bak", "/contacts3.tmp"}) discard(path);
+#endif
+  _contact_recovery = removed ? 0 : ContactStorageUnavailable;
+  clearContactLoadFailure();
+#if defined(NRF52_PLATFORM)
+  // Failed deletion of one damaged page need not discard the healthy pages
+  // already loaded by the retry. Persistence remains disabled, not the node.
+  if (removed && !host->resetContactsForRecovery()) return;
+#endif
+  if (removed) loadContacts(host);
+  if (contactRecoveryPending()) {
+    // A still-failing device is usable without persistent contacts. Never
+    // rewrite it from a partially loaded table or erase unrelated stores.
+    host->resetContactsForRecovery();
+    _contact_recovery = ContactStorageUnavailable;
+#if defined(NRF52_PLATFORM)
+    resetContactPageState();
+#endif
+    clearContactLoadFailure();
+  }
+}
+
 void DataStore::loadContacts(DataStoreHost* host) {
+  if (_contact_recovery & ContactStorageUnavailable) return;
 #if defined(ESP32_PLATFORM)
   cancelContactWrite();
 #endif
@@ -1949,21 +2459,8 @@ void DataStore::loadContacts(DataStoreHost* host) {
 #endif
 #if !defined(NRF52_PLATFORM)
   bool contacts_exist = false;
-  bool contacts_metadata_ready = companionPathPresence(
-      _getContactsChannelsFS(), "/contacts3", contacts_exist);
-#endif
-#if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
-  bool backup_exists = false;
-  contacts_metadata_ready = contacts_metadata_ready && companionPathPresence(
-      _getContactsChannelsFS(), "/contacts3.bak", backup_exists);
-  const bool contacts_required = contacts_exist || backup_exists;
-  contacts_metadata_ready = contacts_metadata_ready
-      && mesh::ContactFileTransaction::recover(_getContactsChannelsFS(), "/contacts3")
-      && companionPathPresence(_getContactsChannelsFS(), "/contacts3", contacts_exist)
-      && (!contacts_required || contacts_exist);
-#endif
-#if !defined(NRF52_PLATFORM)
-  if (!contacts_metadata_ready) {
+  const char* contact_path = selectContactFile(contacts_exist);
+  if (contact_path == nullptr) {
     MESH_DEBUG_PRINTLN("DataStore: contact transaction recovery failed");
 #if MESH_CONTACT_CACHE
     _cache_load_incomplete = true;
@@ -1979,11 +2476,11 @@ void DataStore::loadContacts(DataStoreHost* host) {
   // contact table cannot collide with the reload.
   resetContactPageState();
   if (_contact_load_incomplete) {
-    // A failed load is latched for this boot. loadContacts() is also called by
-    // identity import, but only a reboot may retry storage and re-enable
-    // migration/mutation; otherwise an unrelated command could clear the veto.
+    // A failed load stays latched for ordinary reloads, including identity
+    // import. Only explicit safe-boundary recovery or a reboot may retry it;
+    // an unrelated command must not clear the incomplete-view veto.
     MESH_DEBUG_PRINTLN(
-        "DataStore: contact load remains quarantined until reboot");
+        "DataStore: contacts need safe recovery");
     return;
   }
   FILESYSTEM* contacts_fs = _getContactsChannelsFS();
@@ -2034,11 +2531,15 @@ void DataStore::loadContacts(DataStoreHost* host) {
       MESH_DEBUG_PRINTLN(
           "DataStore: HIL injecting contact page %u stat failure", page);
       _contact_load_incomplete = true;
+      queueContactRecovery();
       return;
     }
 #endif
     if (!contactPathPresence(contacts_fs, path, page_exists)) {
       _contact_load_incomplete = true;
+      // Discovery failed before the contact source was selected. This is not
+      // evidence that the page payload is unreadable or safe to discard.
+      queueContactRecovery();
       return;
     }
     if (page_exists) {
@@ -2047,11 +2548,20 @@ void DataStore::loadContacts(DataStoreHost* host) {
   }
   bool legacy_exists = false;
   bool migration_marker_exists = false;
-  if (!contactPathPresence(contacts_fs, "/contacts3", legacy_exists)
-      || !contactPathPresence(contacts_fs, CONTACT_MIGRATION_MARKER,
-                              migration_marker_exists)) {
+  if (!contactPathPresence(contacts_fs, "/contacts3", legacy_exists)) {
     _contact_load_incomplete = true;
+    // Unknown legacy presence does not make readable pages expendable: they
+    // may be the only authoritative store. Retry without authorizing erasure.
+    queueContactRecovery();
     return;
+  }
+  if (!contactPathPresence(contacts_fs, CONTACT_MIGRATION_MARKER,
+                           migration_marker_exists)
+      && !contactPathPresence(contacts_fs, CONTACT_MIGRATION_MARKER,
+                              migration_marker_exists)) {
+    // An unreadable migration marker is not evidence that any contact is bad.
+    // Use the readable legacy view without migrating/rewriting healthy pages.
+    _contact_recovery |= ContactMigrationDeferred;
   }
   const mesh::storage::ContactStoreSource source =
       mesh::storage::chooseContactStoreSource(
@@ -2081,9 +2591,14 @@ void DataStore::loadContacts(DataStoreHost* host) {
   _legacy_migration_ready = migration_marker_exists;
 #endif
 
+#if defined(NRF52_PLATFORM)
   File file = openRead(_getContactsChannelsFS(), "/contacts3");
+#else
+  File file = openRead(_getContactsChannelsFS(), contact_path);
+#endif
 #if !defined(NRF52_PLATFORM)
   if (!file && contacts_exist) {
+    queueContactRecovery(true);
 #if MESH_CONTACT_CACHE
     _cache_load_incomplete = true;
 #else
@@ -2099,6 +2614,7 @@ void DataStore::loadContacts(DataStoreHost* host) {
     // file, but this boot must not accept a mutation into a competing page.
     MESH_DEBUG_PRINTLN("DataStore: legacy contacts exist but could not be read");
     _contact_load_incomplete = true;
+    queueContactRecovery(true);
     return;
   }
 
@@ -2109,23 +2625,13 @@ void DataStore::loadContacts(DataStoreHost* host) {
         (unsigned long)legacy_size);
     file.close();
     _contact_load_incomplete = true;
+    queueContactRecovery(true);
     return;
   }
 #endif
   if (file) {
     bool full = false;
     uint16_t record_index = 0;
-#if !defined(NRF52_PLATFORM)
-    if (file.size() % mesh::storage::CONTACT_RECORD_SIZE != 0) {
-#if MESH_CONTACT_CACHE
-      _cache_load_incomplete = true;
-#else
-      _uncached_contact_load_incomplete = true;
-#endif
-      file.close();
-      return;
-    }
-#endif
 #if defined(NRF52_PLATFORM)
     _legacy_contact_count =
         mesh::storage::legacyContactCountForSize(legacy_size);
@@ -2134,6 +2640,7 @@ void DataStore::loadContacts(DataStoreHost* host) {
 #endif
     while (!full
 #if !defined(NRF52_PLATFORM)
+           // A partial trailing record admitted by selectContactFile() stays unread.
            && record_index < file.size() / mesh::storage::CONTACT_RECORD_SIZE
 #endif
 #if defined(NRF52_PLATFORM)
@@ -2142,6 +2649,7 @@ void DataStore::loadContacts(DataStoreHost* host) {
     ) {
       uint8_t record[mesh::storage::CONTACT_RECORD_SIZE];
       if (file.read(record, sizeof(record)) != sizeof(record)) {
+        queueContactRecovery(true);
 #if MESH_CONTACT_CACHE
         _cache_load_incomplete = true;
 #elif !defined(NRF52_PLATFORM)
@@ -2216,7 +2724,7 @@ void DataStore::loadContacts(DataStoreHost* host) {
     // Only modify stale page artifacts after the complete authoritative legacy
     // file has been loaded. A transient read failure above therefore leaves
     // every possible recovery source untouched.
-    if (!mesh::storage::trustMigratedContactPages(
+    if (!contactsAreVolatile() && !mesh::storage::trustMigratedContactPages(
             true, _legacy_migration_ready)) {
       if (!prepareLegacyContactMigration()) {
         _contact_load_incomplete = true;
@@ -2236,6 +2744,16 @@ void DataStore::loadContacts(DataStoreHost* host) {
   if (_legacy_migration_ready) {
     loadContactPages(host, _legacy_contact_count, contact_page_presence);
   }
+#else
+  // Only a completely loaded public image makes its old alternatives expendable.
+  if (!hasIncompleteContactLoad()
+#if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+      && !(_contact_recovery & ContactRecoveryBackup)
+#endif
+      ) {
+    for (const char* path : {"/contacts3.bak", "/contacts3.tmp"})
+      if (_getContactsChannelsFS()->exists(path)) _getContactsChannelsFS()->remove(path);
+  }
 #endif
 }
 
@@ -2244,6 +2762,10 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
   cancelContactWrite();
 #endif
   if (hasIncompleteContactLoad()) return false;
+  if (contactsAreVolatile()) return false;
+#if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+  if (!prepareContactSave()) return false;
+#endif
 #if defined(NRF52_PLATFORM)
   bool success = true;
   for (uint32_t idx = 0;; idx++) {
@@ -2295,6 +2817,18 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
   _contact_path_reader.close();
 #endif
   success = writer.commit(success);
+  const bool uncertain = writer.outcome()
+      == mesh::ContactFileTransaction::Outcome::Indeterminate;
+  if (uncertain) {
+    // Old RAM indices may no longer describe the public file. Preserve dirty
+    // work until the outer loop can safely reset/reload the contact table.
+    queueContactRecovery(true);
+#if MESH_CONTACT_CACHE
+    _cache_load_incomplete = true;
+#else
+    _uncached_contact_load_incomplete = true;
+#endif
+  }
 #if MESH_CONTACT_CACHE
   if (success) {
     uint16_t index = 0;
@@ -2305,7 +2839,7 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
       paths.publish(c->path_ref.handle(), index++);
     }
   }
-  paths.endCommit(success);
+  paths.endCommit(success || uncertain);
 #endif
   _contact_write_requested = !success;
   return success;
@@ -2347,11 +2881,20 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
     }
     success = file.commit(success);
   }
+  if (file.outcome() == decltype(file)::Outcome::Indeterminate) {
+    queueContactRecovery(true);
+#if MESH_CONTACT_CACHE
+    _cache_load_incomplete = true;
+#else
+    _uncached_contact_load_incomplete = true;
+#endif
+  }
   return success;
 #endif
 }
 
 bool DataStore::markContactDirty(const ContactInfo& contact) {
+  if (contactsAreVolatile()) return true;
 #if defined(NRF52_PLATFORM)
   if (hasIncompleteContactLoad()) return false;
   uint16_t slot = contact.storage_slot;
@@ -2372,6 +2915,7 @@ bool DataStore::markContactDirty(const ContactInfo& contact) {
 }
 
 bool DataStore::releaseContact(const ContactInfo& contact) {
+  if (contactsAreVolatile()) return true;
 #if defined(NRF52_PLATFORM)
   if (hasIncompleteContactLoad()) return false;
   const uint16_t slot = contact.storage_slot;
@@ -2454,11 +2998,23 @@ bool DataStore::truncateLegacyContacts(uint16_t remaining_contacts) {
 #if defined(ESP32_PLATFORM)
 void DataStore::cancelContactWrite() {
   if (_contact_write == nullptr) return;
+  const bool uncertain = _contact_write->outcome()
+      == mesh::ContactFileTransaction::Outcome::Indeterminate;
+  if (uncertain) {
+    queueContactRecovery(true);
+#if MESH_CONTACT_CACHE
+    _cache_load_incomplete = true;
+#else
+    _uncached_contact_load_incomplete = true;
+#endif
+  }
   delete _contact_write;
   _contact_write = nullptr;
 #if MESH_CONTACT_CACHE
   _contact_path_reader.close();
-  mesh::contactPathStorage().endCommit(false);
+  // Detach retained snapshots from names which may now contain another
+  // generation. Current clean handles are protected by the read/write hold.
+  mesh::contactPathStorage().endCommit(uncertain);
 #endif
   _contact_write_host = nullptr;
   _contact_write_filter = nullptr;
@@ -2500,6 +3056,7 @@ bool DataStore::serviceContactWrite(DataStoreHost* host,
   auto& paths = mesh::contactPathStorage();
 #endif
   if (_contact_write == nullptr) {
+    if (!prepareContactSave()) return false;
 #if MESH_CONTACT_CACHE
     paths.beginCommit();
     for (uint32_t i = 0;; ++i) {
@@ -2612,10 +3169,11 @@ bool DataStore::serviceContactWrite(DataStoreHost* host,
 
 bool DataStore::serviceContactWrites(DataStoreHost* host,
                                      bool (*filter)(const ContactInfo& c)) {
+  if (contactsAreVolatile()) return false;
 #if defined(NRF52_PLATFORM)
   if (hasIncompleteContactLoad()) {
-    // Reboot is the recovery operation. Never migrate or rewrite from a RAM
-    // table which is known not to represent every durable contact.
+    // Recovery must first rebuild a complete view at the safe host boundary.
+    // Resource and shared-authority failures never authorize a destructive reset.
     return false;
   }
   if (_legacy_contacts_pending_cleanup) {
@@ -2675,7 +3233,7 @@ bool DataStore::flushContactWrites(DataStoreHost* host,
 #if defined(ESP32_PLATFORM)
   cancelContactWrite();
 #endif
-  if (hasIncompleteContactLoad()) return false;
+  if (hasIncompleteContactLoad() || contactsAreVolatile()) return false;
 #if defined(NRF52_PLATFORM)
   while (hasPendingContactWrites()) {
     if (!serviceContactWrites(host, filter)) return false;
@@ -2687,6 +3245,7 @@ bool DataStore::flushContactWrites(DataStoreHost* host,
 }
 
 bool DataStore::hasPendingContactWrites() const {
+  if (contactsAreVolatile()) return false;
 #if defined(NRF52_PLATFORM)
   return !hasIncompleteContactLoad()
       && (!_dirty_contact_pages.empty() || _legacy_contacts_pending_cleanup);
@@ -2697,9 +3256,11 @@ bool DataStore::hasPendingContactWrites() const {
 #endif
 }
 
+// Share the repeated admission/persistence checks instead of duplicating them under LTO.
+__attribute__((noinline))
 bool DataStore::hasIncompleteContactLoad() const {
+  if (contactRecoveryPending()) return true;
 #if !defined(NRF52_PLATFORM)
-  if (_channel_load_incomplete) return true;
 #if !MESH_CONTACT_CACHE
   if (_uncached_contact_load_incomplete) return true;
 #endif
@@ -2728,9 +3289,14 @@ void DataStore::loadChannels(DataStoreHost* host) {
       if (!file) continue;
       static const uint32_t RECORD_SIZE = 4 + 32 + 32;
       const size_t size = file.size();
-      if (size % RECORD_SIZE != 0 || size / RECORD_SIZE > MAX_GROUP_CHANNELS) {
+      if (size % RECORD_SIZE != 0) {
         file.close();
         break;
+      }
+      if (size / RECORD_SIZE > MAX_GROUP_CHANNELS) {
+        file.close();
+        _channel_load_incomplete = true;
+        return;
       }
       const uint8_t count = size / RECORD_SIZE;
       ChannelDetails* loaded = count == 0 ? nullptr
@@ -2773,10 +3339,11 @@ void DataStore::loadChannels(DataStoreHost* host) {
   return;
 #else
 #if defined(NRF52_PLATFORM)
-  bool& incomplete = _contact_load_incomplete;
-#else
-  bool& incomplete = _channel_load_incomplete;
+  // Contact/migration failures can still make the shared filesystem's
+  // authority unknowable. A channel-only failure must not set that veto.
+  if (_contact_load_incomplete) return;
 #endif
+  bool& incomplete = _channel_load_incomplete;
   if (incomplete) return;
   FILESYSTEM* contacts_fs = _getContactsChannelsFS();
 #if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
@@ -2798,74 +3365,98 @@ void DataStore::loadChannels(DataStoreHost* host) {
 #else
   if (!contacts_fs->exists("/channels2")) return;
 #endif
-  File file = openRead(contacts_fs, "/channels2");
-  if (!file) {
-    MESH_DEBUG_PRINTLN("DataStore: channels file open failed; storage quarantined");
-    incomplete = true;
-    return;
-  }
-#if defined(NRF52_PLATFORM)
-  if (file.size() != channels_size) {
-    file.close();
-    MESH_DEBUG_PRINTLN("DataStore: channels file changed while opening; storage quarantined");
-    incomplete = true;
-    return;
-  }
-#else
-  channels_size = file.size();
-#endif
-  static const uint32_t CHANNEL_RECORD_SIZE = 4 + 32 + 32;
-  if ((channels_size % CHANNEL_RECORD_SIZE) != 0
-      || channels_size / CHANNEL_RECORD_SIZE > MAX_GROUP_CHANNELS) {
-    file.close();
-    MESH_DEBUG_PRINTLN("DataStore: invalid channels file size; storage quarantined");
-    incomplete = true;
-    return;
-  }
-  const uint8_t channel_count =
-      static_cast<uint8_t>(channels_size / CHANNEL_RECORD_SIZE);
-  ChannelDetails* loaded = channel_count == 0 ? nullptr
-      : static_cast<ChannelDetails*>(
-          malloc(sizeof(ChannelDetails) * channel_count));
-  if (channel_count != 0 && loaded == nullptr) {
-    file.close();
-    MESH_DEBUG_PRINTLN(
-        "DataStore: no memory for channels snapshot; storage quarantined");
-    incomplete = true;
-    return;
-  }
-  bool success = true;
-  for (uint8_t channel_idx = 0; channel_idx < channel_count; channel_idx++) {
-    uint8_t unused[4];
-    success = file.read(unused, sizeof(unused)) == sizeof(unused)
-        && file.read(reinterpret_cast<uint8_t*>(loaded[channel_idx].name),
-                     sizeof(loaded[channel_idx].name))
-            == sizeof(loaded[channel_idx].name)
-        && file.read(loaded[channel_idx].channel.secret,
-                     sizeof(loaded[channel_idx].channel.secret))
-            == sizeof(loaded[channel_idx].channel.secret);
-    if (!success) break;
-    loaded[channel_idx].name[sizeof(loaded[channel_idx].name) - 1] = 0;
-    loaded[channel_idx].channel.tx_radio = mesh::decodeRadioTxPolicy(unused[0]);
-  }
-  file.close();
-  if (!success) {
-    free(loaded);
-    MESH_DEBUG_PRINTLN(
-        "DataStore: channels file read failed; storage quarantined");
-    incomplete = true;
-    return;
-  }
-  for (uint8_t channel_idx = 0; channel_idx < channel_count; channel_idx++) {
-    if (!host->onChannelLoaded(channel_idx, loaded[channel_idx])) {
-      free(loaded);
-      MESH_DEBUG_PRINTLN(
-          "DataStore: channel host refused durable record; storage quarantined");
+  const char* channel_path = "/channels2";
+  for (;;) {
+    File file = openRead(contacts_fs, channel_path);
+    if (!file) {
+      MESH_DEBUG_PRINTLN("DataStore: channels file open failed; storage quarantined");
       incomplete = true;
       return;
     }
+#if defined(NRF52_PLATFORM)
+    if (file.size() != channels_size) {
+      file.close();
+      MESH_DEBUG_PRINTLN("DataStore: channels file changed while opening; storage quarantined");
+      incomplete = true;
+      return;
+    }
+#else
+    channels_size = file.size();
+#endif
+    static const uint32_t CHANNEL_RECORD_SIZE = 4 + 32 + 32;
+    const bool malformed = (channels_size % CHANNEL_RECORD_SIZE) != 0;
+    if (malformed || channels_size / CHANNEL_RECORD_SIZE > MAX_GROUP_CHANNELS) {
+      file.close();
+#if defined(RP2040_PLATFORM)
+      // A rename-gap backup takes precedence over replacing a malformed image.
+      // Read and admit that complete snapshot before changing either name.
+      if (malformed && channel_path[sizeof("/channels2") - 1] == 0
+          && contacts_fs->exists("/channels2.bak")) {
+        channel_path = "/channels2.bak";
+        continue;
+      }
+#endif
+      MESH_DEBUG_PRINTLN("DataStore: invalid channels file size");
+      incomplete = !malformed;
+      return;
+    }
+    const uint8_t channel_count =
+        static_cast<uint8_t>(channels_size / CHANNEL_RECORD_SIZE);
+    ChannelDetails* loaded = channel_count == 0 ? nullptr
+        : static_cast<ChannelDetails*>(
+            malloc(sizeof(ChannelDetails) * channel_count));
+    if (channel_count != 0 && loaded == nullptr) {
+      file.close();
+      MESH_DEBUG_PRINTLN(
+          "DataStore: no memory for channels snapshot; storage quarantined");
+      incomplete = true;
+      return;
+    }
+    bool success = true;
+    for (uint8_t channel_idx = 0; channel_idx < channel_count; channel_idx++) {
+      uint8_t unused[4];
+      success = file.read(unused, sizeof(unused)) == sizeof(unused)
+          && file.read(reinterpret_cast<uint8_t*>(loaded[channel_idx].name),
+                       sizeof(loaded[channel_idx].name))
+              == sizeof(loaded[channel_idx].name)
+          && file.read(loaded[channel_idx].channel.secret,
+                       sizeof(loaded[channel_idx].channel.secret))
+              == sizeof(loaded[channel_idx].channel.secret);
+      if (!success) break;
+      loaded[channel_idx].name[sizeof(loaded[channel_idx].name) - 1] = 0;
+      loaded[channel_idx].channel.tx_radio = mesh::decodeRadioTxPolicy(unused[0]);
+    }
+    file.close();
+    if (!success) {
+      free(loaded);
+      MESH_DEBUG_PRINTLN(
+          "DataStore: channels file read failed; storage quarantined");
+      incomplete = true;
+      return;
+    }
+    for (uint8_t channel_idx = 0; channel_idx < channel_count; channel_idx++) {
+      if (!host->onChannelLoaded(channel_idx, loaded[channel_idx])) {
+        free(loaded);
+        MESH_DEBUG_PRINTLN(
+            "DataStore: channel host refused durable record; storage quarantined");
+        incomplete = true;
+        return;
+      }
+    }
+    free(loaded);
+#if defined(RP2040_PLATFORM)
+    if (channel_path[sizeof("/channels2") - 1] != 0) {
+      // Only the proven malformed target is retired. Failed promotion keeps
+      // the validated RAM table and protects the surviving backup from saves.
+      contacts_fs->remove("/channels2");
+      if (contacts_fs->exists("/channels2")
+          || !mesh::ContactFileTransaction::recover(contacts_fs, "/channels2")
+          || !contacts_fs->exists("/channels2")
+          || contacts_fs->exists("/channels2.bak")) incomplete = true;
+    }
+#endif
+    return;
   }
-  free(loaded);
 #endif
 }
 
@@ -2874,9 +3465,7 @@ bool DataStore::saveChannels(DataStoreHost* host) {
   if (!promoteCompanionRecoveryFile(_getContactsChannelsFS(), "/channels2",
                                     _channel_recovery_source)) return false;
 #endif
-#if !defined(NRF52_PLATFORM)
   if (_channel_load_incomplete) return false;
-#endif
 #if defined(NRF52_PLATFORM)
   if (_contact_load_incomplete) return false;
 #endif
@@ -2912,6 +3501,11 @@ bool DataStore::saveChannels(DataStoreHost* host) {
     file.close();
 #endif
   }
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM) || defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+  // Failed publication can leave disk newer than the caller's rolled-back RAM.
+  if (file.outcome() == decltype(file)::Outcome::Indeterminate)
+    _channel_load_incomplete = true;
+#endif
   return success;
 }
 
@@ -3232,14 +3826,16 @@ bool DataStore::migrateToSecondaryFS() {
     return MigrationJournalState::Invalid;
   };
 
-  auto writeJournal = [this](uint8_t state) -> bool {
+  using WriteOutcome = mesh::AtomicFileWriter::Outcome;
+  auto writeJournal = [this](uint8_t state) -> WriteOutcome {
     uint8_t payload[sizeof(journal_magic) + 1];
     memcpy(payload, journal_magic, sizeof(journal_magic));
     payload[sizeof(journal_magic)] = state;
     mesh::AtomicFileWriter journal(_fsExtra, SECONDARY_MIGRATION_JOURNAL);
-    return journal
-        && journal.write(payload, sizeof(payload)) == sizeof(payload)
-        && journal.commit();
+    const bool wrote = journal
+        && journal.write(payload, sizeof(payload)) == sizeof(payload);
+    journal.commit(wrote);
+    return journal.outcome();
   };
 
   auto hasSecondarySources = [this](bool& present) -> bool {
@@ -3393,20 +3989,27 @@ bool DataStore::migrateToSecondaryFS() {
       && (journal_state != MigrationJournalState::None
           || secondary_sources_present)) {
     if (journal_state == MigrationJournalState::None
-        && !writeJournal(SECONDARY_MIGRATION_PENDING)) {
+        && writeJournal(SECONDARY_MIGRATION_PENDING) != WriteOutcome::Committed) {
       MESH_DEBUG_PRINTLN("DataStore: could not start ExtraFS migration transaction");
       _fsExtra = nullptr;
       return false;
     }
-    if (!copySecondarySources()
-        || !writeJournal(SECONDARY_MIGRATION_COMMITTED)) {
-      // Pending means no source has been retired, so primary remains a complete
-      // fallback even if the destination contains harmless partial copies.
-      MESH_DEBUG_PRINTLN("DataStore: ExtraFS migration copy incomplete; using primary storage");
-      _fsExtra = nullptr;
+    const auto outcome = copySecondarySources()
+        ? writeJournal(SECONDARY_MIGRATION_COMMITTED) : WriteOutcome::NotCommitted;
+    // A final rename may have published COMMITTED despite a failed readback.
+    // Only a verified Pending journal or no publication attempt permits
+    // primary fallback; unknown authority must preserve both stores.
+    journal_state = outcome == WriteOutcome::Committed ? MigrationJournalState::Committed
+        : outcome == WriteOutcome::NotCommitted ? MigrationJournalState::Pending : readJournal();
+    if (journal_state != MigrationJournalState::Committed) {
+      if (journal_state == MigrationJournalState::Pending) {
+        MESH_DEBUG_PRINTLN("DataStore: ExtraFS migration copy incomplete; using primary storage");
+        _fsExtra = nullptr;
+      } else {
+        _contact_load_incomplete = true;
+      }
       return false;
     }
-    journal_state = MigrationJournalState::Committed;
   }
 
   if (journal_state == MigrationJournalState::Committed) {
@@ -4157,6 +4760,9 @@ bool validSecretRecord(const uint8_t record[SECRET_RECORD_SIZE]) {
 bool DataStore::readStoredPath(uint16_t source, uint8_t path[64]) {
   if (source == mesh::ContactPathStorage::NONE || hasIncompleteContactLoad()) return false;
   char filename[24] = "/contacts3";
+#if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+  if (_contact_recovery & ContactRecoveryBackup) strcpy(filename, "/contacts3.bak");
+#endif
   size_t offset = static_cast<size_t>(source) * mesh::storage::CONTACT_RECORD_SIZE;
 #if defined(ESP32_PLATFORM)
   if (!(source & mesh::ContactPathStorage::PAGED)) {
@@ -4168,7 +4774,10 @@ bool DataStore::readStoredPath(uint16_t source, uint8_t path[64]) {
     File& file = _contact_path_reader;
     const bool ok = file && file.size() >= offset + mesh::storage::CONTACT_RECORD_SIZE
         && file.seek(offset + 76) && file.read(path, 64) == 64;
-    if (!ok) file.close();
+    if (!ok) {
+      file.close();
+      queueContactReadRecovery(true);
+    }
     return ok;
   }
 #endif
@@ -4187,6 +4796,16 @@ bool DataStore::readStoredPath(uint16_t source, uint8_t path[64]) {
   const bool ok = file && file.size() >= offset + mesh::storage::CONTACT_RECORD_SIZE
       && file.seek(offset + 76) && file.read(path, 64) == 64;
   if (file) file.close();
+  if (!ok) {
+#if defined(NRF52_PLATFORM)
+    if (source & mesh::ContactPathStorage::PAGED)
+      _unread_contact_pages.mark((source & ~mesh::ContactPathStorage::PAGED)
+          / mesh::storage::CONTACTS_PER_PAGE);
+    queueContactReadRecovery((source & mesh::ContactPathStorage::PAGED) == 0);
+#else
+    queueContactReadRecovery(true);
+#endif
+  }
   // The pool checks the CRC captured when this immutable path value was bound.
   return ok;
 }

@@ -7,8 +7,13 @@ uint8_t FloodAdvertLimiter::allowance(uint8_t hops) {
   return limits[hops < 8 ? hops : 8];
 }
 
+#if !FLOOD_ADVERT_IRAM_WORD_STORAGE
 void FloodAdvertLimiter::reset() {
+#if FLOOD_ADVERT_RTC_FAST_SLOTS || FLOOD_ADVERT_RTC_SLOW_SLOTS
+  _entries.reset();
+#else
   for (size_t i = 0; i < _capacity; ++i) _entries[i].flags = 0;
+#endif
   _last_sweep = 0;
 }
 
@@ -25,6 +30,8 @@ void FloodAdvertLimiter::clear(const uint8_t* full_key) {
   Entry* entry = find(full_key);
   if (entry) entry->flags = 0;
 }
+
+#endif
 
 int FloodAdvertLimiter::hashIndex(const Entry& entry, const uint8_t* hash) {
   for (uint8_t i = 0; i < entry.count; ++i) {
@@ -62,10 +69,13 @@ void FloodAdvertLimiter::advance(Entry& entry, uint32_t now) {
   }
 }
 
+#if !FLOOD_ADVERT_IRAM_WORD_STORAGE
 void FloodAdvertLimiter::refresh(uint32_t now) {
   for (size_t i = 0; i < _capacity; ++i) advance(_entries[i], now);
   _last_sweep = now;
 }
+
+#endif
 
 void FloodAdvertLimiter::tick(uint32_t now) {
   // Periodic expiry prevents stale history resurrecting after a millis wrap,
@@ -74,6 +84,7 @@ void FloodAdvertLimiter::tick(uint32_t now) {
   if (uint32_t(now - _last_sweep) >= 60000UL) refresh(now);
 }
 
+#if !FLOOD_ADVERT_IRAM_WORD_STORAGE
 bool FloodAdvertLimiter::needsShorterPath(const uint8_t* key, uint8_t hops, uint32_t now) {
   refresh(now);
   Entry* entry = find(key);
@@ -232,5 +243,7 @@ size_t FloodAdvertLimiter::listLimited(uint32_t now, size_t offset,
   }
   return total;
 }
+
+#endif
 
 } // namespace mesh

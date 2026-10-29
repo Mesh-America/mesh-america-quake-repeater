@@ -18,6 +18,9 @@ HARNESS = r'''
 #include <helpers/RadioProfileCLI.h>
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/radiolib/RXPowerSaving.h>
+#include <helpers/esp32/PowerTestControls.h>
+#include "companion_fleet_dispatch.h"
+#include "battery_calibration_cli_stub.h"
 #include <sys/stat.h>
 #include <limits>
 #define constrain(value,low,high) ((value)<(low)?(low):((value)>(high)?(high):(value)))
@@ -26,9 +29,19 @@ HARNESS = r'''
 static MemoryFS* profile_metadata_fs = nullptr;
 static bool profile_metadata_error = false;
 static unsigned profile_metadata_probes = 0;
+static unsigned fast_metadata_probes = 0;
+static bool isProfileMetadataPath(const char* path) {
+  for (const char* expected : {"/spiffs/radio_profiles", "/spiffs/radio_profiles.bak",
+      "/spiffs/radio_profiles.tmp", "/spiffs/radio_profiles.reply",
+      "/spiffs/radio_fast", "/spiffs/radio_fast.bak", "/spiffs/radio_fast.tmp"}) {
+    if (!strcmp(path, expected)) return true;
+  }
+  return false;
+}
 int stat(const char* path, struct stat* info) {
-  assert(profile_metadata_fs && !strncmp(path, "/spiffs/radio_profiles", 22));
+  assert(profile_metadata_fs && isProfileMetadataPath(path));
   ++profile_metadata_probes;
+  if (!strncmp(path, "/spiffs/radio_fast", 18)) ++fast_metadata_probes;
   if (profile_metadata_error) { errno = EIO; return -1; }
   if (!profile_metadata_fs->exists(path + 7)) { errno = ENOENT; return -1; }
   info->st_mode = 0100000;
@@ -56,13 +69,23 @@ struct Radio : mesh::Radio {
   bool isInRecvMode() const override { return true; }
 };
 struct Sensors { double node_lat=0,node_lon=0; } sensors;
+struct BatteryBoard {} board;
+// Morse dispatch is independently executable in its own shared-handler suite;
+// this legacy fixture keeps that optional branch inactive for tuple rollback.
+namespace mesh {
+template<typename... Args> bool handleMorseReplyCommand(Args&&...) { return false; }
+template<typename... Args> bool handleMorseCommand(Args&&...) { return false; }
+}
 @COMMAND_FILTER@
-struct MyMesh {
+struct MyMesh : CompanionFleetFixture {
+  struct NoMorseReply {} _morse_reply;
+  uint8_t self_id = 0; // Signing is unreachable in this radio-only fixture.
   CompanionNodePrefs _prefs;
   DataStore store;
   DataStore* _store=&store;
   MemoryFS profile_fs;
   Radio radio;
+  Radio* _radio=&radio;
   Clock clock;
   mesh::RadioProfileCLI _radio_profiles;
   char reply[160]={};
@@ -118,6 +141,15 @@ struct Infrastructure {
 static bool error(const char* reply) { return strstr(reply,"Error") || strstr(reply,"ERROR"); }
 int main() {
   unsigned checks=0;
+  // The shared CLI probes both stores at startup. Match only their actual
+  // committed, rollback and staging names, rather than accepting any prefix.
+  for (const char* path : {"/spiffs/radio_profiles", "/spiffs/radio_profiles.bak",
+      "/spiffs/radio_profiles.tmp", "/spiffs/radio_profiles.reply",
+      "/spiffs/radio_fast", "/spiffs/radio_fast.bak", "/spiffs/radio_fast.tmp"})
+    assert(isProfileMetadataPath(path));
+  for (const char* path : {"/spiffs/radio_profiles_extra", "/spiffs/radio_fast_extra",
+      "/spiffs/radio_fast.reply", "/radio_profiles", "/spiffs/new_prefs"})
+    assert(!isProfileMetadataPath(path));
   // App radio settings require exactly the upstream four-field CSV, even
   // with an explicit preamble or an active temporary/secondary profile.
   for(uint32_t timestamp:{0U,1700000000U})for(uint16_t preamble:{0U,48U}) {
@@ -211,6 +243,7 @@ int main() {
     m.expectOriginal();++checks;
   }
   assert(profile_metadata_probes>0);
+  assert(fast_metadata_probes>0);
   printf("%u production primary-radio persistence scenarios passed\n",checks);
 }
 '''
@@ -293,12 +326,14 @@ public:
             build = subprocess.run([compiler,'-std=c++17','-Wall','-Wextra',
                 '-Wno-unused-parameter','-Wno-sign-compare','-Wno-reorder',
                 '-DESP32_PLATFORM=1',*flags,'-I',str(work),
+                '-I',str(ROOT/'test/fixtures'),
                 '-I',str(ROOT/'test/fixtures/radio_profiles/mocks'),
                 '-I',str(ROOT/'test/mocks'),'-I',str(ROOT/'src'),
                 '-I',str(ROOT/'src/helpers'),'-I',str(ROOT),str(work/'test.cpp'),
                 *[str(ROOT/'src/helpers'/name) for name in (
                     'ConfigSerializer.cpp','DynamicConfigSerializer.cpp',
-                    'CommonRadioPrefs.cpp','TxtDataHelpers.cpp','RadioProfileCLI.cpp')],
+                    'CommonRadioPrefs.cpp','radiolib/RXPowerSaving.cpp',
+                    'radiolib/RXPowerSavingCLI.cpp','TxtDataHelpers.cpp','RadioProfileCLI.cpp')],
                 '-o',str(binary)],capture_output=True,text=True)
             self.assertEqual(build.returncode,0,build.stdout+build.stderr)
             run = subprocess.run([str(binary)],capture_output=True,text=True)

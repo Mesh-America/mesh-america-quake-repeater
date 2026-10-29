@@ -1,12 +1,14 @@
 #include <Arduino.h>
 #include "target.h"
+#include <helpers/radiolib/SX126xBufferedRadioHal.h>
 
 #include <helpers/sensors/MicroNMEALocationProvider.h>
 
 MeshadventurerBoard board;
 
 static SPIClass spi;
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi);
+static SX126xBufferedRadioHal radio_hal(spi);
+RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 WRAPPER_CLASS radio_driver(radio, board);
 
 ESP32RTCClock fallback_clock;
@@ -135,6 +137,10 @@ void MASensorManager::setPowerSavingEnabled(bool enabled) {
   if (powersaving_enabled == enabled) return;
   powersaving_enabled = enabled;
 
+  if (isTrackerGpsModeEnabled()) {
+    _location->setGPSPowerSaving(false);
+    return;
+  }
   bool gps_user_enabled = isGpsTelemetryUserEnabled();
   _location->setGPSPowerSaving(enabled && gps_user_enabled);
   if (!gps_user_enabled) return;

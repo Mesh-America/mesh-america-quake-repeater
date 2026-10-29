@@ -9,9 +9,19 @@ from test_replay_reset_integration import extract_braced
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def fixture_prefix():
+def fixture_prefix(owner_only=False):
     text = (ROOT / 'test/fixtures/companion_uncached_storage/test.cpp').read_text()
-    return text[:text.index('struct Host {')]
+    text = text[:text.index('struct Host {')]
+    if owner_only:
+        # Adafruit File cannot be default constructed. Failed opens still
+        # return a closed handle attached to the filesystem that owns it.
+        assert text.count('File() = default;') == 1
+        assert text.count('return File();') == 1
+        assert text.count(': File();') == 1
+        text = text.replace('File() = default;', 'File() = delete;')
+        text = text.replace('return File();', 'return File(*this);')
+        text = text.replace(': File();', ': File(*this);')
+    return text
 
 
 def compile_run(program, platform, actual_node_prefs=False):
@@ -21,6 +31,8 @@ def compile_run(program, platform, actual_node_prefs=False):
         (directory / 'Adafruit_LittleFS.h').write_text(
             '#pragma once\nusing Adafruit_LittleFS = FakeFilesystem;\n'
             'namespace Adafruit_LittleFS_Namespace {}\n')
+        (directory / 'InternalFileSystem.h').write_text(
+            '#pragma once\ninline FakeFilesystem InternalFS;\n')
         helper_sources = []
         if actual_node_prefs:
             # Keep the actual owner-bearing adapters in the preferences
@@ -35,7 +47,8 @@ def compile_run(program, platform, actual_node_prefs=False):
             (directory / 'Utils.h').write_text('#include <cassert>\n' + utils)
             helper_sources = [str(ROOT / 'src/helpers' / name) for name in (
                 'ConfigSerializer.cpp', 'DynamicConfigSerializer.cpp',
-                'CommonRadioPrefs.cpp', 'TxtDataHelpers.cpp')]
+                'CommonRadioPrefs.cpp', 'radiolib/RXPowerSaving.cpp',
+                'radiolib/RXPowerSavingCLI.cpp', 'TxtDataHelpers.cpp')]
         cpp, exe = directory / 'test.cpp', directory / 'test'
         cpp.write_text(program)
         compiled = subprocess.run([
@@ -68,7 +81,8 @@ class IdentityAndSettingsRecovery(unittest.TestCase):
     def check_identity(self, platform):
         source = (ROOT / 'src/helpers/IdentityStore.cpp').read_text()
         presence = (ROOT / 'src/helpers/FilePresence.h').read_text()
-        program = fixture_prefix() + '\n#include <helpers/IdentityStore.h>\n'
+        program = fixture_prefix(owner_only=platform == 'STM32_PLATFORM')
+        program += '\n#include <helpers/IdentityStore.h>\n'
         if platform == 'ESP32_PLATFORM':
             # Identity startup precedes the inventory. Include its real owner
             # registry so the extracted metadata probe takes the normal path.
@@ -76,13 +90,57 @@ class IdentityAndSettingsRecovery(unittest.TestCase):
         if platform == 'ESP32_PLATFORM':
             program += r'''
 struct MigrationNvs {
+  bool namespace_exists = false;
   bool pending = false;
+  bool flag_present = false;
+  uint8_t true_value = 1;
+  bool fail_write_open = false, fail_remove_pending = false;
+  int open_error = 0, flag_error = 0, blob_error = 0;
+  unsigned readonly_opens = 0, write_opens = 0, read_closes = 0;
   std::vector<uint8_t> identity;
 } migration_nvs;
+using nvs_handle_t = unsigned;
+using esp_err_t = int;
+enum { ESP_OK = 0, ESP_ERR_NVS_NOT_FOUND = 1, ESP_ERR_NVS_NOT_INITIALIZED = 2,
+       ESP_ERR_NVS_TYPE_MISMATCH = 3, ESP_ERR_NVS_INVALID_LENGTH = 4,
+       NVS_READONLY = 0, NVS_READWRITE = 1 };
+esp_err_t nvs_open(const char* name, int mode, nvs_handle_t* handle) {
+  assert(strcmp(name, "mesh-pt-migrate") == 0);
+  assert(mode == NVS_READONLY); // The probe must never create a namespace.
+  ++migration_nvs.readonly_opens;
+  if (migration_nvs.open_error) return migration_nvs.open_error;
+  if (!migration_nvs.namespace_exists) return ESP_ERR_NVS_NOT_FOUND;
+  *handle = 42;
+  return ESP_OK;
+}
+void nvs_close(nvs_handle_t handle) {
+  assert(handle == 42);
+  ++migration_nvs.read_closes;
+}
+esp_err_t nvs_get_u8(nvs_handle_t handle, const char* key, uint8_t* value) {
+  assert(handle == 42 && strcmp(key, "id-pending") == 0);
+  if (migration_nvs.flag_error) return migration_nvs.flag_error;
+  if (!migration_nvs.pending && !migration_nvs.flag_present) return ESP_ERR_NVS_NOT_FOUND;
+  *value = migration_nvs.pending ? migration_nvs.true_value : 0;
+  return ESP_OK;
+}
+esp_err_t nvs_get_blob(nvs_handle_t handle, const char* key, void* out, size_t* length) {
+  assert(handle == 42 && strcmp(key, "identity") == 0);
+  if (migration_nvs.blob_error) return migration_nvs.blob_error;
+  const size_t available = *length;
+  *length = migration_nvs.identity.size();
+  if (available < *length) return ESP_ERR_NVS_INVALID_LENGTH;
+  if (*length) memcpy(out, migration_nvs.identity.data(), *length);
+  return ESP_OK;
+}
 class Preferences {
 public:
-  bool begin(const char* name, bool) {
+  bool begin(const char* name, bool read_only) {
     assert(strcmp(name, "mesh-pt-migrate") == 0);
+    assert(!read_only); // Preferences is retained only for verified restore cleanup.
+    ++migration_nvs.write_opens;
+    if (migration_nvs.fail_write_open) return false;
+    migration_nvs.namespace_exists = true;
     return true;
   }
   bool getBool(const char* key, bool fallback) {
@@ -97,8 +155,10 @@ public:
   }
   bool remove(const char* key) {
     if (strcmp(key, "id-pending") == 0) {
+      if (migration_nvs.fail_remove_pending) return false;
       const bool existed = migration_nvs.pending;
       migration_nvs.pending = false;
+      migration_nvs.flag_present = false;
       return existed;
     }
     assert(strcmp(key, "identity") == 0);
@@ -119,8 +179,56 @@ public:
                           'bool IdentityStore::save(const char *name, const mesh::LocalIdentity& id)',
                           'bool IdentityStore::save(const char *name, const mesh::LocalIdentity& id, const char display_name[])'):
             program += extract_braced(source, signature) + '\n'
+        if platform == 'ESP32_PLATFORM':
+            # Exercise the real Companion entry point over the real identity
+            # transaction below, including the absent-file migration path.
+            companion = (ROOT / 'examples/companion_radio/DataStore.cpp').read_text()
+            program += r'''
+struct DataStore {
+  FakeFilesystem* _fs = &filesystem;
+  bool _identity_creation_blocked = false;
+  IdentityStore identity_store{filesystem, "/identity"};
+  bool loadMainIdentity(mesh::LocalIdentity&);
+  bool canCreateMainIdentity() const;
+  bool saveMainIdentity(const mesh::LocalIdentity&);
+};
+'''
+            for signature in ('static bool companionPathPresence(',
+                              'bool DataStore::loadMainIdentity(',
+                              'bool DataStore::canCreateMainIdentity() const',
+                              'bool DataStore::saveMainIdentity('):
+                program += extract_braced(companion, signature) + '\n'
         program += r'''
 int main() {
+#if defined(STM32_PLATFORM)
+  // Exercise the real FileRead helper with an owner-only File. Constructing
+  // an empty handle does no I/O, and later open() uses the requested owner,
+  // including the InternalFS fallback when the requested owner is null.
+  FakeFilesystem owner;
+  owner.files["/owner"] = {17};
+  InternalFS.files["/fallback"] = {29};
+  const unsigned owner_opens = owner.read_opens;
+  const unsigned fallback_opens = InternalFS.read_opens;
+  File owned_empty = mesh::emptyFile(&owner);
+  File missing = mesh::openFileRead(&owner, "/missing");
+  File null_path = mesh::openFileRead(&owner, nullptr);
+  File fallback_empty = mesh::emptyFile(static_cast<FakeFilesystem*>(nullptr));
+  File null_owner = mesh::openFileRead(static_cast<FakeFilesystem*>(nullptr), "/fallback");
+  assert(!owned_empty && !missing && !null_path && !fallback_empty && !null_owner);
+  assert(owner.read_opens == owner_opens && InternalFS.read_opens == fallback_opens);
+  uint8_t value = 0;
+  for (File* file : {&owned_empty, &missing, &null_path}) {
+    assert(file->open("/owner", FILE_O_READ));
+    assert(file->read(&value, 1) == 1 && value == 17);
+    file->close();
+  }
+  for (File* file : {&fallback_empty, &null_owner}) {
+    assert(file->open("/fallback", FILE_O_READ));
+    assert(file->read(&value, 1) == 1 && value == 29);
+    file->close();
+  }
+  InternalFS.files.clear();
+#endif
   // Startup reads reopen a transiently failing file and never publish a
   // partially read key. Exhausted reads still permit provisioning a new key.
   for (bool display : {false, true}) {
@@ -214,6 +322,116 @@ int main() {
   assert(recovering.recover("main") && filesystem.files["/main.id"].size() == 96);
 #endif
 #if defined(ESP32_PLATFORM)
+  // Companion must call the migration-aware loader even if the identity
+  // file is absent; absence is safe for new-key creation only after NVS is
+  // known not to hold a pending restore (or a genuine read failure).
+  for (unsigned state = 0; state < 5; ++state) {
+    filesystem = FakeFilesystem();
+    migration_nvs = MigrationNvs();
+    mesh::LocalIdentity live;
+    memset(live.pub_key, 99, PUB_KEY_SIZE);
+    DataStore companion;
+    if (state != 0) migration_nvs.namespace_exists = true;
+    if (state == 1 || state == 2) {
+      migration_nvs.pending = true;
+      migration_nvs.identity.resize(96, 7);
+      memset(migration_nvs.identity.data() + PUB_KEY_SIZE, 8, PRV_KEY_SIZE);
+    }
+    if (state == 2) filesystem.max_write = 3;
+    if (state == 3) migration_nvs.open_error = ESP_ERR_NVS_NOT_INITIALIZED;
+    if (state == 4) migration_nvs.flag_error = ESP_ERR_NVS_TYPE_MISMATCH;
+    const bool loaded = companion.loadMainIdentity(live);
+    assert(loaded == (state == 1));
+    assert(companion.canCreateMainIdentity() == (state < 2));
+    if (state == 1) {
+      assert(live.pub_key[0] == 7 && live.private_key[0] == 8);
+      assert(filesystem.files.count("/identity/_main.id") == 1);
+      assert(!migration_nvs.pending && migration_nvs.identity.empty());
+    } else {
+      assert(live.pub_key[0] == 99);
+      if (state >= 2) assert(!companion.saveMainIdentity(live));
+      if (state != 2) assert(filesystem.writes == 0);
+      if (state == 2) assert(migration_nvs.pending && migration_nvs.identity.size() == 96);
+    }
+    assert(migration_nvs.readonly_opens == 1);
+  }
+  for (uint8_t prefix : {uint8_t(7), uint8_t(0xff)}) {
+    filesystem = FakeFilesystem();
+    migration_nvs = MigrationNvs();
+    IdentityStore writer(filesystem, "/identity");
+    mesh::LocalIdentity saved, live;
+    memset(saved.pub_key, prefix, PUB_KEY_SIZE);
+    memset(saved.private_key, 8, PRV_KEY_SIZE);
+    assert(writer.save("_main", saved));
+    const auto before = filesystem.files;
+    const unsigned writes_before = filesystem.writes;
+    DataStore companion;
+    assert(companion.loadMainIdentity(live) && companion.canCreateMainIdentity());
+    assert(memcmp(live.pub_key, saved.pub_key, PUB_KEY_SIZE) == 0);
+    assert(memcmp(live.private_key, saved.private_key, PRV_KEY_SIZE) == 0);
+    assert(filesystem.files == before && filesystem.writes == writes_before);
+    assert(!migration_nvs.namespace_exists && migration_nvs.write_opens == 0);
+  }
+  // Clean boots are read-only, whether the namespace is absent, empty, or
+  // contains an explicitly false flag. Repeated probes must not create NVS.
+  for (bool existing : {false, true}) {
+   for (unsigned state = 0; state < 3; ++state) {
+    filesystem = FakeFilesystem();
+    migration_nvs = MigrationNvs();
+    migration_nvs.namespace_exists = state != 0;
+    migration_nvs.flag_present = state == 2;
+    IdentityStore fresh(filesystem, "/identity");
+    mesh::LocalIdentity live;
+    memset(live.pub_key, 99, PUB_KEY_SIZE);
+    if (existing) {
+      mesh::LocalIdentity saved;
+      memset(saved.pub_key, 7, PUB_KEY_SIZE);
+      memset(saved.private_key, 8, PRV_KEY_SIZE);
+      assert(fresh.save("_main", saved));
+    }
+    const auto before = filesystem.files;
+    const unsigned writes_before = filesystem.writes;
+    for (unsigned repeat = 0; repeat < 3; ++repeat) {
+      assert(fresh.loadResult("_main", live) == (existing
+          ? IdentityLoadResult::Loaded : IdentityLoadResult::Missing));
+      assert(live.pub_key[0] == (existing ? 7 : 99));
+      assert(filesystem.writes == writes_before && filesystem.files == before);
+      assert(migration_nvs.namespace_exists == (state != 0));
+    }
+    assert(migration_nvs.readonly_opens == 3 && migration_nvs.write_opens == 0);
+    assert(migration_nvs.read_closes == (state ? 3U : 0U));
+   }
+  }
+  // A genuine NVS probe/read failure is never mistaken for a clean boot.
+  // Neither a missing file nor an existing temporary key may bypass it.
+  for (bool existing : {false, true}) {
+    for (unsigned fault = 0; fault < 7; ++fault) {
+      filesystem = FakeFilesystem();
+      migration_nvs = MigrationNvs();
+      IdentityStore guarded(filesystem, "/identity");
+      mesh::LocalIdentity temporary, live;
+      memset(temporary.pub_key, 9, PUB_KEY_SIZE);
+      memset(live.pub_key, 99, PUB_KEY_SIZE);
+      if (existing) assert(guarded.save("_main", temporary));
+      const auto before = filesystem.files;
+      const unsigned writes_before = filesystem.writes;
+      migration_nvs.namespace_exists = true;
+      migration_nvs.pending = true;
+      migration_nvs.identity.resize(96, 7);
+      if (fault == 0) migration_nvs.open_error = ESP_ERR_NVS_NOT_INITIALIZED;
+      if (fault == 1) migration_nvs.flag_error = ESP_ERR_NVS_TYPE_MISMATCH;
+      if (fault == 2) migration_nvs.blob_error = ESP_ERR_NVS_NOT_FOUND;
+      if (fault == 3) migration_nvs.blob_error = ESP_ERR_NVS_TYPE_MISMATCH;
+      if (fault == 4) migration_nvs.identity.resize(95);
+      if (fault == 5) migration_nvs.identity.resize(97);
+      if (fault == 6) migration_nvs.true_value = 2; // Not a serialized Preferences bool.
+      assert(guarded.loadResult("_main", live) == IdentityLoadResult::Unreadable);
+      assert(live.pub_key[0] == 99 && filesystem.files == before);
+      assert(filesystem.writes == writes_before && migration_nvs.pending);
+      assert(migration_nvs.write_opens == 0);
+      assert(migration_nvs.read_closes == (fault == 0 ? 0U : 1U));
+    }
+  }
   // A pending partition migration must replace a temporary key with the
   // original one, and keep its NVS copy until the file is durable.
   filesystem = FakeFilesystem();
@@ -223,6 +441,7 @@ int main() {
   memset(temporary.pub_key, 9, PUB_KEY_SIZE);
   memset(temporary.private_key, 10, PRV_KEY_SIZE);
   assert(migrated.save("_main", temporary));
+  migration_nvs.namespace_exists = true;
   migration_nvs.pending = true;
   migration_nvs.identity.resize(PUB_KEY_SIZE + PRV_KEY_SIZE);
   memset(migration_nvs.identity.data(), 7, PUB_KEY_SIZE);
@@ -234,9 +453,26 @@ int main() {
   assert(migrated.loadResult("_main", restored) == IdentityLoadResult::Loaded);
   assert(restored.pub_key[0] == 7 && restored.private_key[0] == 8);
   assert(!migration_nvs.pending && migration_nvs.identity.empty());
+  assert(migration_nvs.write_opens == 1); // Only after verified durable restore.
   mesh::LocalIdentity again;
   assert(migrated.load("_main", again));
   assert(again.pub_key[0] == 7 && again.private_key[0] == 8);
+  assert(migration_nvs.write_opens == 1); // Later ordinary boots stay read-only.
+  // Failed cleanup remains fail-closed; never remove the staged key before
+  // clearing its pending marker. A later retry must restore the same identity.
+  for (bool fail_open : {false, true}) {
+    migration_nvs.pending = true;
+    migration_nvs.identity.resize(96, 7);
+    migration_nvs.fail_write_open = fail_open;
+    migration_nvs.fail_remove_pending = !fail_open;
+    memset(restored.pub_key, 99, PUB_KEY_SIZE);
+    assert(migrated.loadResult("_main", restored) == IdentityLoadResult::Unreadable);
+    assert(restored.pub_key[0] == 99 && migration_nvs.pending);
+    assert(migration_nvs.identity.size() == 96);
+    migration_nvs.fail_write_open = migration_nvs.fail_remove_pending = false;
+    assert(migrated.loadResult("_main", restored) == IdentityLoadResult::Loaded);
+    assert(restored.pub_key[0] == 7 && !migration_nvs.pending && migration_nvs.identity.empty());
+  }
 #endif
 }
 '''

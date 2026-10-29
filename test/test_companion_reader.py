@@ -3,11 +3,13 @@
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 import zlib
 
 from test_message_navigation import PAIRING_PREAMBLE as PREAMBLE
@@ -36,6 +38,7 @@ class CompanionReaderTest(unittest.TestCase):
     def test_block_sizes_roundtrip_all_verses(self):
         for size in (1024, 2048, 4096):
             packed, blocks = packer.pack(self.document, size)
+            words = packer.token_dictionary(packer.source_verses(self.document, size))
             actual = []
             for offset, length, plain_length, first in blocks:
                 self.assertEqual(first, len(actual))
@@ -43,8 +46,96 @@ class CompanionReaderTest(unittest.TestCase):
                 self.assertEqual(len(plain), plain_length)
                 self.assertLessEqual(len(plain), size)
                 self.assertEqual(plain[-1], 0)
-                actual.extend(part.decode("ascii") for part in plain[:-1].split(b"\0"))
+                for encoded in plain[:-1].split(b"\0"):
+                    decoded = b"".join(words[value - 128] if value >= 128 else bytes([value])
+                                       for value in encoded)
+                    if any(value >= 128 for value in encoded):
+                        self.assertLessEqual(len(plain) + len(decoded) + 1, size)
+                    actual.append(decoded.decode("ascii"))
             self.assertEqual(actual, list(self.expected_verses.values()))
+
+    def test_arm_reader_decode_frames_fit_existing_loop_stack(self):
+        # Use the actual Cortex-M4 compiler when installed. This does not
+        # invoke PlatformIO or reserve decode buffers in ordinary commands.
+        tool = shutil.which("arm-none-eabi-g++")
+        if not tool:
+            candidate = Path.home() / ".platformio/packages/toolchain-gccarmnoneeabi/bin/arm-none-eabi-g++"
+            if candidate.is_file():
+                tool = str(candidate)
+        if not tool:
+            self.skipTest("ARM compiler unavailable; firmware stack qualification remains required")
+        cc = str(Path(tool).with_name("arm-none-eabi-gcc"))
+        with tempfile.TemporaryDirectory(prefix="mesh-reader-arm-stack-") as directory:
+            directory = Path(directory)
+            (directory / "Arduino.h").write_text(
+                "#pragma once\n#include <stdint.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <string.h>\n"
+                "class Stream { public: virtual size_t write(const uint8_t*,size_t);size_t print(const char*); };\n")
+            flags = ["-mcpu=cortex-m4", "-mthumb", "-Oz", "-fno-inline-small-functions",
+                     "-fstack-usage", "-DNRF52_PLATFORM=1", "-DCOMPANION_RADIO_FULL=1",
+                     "-DENABLE_USB_INTERFACE=1", "-I" + str(directory),
+                     "-I" + str(ROOT / "src"), "-I" + str(FIXTURE)]
+            self.run_checked([tool, "-std=gnu++17", "-fno-exceptions", "-fno-rtti", *flags,
+                "-c", str(ROOT / "src/helpers/CompanionReader.cpp"), "-o", str(directory / "reader.o")])
+            self.run_checked([cc, "-std=gnu11", *flags, "-c",
+                str(ROOT / "src/helpers/ota/OtaTinf.c"), "-o", str(directory / "tinf.o")])
+
+            def frames(name):
+                result = {}
+                for line in (directory / (name + ".su")).read_text().splitlines():
+                    function, count, kind = line.rsplit("\t", 2)
+                    self.assertEqual(kind, "static", line)
+                    result[function] = int(count)
+                return result
+
+            def frame(rows, signature):
+                found = [count for function, count in rows.items() if signature in function and " [with " not in function]
+                self.assertEqual(len(found), 1, signature)
+                return found[0]
+
+            reader, decoder = frames("reader"), frames("tinf")
+            # Summing all helper frames overbounds mutually exclusive branches
+            # (tree building and block decoding), including their leaf calls.
+            decoder_bytes = sum(count for name, count in decoder.items()
+                if not name.endswith(":tinf_init") and not name.endswith(":tinf_uncompress"))
+            lookup = frame(reader, "mesh::readReaderVerse(")
+            terminal = (frame(reader, "mesh::handleReaderCommand(")
+                + frame(reader, "::printReplyPage(") + frame(reader, "::replyVerse(")
+                + lookup + decoder_bytes)
+            loop_bytes, caller_reserve = 8192, 1536
+            self.assertLessEqual(terminal + caller_reserve, loop_bytes)
+            ui_max = 0
+            for small_font in (0, 1):
+                name = "screen" + str(small_font)
+                self.run_checked([tool, "-std=gnu++17", "-fno-exceptions", "-fno-rtti", *flags,
+                    f"-DUI_SMALL_MESSAGE_FONT={small_font}", "-DUI_BUTTON_READER_HINT=1",
+                    "-DUI_READER_TOUCH_BAR=0", "-c", str(FIXTURE / "test_reader_screen.cpp"),
+                    "-o", str(directory / (name + ".o"))])
+                # The screen loads a verse, then wraps it: decoding and line
+                # measurement never nest. Keep the larger real call path,
+                # including emitted lambda/template helpers on each path.
+                screen_frames = frames(name)
+                entry = frame(screen_frames, "void ReaderScreen::process(int, bool)")
+                load = frame(screen_frames, "ReaderScreen::process(int, bool)::<lambda(uint16_t)>")
+                wrap = frame(screen_frames, "ReaderScreen::process(int, bool)::<lambda(uint16_t, uint16_t)>")
+                line_frames = [count for function, count in screen_frames.items()
+                               if "mesh::bible::readerLine(" in function
+                               and "ReaderScreen::process(" in function]
+                self.assertEqual(len(line_frames), 1)
+                measure_frames = [count for function, count in screen_frames.items()
+                                  if "ReaderScreen::process(int, bool)::<lambda(const char*)>" in function
+                                  and " [with " not in function]
+                self.assertLessEqual(len(measure_frames), 1)
+                # Any newly emitted helper must be placed in this call graph,
+                # rather than silently disappearing from the stack estimate.
+                self.assertEqual(sum("ReaderScreen::process(" in function for function in screen_frames),
+                                 4 + len(measure_frames))
+                ui = entry + max(load + lookup + decoder_bytes,
+                                 wrap + sum(line_frames) + sum(measure_frames))
+                ui_max = max(ui_max, ui)
+                self.assertLessEqual(ui + caller_reserve, loop_bytes)
+            self.assertEqual(packer.BLOCK_SIZE, 4096)
+            print(f"ARM Reader local stack: terminal {terminal}, screen {ui_max}; "
+                  f"caller reserve {caller_reserve}, loop {loop_bytes} bytes")
 
     def test_ascii_typography_preserves_words_case_and_pinned_source(self):
         original = copy.deepcopy(self.document)
@@ -61,13 +152,55 @@ class CompanionReaderTest(unittest.TestCase):
 
     def test_ascii_data_size(self):
         packed, blocks = packer.pack(self.document)
-        self.assertEqual(sum(block[2] for block in blocks), 96568)
-        self.assertEqual(len(blocks), 49)
-        self.assertEqual(len(packed) + 12 * len(blocks), 42775)
+        self.assertEqual(sum(len(v) + 1 for v in packer.source_verses(self.document)), 96568)
+        self.assertEqual(sum(block[2] for block in blocks), 53806)
+        self.assertEqual(len(blocks), 14)
+        self.assertEqual(len(packed), 32324)
+        self.assertEqual(packer.block_index_layout(blocks), ("uint16_t", 8))
+        words = packer.token_dictionary(packer.source_verses(self.document))
+        self.assertEqual(len(words), 128)
+        self.assertEqual(packer.dictionary_storage(words), 963)
+        self.assertEqual(len(packed) + 8 * len(blocks) + packer.dictionary_storage(words), 33399)
+
+    def test_literal_fallback_and_empty_dictionary_preserve_original_text_limit(self):
+        document = copy.deepcopy(self.document)
+        document["verses"] = dict.fromkeys(packer.references(), None)
+        document["verses"]["1:1"] = "q" * (packer.BLOCK_SIZE - 1)
+        blocks, starts, words = packer.token_blocks(document)
+        self.assertEqual(words, [])
+        self.assertEqual(blocks[0], b"q" * (packer.BLOCK_SIZE - 1) + b"\0")
+        self.assertEqual(starts[:2], [0, 1])
+        with patch.object(packer, "pack", return_value=(b"x", [(0, 1, 4096, 0)])):
+            header = packer.render(document)
+        self.assertIn("using ReaderCorpus = CorpusT<uint16_t>;", header)
+        self.assertNotIn("readerWords[]", header)
+        # A known dictionary cannot force a very long mostly literal verse
+        # to reserve a second copy. Its exact ASCII fallback stays decodable.
+        document = copy.deepcopy(self.document)
+        long_verse = "z the " + "q" * (packer.BLOCK_SIZE - 7)
+        document["verses"]["1:1"] = long_verse
+        blocks, _, words = packer.token_blocks(document)
+        self.assertIn(b" the", words)
+        self.assertEqual(blocks[0], long_verse.encode("ascii") + b"\0")
+        self.assertEqual(len(blocks[0]), packer.BLOCK_SIZE)
+
+    def test_index_offsets_widen_before_any_block_start_can_truncate(self):
+        self.assertEqual(packer.block_index_layout([(65535, 7, 2, 0)]), ("uint16_t", 8))
+        self.assertEqual(packer.block_index_layout([(65536, 7, 2, 0)]), ("uint32_t", 12))
+        self.assertEqual(packer.block_index_layout([(0xFFFFFFFF, 7, 2, 0)]), ("uint32_t", 12))
+        for offset in (-1, 0x100000000):
+            with self.assertRaises(ValueError):
+                packer.block_index_layout([(offset, 7, 2, 0)])
+        with patch.object(packer, "pack", return_value=(b"", [(65536, 7, 2, 0)])):
+            header = packer.render(self.document)
+        self.assertIn("using ReaderBlockIndex = BlockIndexT<uint32_t>;", header)
+        self.assertIn("using ReaderCorpus = TokenCorpusT<uint32_t>;", header)
+        self.assertIn("sizeof(ReaderBlockIndex) == 12", header)
+        self.assertIn("{65536, 7, 2, 0}", header)
 
     def test_invalid_sources_are_rejected(self):
         for bad_text in ("", "leading\ncommand", "bad\x1b[2J", "bad\0text",
-                         "bad\u202eRTL", " too much space", "a" * 2048,
+                         "bad\u202eRTL", " too much space", "a" * packer.BLOCK_SIZE,
                          "caf\u00e9", "unmapped\u2026punctuation", "bad\U0001f600text"):
             document = copy.deepcopy(self.document)
             document["verses"]["1:1"] = bad_text
@@ -111,6 +244,52 @@ class CompanionReaderTest(unittest.TestCase):
             self.assertNotIn("readerData", result)
             self.assertNotIn("handleReaderCommand", result)
 
+    def test_tcp_reader_write_returns_immediately_under_socket_backpressure(self):
+        compiler = shutil.which("g++")
+        if not compiler:
+            self.skipTest("host G++ required")
+        source = (ROOT / "examples/companion_radio/main.cpp").read_text()
+        callback = extract_braced(source, "static size_t ota_console_try_reader_write(")
+        harness = r'''
+#include <Arduino.h>
+#include <cassert>
+#include <sys/socket.h>
+#include <unistd.h>
+class WiFiClient : public Stream {
+  int socket_;
+public:
+  explicit WiFiClient(int socket) : socket_(socket) {}
+  int fd() const { return socket_; }
+};
+@CALLBACK@
+int main() {
+  alarm(3); // A blocking write to a full socket fails the test, never hangs CI.
+  int sockets[2];
+  assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+  int capacity = 1024;
+  assert(setsockopt(sockets[0], SOL_SOCKET, SO_SNDBUF, &capacity, sizeof(capacity)) == 0);
+  uint8_t data[96] = {};
+  while (send(sockets[0], data, sizeof(data), MSG_DONTWAIT) > 0) {}
+  WiFiClient client(sockets[0]), invalid(-1);
+  for (int i = 0; i < 100; ++i)
+    assert(ota_console_try_reader_write(client, data, sizeof(data)) == 0);
+  assert(client.writes == 0); // The blocking Stream path must never be used.
+  uint8_t drained[8192];
+  assert(recv(sockets[1], drained, sizeof(drained), 0) > 0);
+  assert(ota_console_try_reader_write(client, data, sizeof(data)) > 0);
+  assert(ota_console_try_reader_write(invalid, data, sizeof(data)) == 0);
+  close(sockets[0]);
+  close(sockets[1]);
+}
+'''.replace("@CALLBACK@", callback)
+        with tempfile.TemporaryDirectory(prefix="mesh-reader-socket-") as directory:
+            cpp = Path(directory) / "socket.cpp"
+            binary = Path(directory) / "socket-test"
+            cpp.write_text(harness)
+            self.run_checked([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                              "-I" + str(FIXTURE), str(cpp), "-o", str(binary)])
+            self.run_checked([str(binary)])
+
     def test_terminal_dispatch_is_separate_from_bounded_api_replies(self):
         source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text(encoding="utf-8")
         start = source.index("void MyMesh::handleTerminalCommand(")
@@ -119,11 +298,38 @@ class CompanionReaderTest(unittest.TestCase):
         self.assertEqual(source.count("mesh::handleReaderCommand("), 2)
         self.assertLess(terminal.index("mesh::handleReaderCommand("),
                         terminal.index("char local_reply[160]"))
-        self.assertIn("get reader <chapter>:<verse> (World English Bible, offline)", terminal)
-        self.assertEqual(terminal.count("#if COMPANION_FEATURE_READER"), 2)
+        help_text = (ROOT / "examples/companion_radio/CompanionHelp.inc").read_text()
+        self.assertIn("get reader <chapter>[:<verse>[-<last>]] [page] (World English Bible, offline)", help_text)
+        self.assertIn('#include "CompanionHelp.inc"', terminal)
+        self.assertIn("mesh::companion::writePackedCompanionHelp(output)", terminal)
+        packed_help = (ROOT / "examples/companion_radio/CompanionHelpPacked.cpp").read_text()
+        self.assertIn('#include "CompanionHelp.inc"', packed_help)
+        self.assertEqual(terminal.count("#if COMPANION_FEATURE_READER"), 1)
+        self.assertEqual(help_text.count("#if COMPANION_FEATURE_READER"), 1)
         rescue = extract_braced(source, "void MyMesh::checkCLIRescueCmd()")
         self.assertLess(rescue.index("mesh::handleReaderCommand(cli_command, output)"),
                         rescue.index("handleCommand(cli_command, 0, reply_buf)"))
+
+    def test_token_corruption_boundaries_under_native_sanitizers(self):
+        cc, cxx = shutil.which("gcc"), shutil.which("g++")
+        if not cc or not cxx:
+            self.skipTest("host GCC and G++ required")
+        source = (FIXTURE / "test_reader_lookup.cpp").read_text()
+        checks = extract_braced(source, "static void checkTokenBounds()")
+        harness = ("#include <helpers/bible/ReaderLookup.h>\n#include <cassert>\n"
+                   "#include <string>\n#include <vector>\nusing namespace mesh::bible;\n"
+                   + checks + "\nint main() { checkTokenBounds(); }\n")
+        sanitizers = [] if os.name == "nt" else [
+            "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie"]
+        with tempfile.TemporaryDirectory(prefix="mesh-reader-token-bounds-") as directory:
+            directory = Path(directory)
+            cpp, obj, binary = directory / "checks.cpp", directory / "tinf.o", directory / "checks"
+            cpp.write_text(harness)
+            self.run_checked([cc, "-std=c11", "-Os", "-DOTA_TRANSPORT_DEFLATE_TEST=1", *sanitizers, "-c",
+                              str(ROOT / "src/helpers/ota/OtaTinf.c"), "-o", str(obj)])
+            self.run_checked([cxx, "-std=c++17", "-Os", "-Wall", "-Wextra", "-Werror",
+                              *sanitizers, "-I" + str(ROOT / "src"), str(cpp), str(obj), "-o", str(binary)])
+            self.run_checked([str(binary)])
 
     def test_production_bounded_reader_dispatch_preserves_tags_and_local_access(self):
         cc, cxx = shutil.which("gcc"), shutil.which("g++")
@@ -135,13 +341,27 @@ class CompanionReaderTest(unittest.TestCase):
         # handling and local-console gate, against the real Reader handler.
         handler = handler[:handler.index("#if defined(NRF52_POWER_MANAGEMENT)")]
         handler += "  return false;\n}\n"
+        predicate = extract_braced(source, "static bool isCompanionReaderRequest(")
         harness = r'''
 #include <Arduino.h>
 #include <helpers/CompanionReader.h>
 #include <cassert>
 #include <cstring>
 #include <string>
+#include "battery_calibration_cli_stub.h"
+struct BatteryBoard {} board;
+struct Radio { bool active = false; };
+namespace mesh {
+bool morseTimingActive(const Radio* radio) { return radio && radio->active; }
+namespace power { bool handleRegulatorCommand(const char*,char*,size_t) { return false; } }
+namespace leds { bool handleCommand(const char*,char*,size_t) { return false; } }
+namespace esp32 { bool handlePowerTestCommand(const char*,char*,size_t,bool) { return false; } }
+}
+@PREDICATE@
 struct MyMesh {
+  Radio radio;
+  Radio* _radio = &radio;
+  bool handleAlertCommand(const char*, char*, size_t) { return false; }
   bool handleCommand(const char*, uint32_t, char*);
 };
 @HANDLER@
@@ -166,8 +386,19 @@ int main() {
   assert(!mesh.handleCommand("get reader 3:16", 123, out.reply));
   assert(!mesh.handleCommand("AA|get reader 3:16", 123, out.reply));
   assert(!mesh.handleCommand("get name", 0, out.reply));
+  // Block synchronous 4 KiB decompression before it can stall Morse sampling,
+  // including tagged bounded replies. Ordinary readers resume unchanged.
+  mesh.radio.active = true;
+  assert(mesh.handleCommand("E5|get reader 21:17 2", 0, out.reply));
+  assert(std::string(out.reply) == "E5|Error: Reader unavailable during Morse");
+  assert(strlen(out.reply) < sizeof(out.reply) && out.after == 0xaabbccdd);
+  assert(!mesh.handleCommand("get name", 0, out.reply));
+  assert(!mesh.handleCommand("get reader 3:16", 123, out.reply));
+  mesh.radio.active = false;
+  assert(mesh.handleCommand("F6|get reader 3:16", 0, out.reply));
+  assert(std::string(out.reply).find("F6|Reader 3:16 (WEB)\n") == 0);
 }
-'''.replace("@HANDLER@", handler)
+'''.replace("@HANDLER@", handler).replace("@PREDICATE@", predicate)
         with tempfile.TemporaryDirectory(prefix="meshcore-reader-dispatch-") as directory:
             directory = Path(directory)
             generated = directory / "dispatch.cpp"
@@ -179,6 +410,7 @@ int main() {
                                   str(ROOT / "src/helpers/ota/OtaTinf.c"), "-o", str(obj)])
                 self.run_checked([cxx, "-std=c++17", "-Os", "-Wall", "-Wextra", "-Werror",
                                   *flags, "-I" + str(ROOT / "src"), "-I" + str(FIXTURE),
+                                  "-I" + str(ROOT / "test/fixtures"),
                                   str(generated), str(ROOT / "src/helpers/CompanionReader.cpp"),
                                   str(obj), "-o", str(binary)])
                 self.run_checked([str(binary)])
@@ -203,6 +435,114 @@ int main() {
                                       str(FIXTURE / "test_reader_screen.cpp"), str(ROOT / "src/helpers/CompanionReader.cpp"),
                                       str(obj), "-o", str(binary)])
                     self.run_checked([str(binary)])
+
+    def test_actual_reader_stream_pauses_and_decode_entrypoints_reject_during_morse(self):
+        cc, cxx = shutil.which("gcc"), shutil.which("g++")
+        if not cc or not cxx:
+            self.skipTest("host GCC and G++ required")
+        source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text(encoding="utf-8")
+        predicate = extract_braced(source, "static bool isCompanionReaderRequest(")
+
+        def reader_block(method, marker):
+            body = extract_braced(source, method)
+            position = body.index(marker)
+            start = body.rfind("#if COMPANION_FEATURE_READER", 0, position)
+            return body[start:body.index("#endif", position) + len("#endif")]
+
+        terminal = reader_block("void MyMesh::handleTerminalCommand(", "mesh::handleReaderCommand(")
+        rescue = reader_block("void MyMesh::checkCLIRescueCmd()", "mesh::handleReaderCommand(cli_command, output)")
+        service = reader_block("void MyMesh::loop()", "mesh::serviceReaderCommand();")
+        harness = r'''
+#include <Arduino.h>
+#include <helpers/CompanionReader.h>
+#include <cassert>
+#include <cstring>
+#include <string>
+struct Radio { bool active = false; };
+namespace mesh {
+bool morseTimingActive(const Radio* radio) { return radio && radio->active; }
+}
+@PREDICATE@
+struct MyMesh {
+  Radio radio;
+  Radio* _radio = &radio;
+  Stream output;
+  unsigned ordinary = 0;
+  Stream& terminalOutput() { return output; }
+  void terminalCommand(const char* command, bool reader_prompt = true,
+                       mesh::ReaderTryWrite reader_try_write = nullptr) {
+@TERMINAL@
+    ++ordinary;
+  }
+  void rescueCommand(const char* cli_command) {
+    Stream& output = this->output;
+@RESCUE@
+    { ++ordinary; }
+  }
+  void loopReader() {
+@SERVICE@
+  }
+};
+int main() {
+  assert(isCompanionReaderRequest("  GET\tREADER 3:16 2"));
+  assert(isCompanionReaderRequest("get reader"));
+  assert(!isCompanionReaderRequest("get readership"));
+  assert(!isCompanionReaderRequest("morse stop"));
+  assert(!isCompanionReaderRequest(nullptr));
+  MyMesh mesh;
+  mesh.terminalCommand("get reader 3:16");
+  assert(mesh::readerCommandActive(&mesh.output));
+  mesh.loopReader(); // A real chapter header is partially/fully admitted.
+  const auto before = mesh.output.text;
+  const auto writes = mesh.output.writes;
+  mesh.radio.active = true;
+  for (int n = 0; n < 1000; ++n) mesh.loopReader();
+  assert(mesh.output.text == before && mesh.output.writes == writes);
+  assert(mesh::readerCommandActive(&mesh.output)); // Pausing retains the cursor.
+  mesh.radio.active = false;
+  for (int n = 0; mesh::readerCommandActive(); ++n) {
+    assert(n < 1000); mesh.loopReader();
+  }
+  assert(mesh.output.text.find("eternal life.") != std::string::npos);
+  assert(mesh.output.text.find("Reader 3:16", mesh.output.text.find("Reader 3:16") + 1) == std::string::npos);
+  assert(mesh.output.text.size() > before.size());
+
+  mesh.terminalCommand("get reader 3:16");
+  assert(mesh::readerCommandActive());
+  mesh.radio.active = true; mesh.output.text.clear();
+  mesh.terminalCommand("get reader 21:17 2"); // Synchronous page must not inflate.
+  assert(mesh.output.text == "  ERROR: Reader unavailable during Morse\r\n");
+  assert(!mesh::readerCommandActive());
+  mesh.output.text.clear(); mesh.rescueCommand("get reader 3:16 1");
+  assert(mesh.output.text == "  ERROR: Reader unavailable during Morse\r\n");
+  assert(!mesh::readerCommandActive());
+  mesh.output.text.clear(); mesh.terminalCommand("morse stop");
+  mesh.rescueCommand("morse stop");
+  assert(mesh.ordinary == 2 && mesh.output.text.empty()); // Stop/input still dispatch.
+
+  mesh.radio.active = false;
+  mesh.rescueCommand("get reader 3:16");
+  assert(mesh::readerCommandActive());
+  for (int n = 0; mesh::readerCommandActive(); ++n) {
+    assert(n < 1000); mesh.loopReader();
+  }
+  assert(mesh.output.text.find("eternal life.") != std::string::npos);
+}
+'''.replace("@PREDICATE@", predicate).replace("@TERMINAL@", terminal).replace("@RESCUE@", rescue).replace("@SERVICE@", service)
+        with tempfile.TemporaryDirectory(prefix="meshcore-reader-morse-") as directory:
+            directory = Path(directory)
+            generated = directory / "interlock.cpp"
+            generated.write_text(harness)
+            for platform in ("ESP32_PLATFORM", "NRF52_PLATFORM"):
+                flags = [f"-D{platform}=1", "-DCOMPANION_RADIO_FULL=1", "-DENABLE_USB_INTERFACE=1"]
+                obj, binary = directory / "tinf.o", directory / "interlock.exe"
+                self.run_checked([cc, "-std=c11", "-Os", *flags, "-c",
+                                  str(ROOT / "src/helpers/ota/OtaTinf.c"), "-o", str(obj)])
+                self.run_checked([cxx, "-std=c++17", "-Os", "-Wall", "-Wextra", "-Werror",
+                                  *flags, "-I" + str(ROOT / "src"), "-I" + str(FIXTURE),
+                                  str(generated), str(ROOT / "src/helpers/CompanionReader.cpp"),
+                                  str(obj), "-o", str(binary)])
+                self.run_checked([str(binary)])
 
     def test_reader_button_routing_and_profile_gate(self):
         ui = (ROOT / "examples/companion_radio/ui-new/UITask.cpp").read_text(encoding="utf-8")

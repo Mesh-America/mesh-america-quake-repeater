@@ -1,0 +1,494 @@
+{
+  "profiles": {
+    "all-options-native0-lost0": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=1",
+        "COMPANION_FEATURE_READER=1",
+        "COMPANION_FEATURE_MEMORY_DIAGNOSTICS=1",
+        "COMPANION_FEATURE_NOTIFICATIONS=1",
+        "COMPANION_RADIO_FULL=1",
+        "COMPANION_EXCLUSIVE_WIFI_BLE=1",
+        "WITH_WEBCONFIG=1",
+        "MESH_PRIMARY_ESPNOW=1",
+        "COMPANION_FEATURE_TEMP_RADIO=1",
+        "COMPANION_FEATURE_OTA_CLI=1",
+        "BLE_PIN_CODE=1",
+        "ESP32=1",
+        "NRF52_PLATFORM=1",
+        "EXTRAFS=1",
+        "WIFI_SSID=\"test\"",
+        "MESH_ENABLE_TX_BEACONS=1",
+        "MESH_ENABLE_MESHTEXT_CHAT=1",
+        "MESH_ENABLE_ETHERNET_TUNNEL=1",
+        "OTA_RAK15002_SD_STORE=1",
+        "ETHERNET_USE_RAK13800=1",
+        "PIN_BUZZER=1",
+        "PIN_VIBRATION=1",
+        "HAS_DRV2605=1",
+        "ESP32_PLATFORM=1",
+        "MESH_USB_CONSOLE_COOPERATIVE=0",
+        "MESH_ENABLE_LOST_REPLY=0"
+      ],
+      "output_bytes": [
+        4907,
+        4899
+      ],
+      "output_sha256": [
+        "f35a89cf2f1f730069729b5d977edb48b89e5062e14ead8009b5675e1d3146f8",
+        "8d68da4d7f2b66a8a2ad889b0f7e01eb1a9a5432388ac6466ed3c53eebd558c1"
+      ]
+    },
+    "all-options-native0-lost1": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=1",
+        "COMPANION_FEATURE_READER=1",
+        "COMPANION_FEATURE_MEMORY_DIAGNOSTICS=1",
+        "COMPANION_FEATURE_NOTIFICATIONS=1",
+        "COMPANION_RADIO_FULL=1",
+        "COMPANION_EXCLUSIVE_WIFI_BLE=1",
+        "WITH_WEBCONFIG=1",
+        "MESH_PRIMARY_ESPNOW=1",
+        "COMPANION_FEATURE_TEMP_RADIO=1",
+        "COMPANION_FEATURE_OTA_CLI=1",
+        "BLE_PIN_CODE=1",
+        "ESP32=1",
+        "NRF52_PLATFORM=1",
+        "EXTRAFS=1",
+        "WIFI_SSID=\"test\"",
+        "MESH_ENABLE_TX_BEACONS=1",
+        "MESH_ENABLE_MESHTEXT_CHAT=1",
+        "MESH_ENABLE_ETHERNET_TUNNEL=1",
+        "OTA_RAK15002_SD_STORE=1",
+        "ETHERNET_USE_RAK13800=1",
+        "PIN_BUZZER=1",
+        "PIN_VIBRATION=1",
+        "HAS_DRV2605=1",
+        "ESP32_PLATFORM=1",
+        "MESH_USB_CONSOLE_COOPERATIVE=0",
+        "MESH_ENABLE_LOST_REPLY=1"
+      ],
+      "output_bytes": [
+        4942,
+        4934
+      ],
+      "output_sha256": [
+        "1931d924971295f58e9c87606a101d52f4c584a3e2a76d8aed208874c17942b1",
+        "81707eb39133311da39145a722ac526997e21efe597ded614ef1818af11414dc"
+      ]
+    },
+    "all-options-native1-lost0": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=1",
+        "COMPANION_FEATURE_READER=1",
+        "COMPANION_FEATURE_MEMORY_DIAGNOSTICS=1",
+        "COMPANION_FEATURE_NOTIFICATIONS=1",
+        "COMPANION_RADIO_FULL=1",
+        "COMPANION_EXCLUSIVE_WIFI_BLE=1",
+        "WITH_WEBCONFIG=1",
+        "MESH_PRIMARY_ESPNOW=1",
+        "COMPANION_FEATURE_TEMP_RADIO=1",
+        "COMPANION_FEATURE_OTA_CLI=1",
+        "BLE_PIN_CODE=1",
+        "ESP32=1",
+        "NRF52_PLATFORM=1",
+        "EXTRAFS=1",
+        "WIFI_SSID=\"test\"",
+        "MESH_ENABLE_TX_BEACONS=1",
+        "MESH_ENABLE_MESHTEXT_CHAT=1",
+        "MESH_ENABLE_ETHERNET_TUNNEL=1",
+        "OTA_RAK15002_SD_STORE=1",
+        "ETHERNET_USE_RAK13800=1",
+        "PIN_BUZZER=1",
+        "PIN_VIBRATION=1",
+        "HAS_DRV2605=1",
+        "ESP32_PLATFORM=1",
+        "MESH_USB_CONSOLE_COOPERATIVE=1",
+        "MESH_ENABLE_LOST_REPLY=0"
+      ],
+      "output_bytes": [
+        4992,
+        4984
+      ],
+      "output_sha256": [
+        "916dfbc8915ca39d0f298d2c23dee8674605f73ede5d0f39134e791523864114",
+        "8ed4ff32d2e8a6e9f3dabae7bf0d1e5497ee09d77294b8e4b5399aa43e57cee9"
+      ]
+    },
+    "all-options-native1-lost1": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=1",
+        "COMPANION_FEATURE_READER=1",
+        "COMPANION_FEATURE_MEMORY_DIAGNOSTICS=1",
+        "COMPANION_FEATURE_NOTIFICATIONS=1",
+        "COMPANION_RADIO_FULL=1",
+        "COMPANION_EXCLUSIVE_WIFI_BLE=1",
+        "WITH_WEBCONFIG=1",
+        "MESH_PRIMARY_ESPNOW=1",
+        "COMPANION_FEATURE_TEMP_RADIO=1",
+        "COMPANION_FEATURE_OTA_CLI=1",
+        "BLE_PIN_CODE=1",
+        "ESP32=1",
+        "NRF52_PLATFORM=1",
+        "EXTRAFS=1",
+        "WIFI_SSID=\"test\"",
+        "MESH_ENABLE_TX_BEACONS=1",
+        "MESH_ENABLE_MESHTEXT_CHAT=1",
+        "MESH_ENABLE_ETHERNET_TUNNEL=1",
+        "OTA_RAK15002_SD_STORE=1",
+        "ETHERNET_USE_RAK13800=1",
+        "PIN_BUZZER=1",
+        "PIN_VIBRATION=1",
+        "HAS_DRV2605=1",
+        "ESP32_PLATFORM=1",
+        "MESH_USB_CONSOLE_COOPERATIVE=1",
+        "MESH_ENABLE_LOST_REPLY=1"
+      ],
+      "output_bytes": [
+        5027,
+        5019
+      ],
+      "output_sha256": [
+        "7b7caa2c93f326246bc6a31b26a4efc11cae71548c812742924259b51c8d43ae",
+        "bd9c03ac867cf6ad62d3febbfa4875951902878226a67081d72f188e073a0c20"
+      ]
+    },
+    "full-native0-lost0": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=1",
+        "COMPANION_FEATURE_READER=1",
+        "COMPANION_FEATURE_MEMORY_DIAGNOSTICS=1",
+        "COMPANION_FEATURE_NOTIFICATIONS=1",
+        "COMPANION_RADIO_FULL=1",
+        "COMPANION_EXCLUSIVE_WIFI_BLE=1",
+        "WITH_WEBCONFIG=1",
+        "MESH_PRIMARY_ESPNOW=1",
+        "COMPANION_FEATURE_TEMP_RADIO=1",
+        "COMPANION_FEATURE_OTA_CLI=1",
+        "BLE_PIN_CODE=1",
+        "ESP32=1",
+        "NRF52_PLATFORM=1",
+        "EXTRAFS=1",
+        "WIFI_SSID=\"test\"",
+        "MESH_USB_CONSOLE_COOPERATIVE=0",
+        "MESH_ENABLE_LOST_REPLY=0"
+      ],
+      "output_bytes": [
+        3564,
+        3556
+      ],
+      "output_sha256": [
+        "2df296daf6c3050c2390dc55afffd0c2c43b35620cd8ce1a73162202b8abf02a",
+        "b4b69f1a12aebab76945cdef4c7e94078a8e9a8d3f718b68facb215570e9d0cc"
+      ]
+    },
+    "full-native0-lost1": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=1",
+        "COMPANION_FEATURE_READER=1",
+        "COMPANION_FEATURE_MEMORY_DIAGNOSTICS=1",
+        "COMPANION_FEATURE_NOTIFICATIONS=1",
+        "COMPANION_RADIO_FULL=1",
+        "COMPANION_EXCLUSIVE_WIFI_BLE=1",
+        "WITH_WEBCONFIG=1",
+        "MESH_PRIMARY_ESPNOW=1",
+        "COMPANION_FEATURE_TEMP_RADIO=1",
+        "COMPANION_FEATURE_OTA_CLI=1",
+        "BLE_PIN_CODE=1",
+        "ESP32=1",
+        "NRF52_PLATFORM=1",
+        "EXTRAFS=1",
+        "WIFI_SSID=\"test\"",
+        "MESH_USB_CONSOLE_COOPERATIVE=0",
+        "MESH_ENABLE_LOST_REPLY=1"
+      ],
+      "output_bytes": [
+        3599,
+        3591
+      ],
+      "output_sha256": [
+        "3105232dfa903a6c15f3ed6d6034b59b0a32ca24d6151ad48fc33de621b3277a",
+        "8bd526c52eedc16c7cfdc013311634470a40fdc80035760a6accacd876cca794"
+      ]
+    },
+    "full-native1-lost0": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=1",
+        "COMPANION_FEATURE_READER=1",
+        "COMPANION_FEATURE_MEMORY_DIAGNOSTICS=1",
+        "COMPANION_FEATURE_NOTIFICATIONS=1",
+        "COMPANION_RADIO_FULL=1",
+        "COMPANION_EXCLUSIVE_WIFI_BLE=1",
+        "WITH_WEBCONFIG=1",
+        "MESH_PRIMARY_ESPNOW=1",
+        "COMPANION_FEATURE_TEMP_RADIO=1",
+        "COMPANION_FEATURE_OTA_CLI=1",
+        "BLE_PIN_CODE=1",
+        "ESP32=1",
+        "NRF52_PLATFORM=1",
+        "EXTRAFS=1",
+        "WIFI_SSID=\"test\"",
+        "MESH_USB_CONSOLE_COOPERATIVE=1",
+        "MESH_ENABLE_LOST_REPLY=0"
+      ],
+      "output_bytes": [
+        3649,
+        3641
+      ],
+      "output_sha256": [
+        "88ca44fdc7bce777e3120131c0631e981c497aa0a80849b5badca9df29c0b624",
+        "64f96b9832d0f83ed5fea70ae9514cf60ae1232d1589c4e73a31ddbf246bb40d"
+      ]
+    },
+    "full-native1-lost1": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=1",
+        "COMPANION_FEATURE_READER=1",
+        "COMPANION_FEATURE_MEMORY_DIAGNOSTICS=1",
+        "COMPANION_FEATURE_NOTIFICATIONS=1",
+        "COMPANION_RADIO_FULL=1",
+        "COMPANION_EXCLUSIVE_WIFI_BLE=1",
+        "WITH_WEBCONFIG=1",
+        "MESH_PRIMARY_ESPNOW=1",
+        "COMPANION_FEATURE_TEMP_RADIO=1",
+        "COMPANION_FEATURE_OTA_CLI=1",
+        "BLE_PIN_CODE=1",
+        "ESP32=1",
+        "NRF52_PLATFORM=1",
+        "EXTRAFS=1",
+        "WIFI_SSID=\"test\"",
+        "MESH_USB_CONSOLE_COOPERATIVE=1",
+        "MESH_ENABLE_LOST_REPLY=1"
+      ],
+      "output_bytes": [
+        3684,
+        3676
+      ],
+      "output_sha256": [
+        "c1db29ea27a6db989227eef74c55b2ca4e07b0909df8232842d52886e02697ce",
+        "f9428924f7fc57fee248100282deeb03ba66ee1a83d11ee37c3dd3bfc9edd61d"
+      ]
+    },
+    "minimal-native0-lost0": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=0",
+        "MESH_USB_CONSOLE_COOPERATIVE=0",
+        "MESH_ENABLE_LOST_REPLY=0"
+      ],
+      "output_bytes": [
+        2046,
+        2038
+      ],
+      "output_sha256": [
+        "5571a06d789dff50aebd53777095cc8f0f74e5fd4226ed399bd25050e9e5a02e",
+        "9328e546b561bc1d965f8036d73c862cfed9d5077111c0b5c8744822235740bb"
+      ]
+    },
+    "minimal-native0-lost1": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=0",
+        "MESH_USB_CONSOLE_COOPERATIVE=0",
+        "MESH_ENABLE_LOST_REPLY=1"
+      ],
+      "output_bytes": [
+        2081,
+        2073
+      ],
+      "output_sha256": [
+        "9ee93b7a588ce48c647b9871dc7bec5c3f307c06c29a65cb6ff66a55060247b6",
+        "449353daa515ede8c6528782406b3f4a101d60bee46412aa934ea94e922ed5a5"
+      ]
+    },
+    "minimal-native1-lost0": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=0",
+        "MESH_USB_CONSOLE_COOPERATIVE=1",
+        "MESH_ENABLE_LOST_REPLY=0"
+      ],
+      "output_bytes": [
+        2046,
+        2038
+      ],
+      "output_sha256": [
+        "5571a06d789dff50aebd53777095cc8f0f74e5fd4226ed399bd25050e9e5a02e",
+        "9328e546b561bc1d965f8036d73c862cfed9d5077111c0b5c8744822235740bb"
+      ]
+    },
+    "minimal-native1-lost1": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=0",
+        "MESH_USB_CONSOLE_COOPERATIVE=1",
+        "MESH_ENABLE_LOST_REPLY=1"
+      ],
+      "output_bytes": [
+        2081,
+        2073
+      ],
+      "output_sha256": [
+        "9ee93b7a588ce48c647b9871dc7bec5c3f307c06c29a65cb6ff66a55060247b6",
+        "449353daa515ede8c6528782406b3f4a101d60bee46412aa934ea94e922ed5a5"
+      ]
+    },
+    "qspi-native0-lost0": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=1",
+        "COMPANION_FEATURE_READER=1",
+        "COMPANION_FEATURE_MEMORY_DIAGNOSTICS=1",
+        "COMPANION_FEATURE_NOTIFICATIONS=1",
+        "COMPANION_RADIO_FULL=1",
+        "COMPANION_EXCLUSIVE_WIFI_BLE=1",
+        "WITH_WEBCONFIG=1",
+        "MESH_PRIMARY_ESPNOW=1",
+        "COMPANION_FEATURE_TEMP_RADIO=1",
+        "COMPANION_FEATURE_OTA_CLI=1",
+        "BLE_PIN_CODE=1",
+        "ESP32=1",
+        "NRF52_PLATFORM=1",
+        "EXTRAFS=1",
+        "WIFI_SSID=\"test\"",
+        "MESH_ENABLE_TX_BEACONS=1",
+        "MESH_ENABLE_MESHTEXT_CHAT=1",
+        "MESH_ENABLE_ETHERNET_TUNNEL=1",
+        "OTA_RAK15002_SD_STORE=1",
+        "ETHERNET_USE_RAK13800=1",
+        "PIN_BUZZER=1",
+        "PIN_VIBRATION=1",
+        "HAS_DRV2605=1",
+        "ESP32_PLATFORM=1",
+        "QSPIFLASH=1",
+        "MESH_USB_CONSOLE_COOPERATIVE=0",
+        "MESH_ENABLE_LOST_REPLY=0"
+      ],
+      "output_bytes": [
+        4767,
+        4759
+      ],
+      "output_sha256": [
+        "35197aca1bdc0f7bf52f8b468a23f019e05f5779b6eaf0cb1e498a042685ea8d",
+        "69b0ad692bb4adf99dedbc192269b5f43c0270dee6c863ec93fa333952d730ac"
+      ]
+    },
+    "qspi-native0-lost1": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=1",
+        "COMPANION_FEATURE_READER=1",
+        "COMPANION_FEATURE_MEMORY_DIAGNOSTICS=1",
+        "COMPANION_FEATURE_NOTIFICATIONS=1",
+        "COMPANION_RADIO_FULL=1",
+        "COMPANION_EXCLUSIVE_WIFI_BLE=1",
+        "WITH_WEBCONFIG=1",
+        "MESH_PRIMARY_ESPNOW=1",
+        "COMPANION_FEATURE_TEMP_RADIO=1",
+        "COMPANION_FEATURE_OTA_CLI=1",
+        "BLE_PIN_CODE=1",
+        "ESP32=1",
+        "NRF52_PLATFORM=1",
+        "EXTRAFS=1",
+        "WIFI_SSID=\"test\"",
+        "MESH_ENABLE_TX_BEACONS=1",
+        "MESH_ENABLE_MESHTEXT_CHAT=1",
+        "MESH_ENABLE_ETHERNET_TUNNEL=1",
+        "OTA_RAK15002_SD_STORE=1",
+        "ETHERNET_USE_RAK13800=1",
+        "PIN_BUZZER=1",
+        "PIN_VIBRATION=1",
+        "HAS_DRV2605=1",
+        "ESP32_PLATFORM=1",
+        "QSPIFLASH=1",
+        "MESH_USB_CONSOLE_COOPERATIVE=0",
+        "MESH_ENABLE_LOST_REPLY=1"
+      ],
+      "output_bytes": [
+        4802,
+        4794
+      ],
+      "output_sha256": [
+        "6c8d2efbc41010b73ccc76cc6da9e37e1ad7f85cc38e271e982314d94f9ccbf4",
+        "8f664370def3695157f7d2b56a36826182d19f8866b69643e6c654f15fc8aff6"
+      ]
+    },
+    "qspi-native1-lost0": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=1",
+        "COMPANION_FEATURE_READER=1",
+        "COMPANION_FEATURE_MEMORY_DIAGNOSTICS=1",
+        "COMPANION_FEATURE_NOTIFICATIONS=1",
+        "COMPANION_RADIO_FULL=1",
+        "COMPANION_EXCLUSIVE_WIFI_BLE=1",
+        "WITH_WEBCONFIG=1",
+        "MESH_PRIMARY_ESPNOW=1",
+        "COMPANION_FEATURE_TEMP_RADIO=1",
+        "COMPANION_FEATURE_OTA_CLI=1",
+        "BLE_PIN_CODE=1",
+        "ESP32=1",
+        "NRF52_PLATFORM=1",
+        "EXTRAFS=1",
+        "WIFI_SSID=\"test\"",
+        "MESH_ENABLE_TX_BEACONS=1",
+        "MESH_ENABLE_MESHTEXT_CHAT=1",
+        "MESH_ENABLE_ETHERNET_TUNNEL=1",
+        "OTA_RAK15002_SD_STORE=1",
+        "ETHERNET_USE_RAK13800=1",
+        "PIN_BUZZER=1",
+        "PIN_VIBRATION=1",
+        "HAS_DRV2605=1",
+        "ESP32_PLATFORM=1",
+        "QSPIFLASH=1",
+        "MESH_USB_CONSOLE_COOPERATIVE=1",
+        "MESH_ENABLE_LOST_REPLY=0"
+      ],
+      "output_bytes": [
+        4852,
+        4844
+      ],
+      "output_sha256": [
+        "d5f33dd01c217329a8c8833b52fef66d7f8cb36d8318099b2365e541d0c2d20d",
+        "7e74ea47a40bb08a968edd6b9164901e8611ed87581df2826e10c62dc8f1c418"
+      ]
+    },
+    "qspi-native1-lost1": {
+      "flags": [
+        "MESH_USB_LOGGING_AVAILABLE=1",
+        "COMPANION_FEATURE_READER=1",
+        "COMPANION_FEATURE_MEMORY_DIAGNOSTICS=1",
+        "COMPANION_FEATURE_NOTIFICATIONS=1",
+        "COMPANION_RADIO_FULL=1",
+        "COMPANION_EXCLUSIVE_WIFI_BLE=1",
+        "WITH_WEBCONFIG=1",
+        "MESH_PRIMARY_ESPNOW=1",
+        "COMPANION_FEATURE_TEMP_RADIO=1",
+        "COMPANION_FEATURE_OTA_CLI=1",
+        "BLE_PIN_CODE=1",
+        "ESP32=1",
+        "NRF52_PLATFORM=1",
+        "EXTRAFS=1",
+        "WIFI_SSID=\"test\"",
+        "MESH_ENABLE_TX_BEACONS=1",
+        "MESH_ENABLE_MESHTEXT_CHAT=1",
+        "MESH_ENABLE_ETHERNET_TUNNEL=1",
+        "OTA_RAK15002_SD_STORE=1",
+        "ETHERNET_USE_RAK13800=1",
+        "PIN_BUZZER=1",
+        "PIN_VIBRATION=1",
+        "HAS_DRV2605=1",
+        "ESP32_PLATFORM=1",
+        "QSPIFLASH=1",
+        "MESH_USB_CONSOLE_COOPERATIVE=1",
+        "MESH_ENABLE_LOST_REPLY=1"
+      ],
+      "output_bytes": [
+        4887,
+        4879
+      ],
+      "output_sha256": [
+        "8c718f17d64ee474727fe90ab49a3c829bb040e24b9d1f3164034d1ed85b4a4b",
+        "f46636f6b6aa8a8f0104f84d1ddffb689ea56fd42d7294b209222ba76f75dd2d"
+      ]
+    }
+  },
+  "schema": 1,
+  "scope": "Exact current shared help bytes for all 16 logging/feature profiles; network then USB terminal mode",
+  "source_commit": "837847f8910221d190578f68b2e09599be2202a0",
+  "source_file_sha256": "91760ca4450d42c236f4591aba4f273b4deff2d584126d6207c1561e8fd85dcd",
+  "source_fragment_file": "examples/companion_radio/CompanionHelp.inc",
+  "source_fragment_sha256": "f481cbb032578e425ac820f43cf91926ae1c97e609a4d0e3092377c48cbe2676"
+}

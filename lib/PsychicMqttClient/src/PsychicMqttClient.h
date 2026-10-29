@@ -31,6 +31,7 @@
  *   SOFTWARE.
  */
 
+#include <atomic>
 #include <functional>
 
 #include "Arduino.h"
@@ -128,6 +129,7 @@ public:
 
     /**
      * @brief Sets the network operation timeout in milliseconds. esp-mqtt aborts a
+     * connection attempt (including TLS/WebSocket setup) or a
      * network read/write (including a synchronous publish's socket write) if it does
      * not complete within this window. A lower value bounds how long a synchronous
      * QoS0 publish can block on a stalled/half-open socket before failing and letting
@@ -364,7 +366,8 @@ public:
 
     /**
      * @brief Disconnects the MQTT client from the server.
-     * This call might be blocking until the client is stopped cleanly
+     * Disconnect notification waits at most one second before SDK stop.
+     * A failed SDK stop leaves isStarted() true so callers retain ownership.
      */
     void disconnect();
 
@@ -373,6 +376,10 @@ public:
 
     /** True after a successful start and before a stop. */
     bool isStarted() const { return _started; }
+
+    /** True while SDK buffers/configuration remain allocated, including after
+     * stop. Read on the same owner task as connect/reconnect/disconnect. */
+    bool isInitialized() const { return _client != nullptr; }
 
     /**
      * @brief Forcefully stops the MQTT client and disconnects from the server.
@@ -471,6 +478,13 @@ public:
     unsigned long getPublishOk();
 
     /**
+     * @brief Cumulative QoS 1/2 publishes acknowledged by the broker during
+     * this client's lifetime. Counts MQTT_EVENT_PUBLISHED, not accepted writes
+     * or outbox expiry. MeshCore's QoS 1 status messages complete on PUBACK.
+     */
+    unsigned long getPublishAck();
+
+    /**
      * @brief Cumulative count of publishes that failed (negative return from the
      * synchronous write or async enqueue -- socket error / network timeout). Monotonic.
      * A rising value indicates the uplink is dropping publishes.
@@ -481,10 +495,10 @@ private:
     esp_mqtt_client_handle_t _client = nullptr;
     esp_mqtt_client_config_t _mqtt_cfg;
     esp_mqtt_error_codes_t _lastError;
-    bool _connected = false;
-    bool _stopMqttClient = false;
+    std::atomic<bool> _connected{false};
+    std::atomic<bool> _stopMqttClient{false};
     bool _config_dirty = true;
-    bool _started = false;
+    std::atomic<bool> _started{false};
 
     // Runtime cap on the esp-mqtt outbox for QoS 0 async publishes (bytes).
     // 0 = disabled. Enforced in publish(); not an esp-mqtt config field.
@@ -494,6 +508,8 @@ private:
     // Cumulative publish accept/fail counts (any QoS, sync or async path).
     unsigned long _publish_ok = 0;
     unsigned long _publish_err = 0;
+    // Written by the SDK event task and read by the bridge/CLI task.
+    std::atomic<unsigned long> _publish_ack{0};
 
     // Multipart message reassembly. _buffer is lazily allocated at connect() time
     // to match the configured buffer size, then reused for the client's lifetime.

@@ -3,8 +3,15 @@
 #include <cstring>
 #include <iostream>
 #include <vector>
+#include "filesystem.h"
+#include <helpers/RoomAccessPolicy.h>
+#include <helpers/LogicalMessageCache.h>
 #include <helpers/ClientACLResponse.h>
+#include <helpers/ClientPathPersistence.h>
 #include <helpers/RoutingPolicy.h>
+#ifndef TEST_SENSOR
+#include <helpers/RoomMailProtocol.h>
+#endif
 
 #define REQ_TYPE_GET_ACCESS_LIST 0x05
 #define REQ_TYPE_GET_TELEMETRY_DATA 0x04
@@ -12,6 +19,9 @@
 #define SERVER_RESPONSE_DELAY 300
 #define OUT_PATH_UNKNOWN 0xFF
 #define PERM_ACL_ROLE_MASK 7
+#define PERM_ACL_GUEST 0
+#define PERM_ACL_READ_ONLY 1
+#define PERM_ACL_READ_WRITE 2
 #define PERM_ACL_ADMIN 3
 
 namespace mesh {
@@ -87,9 +97,15 @@ struct RegionMap {
 struct ClientInfo {
   mesh::Identity id;
   uint8_t permissions = 3;
+  bool permissions_are_explicit = false;
   uint8_t out_path_len = 0, out_path[MAX_PATH_SIZE] = {};
+  uint8_t alt_path_len = OUT_PATH_UNKNOWN, alt_path[MAX_PATH_SIZE] = {};
   uint32_t last_timestamp = 0, last_activity = 0;
-  struct { struct { uint32_t sync_since = 0, pending_ack = 0; uint8_t push_failures = 0; } room; } extra;
+  struct { struct {
+    uint32_t sync_since = 0, pending_ack = 0, pending_topic_revision = 0;
+    uint8_t push_failures = 0;
+    uint16_t poll_quota_used = 0, post_quota_used = 0;
+  } room; } extra;
   bool isAdmin() const { return (permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_ADMIN; }
 };
 struct ACL {
@@ -103,6 +119,7 @@ struct Clock : mesh::RTCClock {
 };
 #ifdef TEST_SENSOR
 #define TARGET_CLASS SensorMesh
+struct MetadataFixtureUse { MetadataFixtureUse() { (void)metadata_filesystem; } } metadata_fixture_use;
 #else
 #define TARGET_CLASS MyMesh
 #endif
@@ -113,7 +130,9 @@ public:
   ClientInfo sender;
   Clock clock;
   unsigned queued = 0, direct_sent = 0, flood_sent = 0;
+  unsigned queue_capacity = 0xFFFFFFFFU;
   bool refuse_queue = false;
+  std::vector<mesh::Packet*> sent_packets;
   TransportKey default_scope;
   RegionEntry region;
   RegionEntry* recv_pkt_region = nullptr;
@@ -127,14 +146,28 @@ public:
   int handleRequest(ClientInfo*, uint32_t, uint8_t*, size_t,
                     size_t = mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY);
   int telemetryPrefix(uint8_t*, size_t);
+  MemoryFS fs;
+  MemoryFS* _fs = &fs;
+  mesh::RoomAccessPolicy room_access;
+  mesh::LogicalMessageCache<8> recent_room_polls;
+  TARGET_CLASS() { metadata_filesystem = &fs; assert(room_access.load(&fs)); }
+  static bool saveFilter(ClientInfo*);
+  void serviceRoomQuotas() { room_access.serviceQuotaWindow(0, [] {}); }
+  struct { uint8_t direct_retry_enabled = 1; } _prefs;
+  std::vector<uint8_t> reply_retry_flags;
+  bool sendClientReply(ClientInfo*, mesh::Packet*, unsigned long, uint8_t);
 #endif
   void receive(mesh::Packet*, uint8_t*, size_t);
   bool admit(mesh::Packet* packet) {
-    if (!packet || refuse_queue) return false;
+    if (!packet || refuse_queue || queued >= queue_capacity) return false;
     assert(packet->payload_len <= MAX_PACKET_PAYLOAD);
     last_reply = packet;
     ++queued;
     if (packet->isRouteDirect()) ++direct_sent; else ++flood_sent;
+    sent_packets.push_back(packet);
+#ifndef TEST_SENSOR
+    reply_retry_flags.push_back(_prefs.direct_retry_enabled);
+#endif
     return true;
   }
   bool sendPacket(mesh::Packet* packet, uint8_t, uint32_t) override { return admit(packet); }
@@ -197,7 +230,75 @@ static void print_legacy(const uint8_t* body, unsigned count, size_t length) {
   for (size_t i = 0; i < length; ++i) std::cout << hex[body[i] >> 4] << hex[body[i] & 15];
   std::cout << '\n';
 }
+#ifndef TEST_SENSOR
+static void verify_mailbox_access() {
+  const uint8_t roles[] = {0, 1, 2, 3, 4, 5, 6, 7, 131, 255};
+  for (uint8_t permissions : roles) {
+    for (bool active : {false, true}) {
+      TARGET_CLASS target;
+      memset(target.sender.id.pub_key, 0xa1, PUB_KEY_SIZE);
+      target.sender.permissions = permissions;
+      target.sender.last_activity = active ? 12 : 0;
+      uint8_t settings[] = {mesh::ROOM_MAIL_REQUEST_SUBTYPE, 0, 0, 0, 0, 0, 0};
+      const int length = request(target, &target.sender, settings, sizeof(settings));
+      const uint8_t role = permissions & PERM_ACL_ROLE_MASK;
+      const bool admitted = role == PERM_ACL_READ_ONLY || role == PERM_ACL_READ_WRITE
+          || role == PERM_ACL_ADMIN || (role == PERM_ACL_GUEST && active);
+      if (!admitted) assert(length == 0);
+      else {
+        assert(length == 17 && target.reply_data[4] == mesh::ROOM_MAIL_REQUEST_SUBTYPE);
+        assert(target.reply_data[5] == 0 && target.reply_data[6] == 0);
+        assert(target.reply_data[11] == 0); // Default closed mailbox.
+      }
+      assert(target.fs.files.empty()); // A read never provisions an inbox.
+
+      uint8_t recipient[PUB_KEY_SIZE]; memset(recipient, 0xb2, sizeof(recipient));
+      uint8_t provision[] = {mesh::ROOM_MAIL_REQUEST_SUBTYPE, 8, 0, 0, 0, 0, 1};
+      uint8_t reply[32] = {};
+      assert(mesh::handleRoomMailRequest(&target.fs, recipient, false, 1,
+          provision, sizeof(provision), reply, sizeof(reply)) == 7 && reply[2] == 0);
+      std::vector<uint8_t> send(38);
+      send[0] = mesh::ROOM_MAIL_REQUEST_SUBTYPE; send[1] = 3;
+      memcpy(send.data() + 2, recipient, PUB_KEY_SIZE);
+      mesh::room_mail_protocol_detail::put16(send.data() + 34, 2);
+      send[36] = 'h'; send[37] = 'i';
+      const int sent = request(target, &target.sender, send.data(), send.size());
+      const bool can_send = role == PERM_ACL_READ_WRITE || role == PERM_ACL_ADMIN;
+      if (!admitted) assert(sent == 0);
+      else {
+        assert(sent == 11 && target.reply_data[5] == 3);
+        assert(target.reply_data[6] == (can_send ? 0 : 6));
+      }
+      mesh::RoomMailStatus status;
+      assert(mesh::getRoomMailStatus(&target.fs, recipient, status) == mesh::RoomMailResult::Success);
+      assert(status.count == unsigned(admitted && can_send));
+    }
+  }
+  TARGET_CLASS banned;
+  memset(banned.sender.id.pub_key, 0xa1, PUB_KEY_SIZE);
+  banned.sender.permissions = PERM_ACL_READ_WRITE;
+  uint8_t recipient[PUB_KEY_SIZE]; memset(recipient, 0xb2, sizeof(recipient));
+  assert(banned.room_access.addBan(&banned.fs, recipient) == mesh::RoomAccessPolicy::BanResult::Saved);
+  std::vector<uint8_t> send(38);
+  send[0] = mesh::ROOM_MAIL_REQUEST_SUBTYPE; send[1] = 3;
+  memcpy(send.data() + 2, recipient, PUB_KEY_SIZE);
+  mesh::room_mail_protocol_detail::put16(send.data() + 34, 2);
+  send[36] = 'h'; send[37] = 'i';
+  assert(request(banned, &banned.sender, send.data(), send.size()) == 7);
+  assert(banned.reply_data[6] == 6);
+  assert(!banned.fs.files.count(mesh::ROOM_MAIL_PRIMARY_PATH));
+  for (size_t length = 0; length < send.size(); ++length) {
+    std::vector<uint8_t> truncated(send.begin(), send.begin() + length);
+    const int used = request(banned, &banned.sender, truncated.data(), length);
+    assert(used == 0 || used == 7);
+  }
+  std::cout << "Room mailbox guest, reader, writer and recipient-ban boundaries passed\n";
+}
+#endif
 int main() {
+#ifndef TEST_SENSOR
+  verify_mailbox_access();
+#endif
   uint8_t query[] = {REQ_TYPE_GET_ACCESS_LIST, 0, 0};
   uint8_t secret[PUB_KEY_SIZE] = {};
   unsigned paths = 0;
@@ -337,5 +438,77 @@ int main() {
       }
     }
   }
+#ifndef TEST_SENSOR
+  for (uint8_t stored_path : {0, 1, 0x41, 0x95, 0xFE, 0xFF, 0xC0}) {
+    for (unsigned alternate_case = 0; alternate_case < 5; ++alternate_case) {
+      TARGET_CLASS receiver;
+      fill(receiver.acl, 256, true);
+      receiver.sender.out_path_len = stored_path;
+      memset(receiver.sender.out_path, 0x12, MAX_PATH_SIZE);
+      receiver.sender.alt_path_len = stored_path;
+      memcpy(receiver.sender.alt_path, receiver.sender.out_path, MAX_PATH_SIZE);
+      const size_t path_bytes = mesh::encodedClientPathByteLength(stored_path);
+      if (alternate_case == 0) receiver.sender.alt_path_len = OUT_PATH_UNKNOWN;
+      if (alternate_case == 1 && path_bytes < MAX_PATH_SIZE) {
+        // Unused route capacity is not part of an otherwise identical path.
+        receiver.sender.alt_path[path_bytes] = 0x34;
+      }
+      if (alternate_case == 2) receiver.sender.alt_path_len = 2;
+      if (alternate_case == 3) {
+        if (path_bytes > 0 && path_bytes <= MAX_PATH_SIZE) {
+          receiver.sender.alt_path[path_bytes - 1] = 0x34;
+        } else {
+          receiver.sender.alt_path_len = 1;
+        }
+      }
+      if (alternate_case == 4) receiver.sender.alt_path_len = 0xC0;
+      const bool direct = mesh::Packet::isValidPathLen(stored_path);
+      const bool alternate = direct && (alternate_case == 2 || alternate_case == 3);
+      mesh::Packet incoming;
+      incoming.header = ROUTE_TYPE_DIRECT;
+      uint8_t data[] = {51, 0, 0, 0, REQ_TYPE_GET_ACCESS_LIST, 0, 0};
+      receiver.receive(&incoming, data, sizeof(data));
+      assert(receiver.queued == 1U + unsigned(alternate));
+      assert(receiver.direct_sent == (direct ? receiver.queued : 0));
+      assert(receiver.flood_sent == unsigned(!direct));
+      assert(receiver._prefs.direct_retry_enabled == 1);
+      assert(receiver.reply_retry_flags[0] == 1);
+      if (!direct) continue;
+      const auto* primary = receiver.sent_packets[0];
+      assert(primary->path_len == stored_path);
+      assert(!memcmp(primary->path, receiver.sender.out_path, path_bytes));
+      const size_t capacity = mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY;
+      verify(receiver, 4 + 7 * ((capacity - 4) / 7), capacity);
+      if (alternate) {
+        const auto* extra = receiver.sent_packets[1];
+        assert(extra != primary && extra->payload_len == primary->payload_len);
+        assert(!memcmp(extra->payload, primary->payload, primary->payload_len));
+        assert(extra->path_len == receiver.sender.alt_path_len);
+        assert(!memcmp(extra->path, receiver.sender.alt_path,
+                       mesh::encodedClientPathByteLength(extra->path_len)));
+        assert(receiver.reply_retry_flags[1] == 0);
+      }
+    }
+  }
+  for (unsigned refusal = 0; refusal < 4; ++refusal) {
+    TARGET_CLASS receiver;
+    fill(receiver.acl, 32, true);
+    receiver.sender.out_path_len = receiver.sender.alt_path_len = 1;
+    receiver.sender.out_path[0] = 0x12;
+    receiver.sender.alt_path[0] = 0x34;
+    const int length = request(receiver, &receiver.sender, query, sizeof(query));
+    auto* reply = receiver.createDatagram(PAYLOAD_TYPE_RESPONSE, receiver.sender.id,
+                                          secret, receiver.reply_data, length);
+    assert(reply != nullptr);
+    receiver.refuse_allocation = refusal == 1;
+    receiver.refuse_queue = refusal == 2;
+    if (refusal == 3) receiver.queue_capacity = 1;
+    const bool sent = receiver.sendClientReply(&receiver.sender, reply, SERVER_RESPONSE_DELAY, 1);
+    assert(sent == (refusal != 2));
+    assert(receiver.queued == (refusal == 0 ? 2U : refusal == 2 ? 0U : 1U));
+    assert(receiver.released == unsigned(refusal == 2));
+    assert(receiver._prefs.direct_retry_enabled == 1);
+  }
+#endif
   std::cout << "Room/Sensor ACL route, input, and permission checks passed\n";
 }

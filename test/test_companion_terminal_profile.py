@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import re
+from cpp_source import body
 
 
 root = Path(__file__).resolve().parents[1]
@@ -82,14 +83,30 @@ assert re.search(
 assert terminal.index("handleLocalControlCommand(") < terminal.index(
     'strncmp(command, "set ", 4) == 0'
 )
-assert 'terminalOutput().print("  board\\r\\n")' in terminal
-assert 'terminalOutput().print("  version\\r\\n")' in terminal
-assert 'terminalOutput().print("  get pwrmgt.bootreason\\r\\n")' in terminal
-assert 'terminalOutput().print("  set pin <0-999999>\\r\\n")' in terminal
+# Both direct and packed help use the same feature-gated fragments. Follow
+# the actual terminal routes before checking their shared command listings.
+help_branch = body(terminal, 'if (strcmp(command, "help") == 0)')
+assert '#include "CompanionHelp.inc"' in help_branch
+assert '#define MESH_COMPANION_HELP_BEGIN output.print(' in help_branch
+assert 'mesh::companion::writePackedCompanionHelp(output);' in help_branch
+packed_help = (root / "examples/companion_radio/CompanionHelpPacked.cpp").read_text()
+assert '#include "CompanionHelp.inc"' in packed_help
+help_fragments = (root / "examples/companion_radio/CompanionHelp.inc").read_text()
+for help_line in ('  board\\r\\n', '  version\\r\\n',
+                  '  get pwrmgt.bootreason\\r\\n', '  set pin <0-999999>\\r\\n',
+                  '  set mt.hops <0..7> (saved; default 7)\\r\\n',
+                  '  get mt.node / get mt.shortname\\r\\n',
+                  '  set mt.node <!8hex|default> (saved; use a unique ID)\\r\\n',
+                  '  set mt.shortname <1..4 UTF-8 characters|default> (saved; NodeInfo uses 4 bytes)\\r\\n',
+                  '  send mt.nodeinfo <channel slot> (GPS-free; also automatic after first chat)\\r\\n'):
+    assert help_line in help_fragments
+# Explicit NodeInfo remains available, but first successful chat also arms
+# separate GPS-free metadata. Do not restore the obsolete manual-only policy.
+assert "no automatic adverts" not in help_fragments
 assert re.search(
     r"#if COMPANION_FEATURE_MEMORY_DIAGNOSTICS\s+"
-    r'terminalOutput\(\)\.print\("  memory\\r\\n"\);\s+#endif',
-    terminal,
+    r'"  memory\\r\\n"\s+#endif',
+    help_fragments,
 )
 
 # Terminal-specific handlers keep precedence, then both the generic `set`

@@ -6,6 +6,8 @@
 #pragma GCC diagnostic pop
 #include <cassert>
 
+inline bool isInISR() { return false; }
+
 uint32_t tud_cdc_n_write_available(uint8_t instance);
 class MockSerial : public Stream {
  public:

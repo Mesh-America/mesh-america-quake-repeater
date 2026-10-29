@@ -3,7 +3,10 @@
 
 #include "CustomSX1262.h"
 #include "RadioLibWrappers.h"
+#include "ProfileSwitchTiming.h"
 #include "SX126xReset.h"
+#include "SX126xMorseRamp.h"
+#include "SX126xMorseReceiver.h"
 
 #ifndef USE_SX1262
 #define USE_SX1262
@@ -14,6 +17,15 @@ class CustomSX1262Wrapper : public RadioLibWrapper {
   bool _saved_standby_xosc = false;
 
 protected:
+  uint8_t getDriverSwitchFeatures() const override {
+    return static_cast<const CustomSX1262*>(_radio)->getProfileSwitchFeatures();
+  }
+  uint8_t driverSwitchCapabilities() const override {
+    return static_cast<const CustomSX1262*>(_radio)->profileSwitchCapabilities();
+  }
+  void setDriverSwitchFeatures(uint8_t features) override {
+    static_cast<CustomSX1262*>(_radio)->setProfileSwitchFeatures(features);
+  }
   int8_t readReceiveMode() override { return sx126xReceiveMode((SX126x*)_radio); }
   void beginProfileRetune(bool continuousRx) override {
     static_cast<CustomSX1262*>(_radio)->beginProfileSwitch(continuousRx);
@@ -21,6 +33,12 @@ protected:
   void endProfileRetune(bool success) override {
     static_cast<CustomSX1262*>(_radio)->endProfileSwitch(success);
   }
+#if (defined(MC_NRF_RADIO_PROFILE_PRIORITY) && MC_NRF_RADIO_PROFILE_PRIORITY) \
+    || (defined(MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD) && MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD)
+  bool ownsWarmProfileRetune() const override {
+    return static_cast<const CustomSX1262*>(_radio)->hilOwnsWarmProfileRetune();
+  }
+#endif
 
   void setProfileStandbyWarm(bool enabled) override {
     if (enabled == _profile_standby_held) return;
@@ -35,10 +53,79 @@ protected:
   }
 
 public:
+  static constexpr bool SupportsRxPowerSaving = true;
+  uint32_t rxPowerSavingTransitionUs() const override {
+    return static_cast<CustomSX1262*>(_radio)->getTcxoDelay() + 1000UL;
+  }
+  uint8_t regulatorModes() const override { return static_cast<CustomSX1262*>(_radio)->regulatorModes(); }
+  mesh::power::RegulatorMode defaultRegulatorMode() const override {
+    return static_cast<CustomSX1262*>(_radio)->defaultRegulatorMode();
+  }
+  bool configureBootRegulator(mesh::power::RegulatorMode mode) override {
+    return static_cast<CustomSX1262*>(_radio)->configureBootRegulator(mode);
+  }
+  mesh::power::RegulatorMode activeRegulatorMode() const override {
+    return static_cast<CustomSX1262*>(_radio)->activeRegulatorMode();
+  }
+  ~CustomSX1262Wrapper() { unregisterInterruptAction(); }
   CustomSX1262Wrapper(CustomSX1262& radio, mesh::MainBoard& board) : RadioLibWrapper(radio, board) { }
   bool supportsCarrierWave() const override { return true; }
+  bool supportsMorseRx() const override { return MESH_ENABLE_MORSE_RX && supportsRadioDeepInit(); }
+#if MESH_ENABLE_MESHTEXT_WIRE
+  bool supportsMeshtext() const override { return true; }
+#endif
+#if MESH_ENABLE_ETHERNET_WIRE
+  bool supportsEthernetTunnel() const override { return true; }
+#endif
 
 protected:
+  float morseReceiverBandwidthKHz() const override { return 4.8f; }
+  int16_t prepareMorseReceiver(float frequency_mhz) override {
+    if (!_board->prepareRadioFrequency(frequency_mhz)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    _morse_rx_fsk_mode = true; // partial reset/configuration also needs full restoration
+    if (!prepareRadioHardReset()) return RADIOLIB_ERR_UNKNOWN;
+    auto* radio = static_cast<CustomSX1262*>(_radio);
+    radio->invalidateMorseModemCache();
+    const int16_t status = prepareSX126xMorseReceiver(radio, frequency_mhz);
+    return status == RADIOLIB_ERR_NONE && !_board->finishRadioHardReset()
+        ? RADIOLIB_ERR_UNKNOWN : status;
+  }
+  float readMorseRssi() override { return static_cast<CustomSX1262*>(_radio)->getMorseRssi(); }
+  int16_t prepareMorseCarrier(float frequency_mhz) override {
+    const int16_t status = RadioLibWrapper::prepareMorseCarrier(frequency_mhz);
+    return status == RADIOLIB_ERR_NONE
+        ? setSX126xMorseRamp(static_cast<CustomSX1262*>(_radio)) : status;
+  }
+  int16_t leaveMorseCarrier() override {
+    return leaveSX126xMorseCarrier(static_cast<CustomSX1262*>(_radio));
+  }
+  bool restoreCarrierWaveModem() override {
+    return restoreSX126xPacketRamp(static_cast<CustomSX1262*>(_radio)) == RADIOLIB_ERR_NONE
+        && RadioLibWrapper::restoreCarrierWaveModem();
+  }
+#if MESH_ENABLE_MESHTEXT_WIRE || MESH_ENABLE_ETHERNET_WIRE
+  bool applyProtocol(mesh::RadioProfileProtocol protocol) override {
+    uint8_t sync = 0x12;
+    if (protocol == mesh::RadioProfileProtocol::Meshtext) {
+      if (!supportsMeshtext()) return false;
+      sync = 0x2b;
+#if MESH_ENABLE_ETHERNET_WIRE
+    } else if (protocol == mesh::RadioProfileProtocol::Ethernet) {
+      if (!supportsEthernetTunnel()) return false;
+      sync = 0x16;
+#endif
+    } else if (protocol != mesh::RadioProfileProtocol::MeshCore) return false;
+    // No alternate wire implementation means no modem write is needed.
+    // Ethernet-only builds must still restore the MeshCore syncword.
+#if !MESH_ENABLE_ETHERNET_WIRE
+    if (!supportsMeshtext()) return protocol == mesh::RadioProfileProtocol::MeshCore;
+#endif
+    auto* radio = static_cast<CustomSX1262*>(_radio);
+    // Stage shared packet invariants only in a proven owned RX hop; normal
+    // initialization/rollback still repairs the complete RadioLib state.
+    return radio->setProfileProtocol(sync) == RADIOLIB_ERR_NONE;
+  }
+#endif
   int16_t applyCachedTxPower(int8_t dbm) override {
 #ifdef SX126X_PA_RAMP_TIME
     // External-PA boards such as the T-Beam 1W require a slower PA ramp. Use
@@ -51,26 +138,55 @@ protected:
 #endif
   }
 
+  bool applyProfileModulation(float bw, uint8_t sf, uint8_t cr) {
+    auto* radio = static_cast<CustomSX1262*>(_radio);
+    if (getDriverSwitchFeatures() & mesh::RadioSwitchTuning::Batch)
+      return radio->setLoRaModulationParams(bw, sf, cr) == RADIOLIB_ERR_NONE;
+    return radio->setSpreadingFactor(sf) == RADIOLIB_ERR_NONE
+        && radio->setBandwidth(bw) == RADIOLIB_ERR_NONE
+        && radio->setCodingRate(cr) == RADIOLIB_ERR_NONE;
+  }
+
   bool applyParams(float freq, float bw, uint8_t sf, uint8_t cr) override {
     if (static_cast<CustomSX1262*>(_radio)->profileSwitchFailed()) return false;
+#if MESH_HIL_PROFILE_TIMING
+    bool success = ((CustomSX1262 *)_radio)->setFrequency(freq) == RADIOLIB_ERR_NONE;
+    mesh::profiletiming::mark(mesh::profiletiming::Frequency, mesh::profiletiming::readClock());
+    if (success) {
+      success = applyProfileModulation(bw, sf, cr);
+      mesh::profiletiming::mark(mesh::profiletiming::Modulation, mesh::profiletiming::readClock());
+    }
+    if (success) {
+      success = updatePreamble(sf, bw);
+      mesh::profiletiming::mark(mesh::profiletiming::Preamble, mesh::profiletiming::readClock());
+    }
+#else
     bool success = ((CustomSX1262 *)_radio)->setFrequency(freq) == RADIOLIB_ERR_NONE
-        && ((CustomSX1262 *)_radio)->setLoRaModulationParams(bw, sf, cr) == RADIOLIB_ERR_NONE
+        && applyProfileModulation(bw, sf, cr)
         && updatePreamble(sf, bw);
+#endif
     if (!success) return false;
 
     PacketMillis pm = calcMaxPacketMillis(sf, bw, cr, preambleLengthForParams(sf, bw));
     ((CustomSX1262 *)_radio)->setPreambleMillis(pm.preambleMillis);
     ((CustomSX1262 *)_radio)->setMaxPayloadMillis(pm.payloadMillis);
+#if MESH_HIL_PROFILE_TIMING
+    mesh::profiletiming::mark(mesh::profiletiming::GuardMath, mesh::profiletiming::readClock());
+#endif
     return true;
   }
 
 public:
   bool setCodingRate(uint8_t cr) override {
+#if MESH_ENABLE_TX_BEACONS
+    if (isBeaconRadioOwned()) return false;
+#endif
     if (isCarrierWaveActive()) return false;
     return ((CustomSX1262 *)_radio)->setCodingRate(cr) == RADIOLIB_ERR_NONE;
   }
 
   bool isReceivingPacket() override {
+    if (_rx_ps_armed && isChipBusy()) return false;
     return ((CustomSX1262 *)_radio)->isReceiving();
   }
   bool isChipBusy() override {
@@ -87,11 +203,12 @@ public:
   uint8_t getSpreadingFactor() const override { return ((CustomSX1262 *)_radio)->spreadingFactor; }
   void powerOff() {
     if (isCarrierWaveActive()) setCarrierWave(0, 0);
+    if (_rx_ps_armed) stopReceiveDutyCycle();
     ((CustomSX1262 *)_radio)->standby();
     ((CustomSX1262 *)_radio)->sleep(false);
   }
 
-  bool supportsRxPowerSaving() const override { return true; }
+  bool supportsRxPowerSaving() const override { return SupportsRxPowerSaving; }
   void onReceiveProcessed() override { finishReceiveProcessing(); }
 
   bool supportsRxPowerSavingRfRxDisable() const override {
@@ -103,15 +220,27 @@ public:
   }
 
   bool setRxPowerSavingRfRxDisabled(bool disabled) override {
+#if MESH_ENABLE_TX_BEACONS
+    if (isBeaconRadioOwned()) return false;
+#endif
     if (isCarrierWaveActive()) return false;
     if (!supportsRxPowerSavingRfRxDisable()) return false;
 
-    if (_rx_ps_armed) stopReceiveDutyCycle();
-    ((CustomSX1262 *)_radio)->setRxPowerSavingRfRxDisabled(disabled);
+    // Do not stop duty-cycle RX or change its policy before admission. A BUSY
+    // sleep window, TX, or unread RX completion still owns the current mode.
+    const uint8_t resume_rx = beginReconfigure();
+    if (resume_rx > 1) return false;
 
-    // Re-arm the configured receive mode immediately without disturbing an
-    // unread RX interrupt or an in-flight transmission.
-    return setRxPowerSaving(_rx_ps_enabled, _rx_ps_rx_us, _rx_ps_sleep_us);
+    const bool previous = isRxPowerSavingRfRxDisabled();
+    ((CustomSX1262 *)_radio)->setRxPowerSavingRfRxDisabled(disabled);
+    endReconfigure(resume_rx);
+    if (resume_rx && !isInRecvMode()) {
+      // startRecv already retained its bounded retry/backoff. That retry must
+      // use the old RXEN policy; never report a failed RX restoration as OK.
+      ((CustomSX1262 *)_radio)->setRxPowerSavingRfRxDisabled(previous);
+      return false;
+    }
+    return true;
   }
 
   bool isRxPowerSavingRfRxDisabled() const override {
@@ -138,57 +267,20 @@ public:
   }
 
 protected:
-  int startReceiveMode() override {
-    // Do not abort a frame that started while a calibration transition was
-    // being scheduled. recvRaw() will move it to continuous RX afterward.
-    if (_nf_calib_active && _rx_ps_armed && isPacketPendingOrReceiving()) {
-      return RADIOLIB_ERR_NONE;
-    }
-    if (_rx_ps_armed) {
-      // leaving duty-cycle mode (after RxDone or a reconfig): stop the
-      // sequencer and the still-running RTC, or its pending event can
-      // silently abort the RX we are about to start
-      stopReceiveDutyCycle();
-    }
-    if (!_rx_ps_enabled || _nf_calib_active) {
-      // plain continuous RX: powersaving off, or a periodic noise-floor
-      // calibration window is in progress
-      if (!_rx_ps_enabled) _rx_ps_continuous_fallback = false;
-      return _radio->startReceive();
-    }
-
-    if (!((CustomSX1262 *)_radio)->canUseRxPowerSavingDutyCycle(
-            _rx_ps_rx_us, _rx_ps_sleep_us)) {
-      _rx_ps_continuous_fallback = true;
-      return _radio->startReceive();
-    }
-
-    _rx_ps_continuous_fallback = false;
-
-    const RadioLibIrqFlags_t irqFlags = RADIOLIB_IRQ_RX_DEFAULT_FLAGS;
-    const RadioLibIrqFlags_t irqMask =
-        (1UL << RADIOLIB_IRQ_RX_DONE) |
-        (1UL << RADIOLIB_IRQ_TIMEOUT) |
-        (1UL << RADIOLIB_IRQ_CRC_ERR) |
-        (1UL << RADIOLIB_IRQ_HEADER_ERR);
-
-    int err = ((CustomSX1262 *)_radio)->startReceiveDutyCycle(_rx_ps_rx_us, _rx_ps_sleep_us, irqFlags, irqMask);
-    if (err == RADIOLIB_ERR_NONE) {
-      _rx_ps_armed = true;
-      return err;
-    }
-
-    _rx_ps_continuous_fallback = true;
-    MESH_DEBUG_PRINTLN("CustomSX1262Wrapper: error: startReceiveDutyCycle(%d), falling back to continuous RX", err);
-    return _radio->startReceive();
+  int startReceiveMode() override { return startReceivePowerSaving(); }
+  int16_t armDutyCycle(RadioLibIrqFlags_t irq_flags, RadioLibIrqFlags_t irq_mask,
+      uint32_t* effective_rx_us, uint32_t* effective_sleep_us) override {
+    *effective_rx_us = _rx_ps_rx_us;
+    *effective_sleep_us = _rx_ps_sleep_us;
+    return ((CustomSX1262*)_radio)->startReceiveDutyCycle(
+        _rx_ps_rx_us, _rx_ps_sleep_us, irq_flags, irq_mask);
   }
 
-  void stopReceiveDutyCycle() override {
-    _radio->standby();   // also wakes the chip if it is in the sleep window
-    ((CustomSX1262 *)_radio)->stopRTC();
-    _rx_ps_armed = false;
+  int16_t stopDutyCycleHardware() override {
+    const int16_t standby_error = _radio->standby();
+    const int16_t rtc_error = ((CustomSX1262*)_radio)->stopRTC();
+    return standby_error != RADIOLIB_ERR_NONE ? standby_error : rtc_error;
   }
-
   bool radioDeepInit() override {
     // A board hook takes precedence over direct NRST because it may also need
     // to recover a regulator, SPI bus, or I/O expander. With neither mechanism

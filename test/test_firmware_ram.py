@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import re
 import struct
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import check_firmware_ram as ram
 from firmware_elf import FirmwareElf
 import firmware_memory_manifest as proof
 from audit_esp32_image_ram import EspImage
+from test_replay_reset_integration import extract_braced
 
 
 def elf32(path, symbols, data=b"", address=0x3F400000):
@@ -42,14 +44,15 @@ def elf32(path, symbols, data=b"", address=0x3F400000):
     return FirmwareElf(path)
 
 
-def esp_fixture(path, modern=False, fragmented=False):
+def esp_fixture(path, modern=False, fragmented=False, internal_length=0x10000):
     address = 0x3F400000
     caps = [0x804, 0x804, 0x404, 0x803, 0x8804]
     data = bytearray(struct.pack("<I", len(caps)))
     symbols = {"soc_memory_region_count": (address, 4)}
     symbols["soc_memory_regions"] = (address + len(data), len(caps) * (20 if modern else 16))
     for index in range(len(caps)):
-        data += struct.pack("<4I", 0x3FFB0000 + index * 0x10000, 0x10000, index, 0)
+        length = internal_length if index == 0 else 0x10000
+        data += struct.pack("<4I", 0x3FFB0000 + index * 0x10000, length, index, 0)
         if modern:
             data += bytes([int(index == 1), 0, 0, 0])
     symbols["soc_memory_types"] = (address + len(data), len(caps) * (16 if modern else 20))
@@ -66,6 +69,221 @@ def esp_fixture(path, modern=False, fragmented=False):
 
 
 class FirmwareRamTest(unittest.TestCase):
+    def test_explicit_esp32_contact_cache_adds_reader_allowance(self):
+        flags = {"BLE_PIN_CODE": 123456, "DISPLAY_CLASS": "SSD1306Display",
+                 "MAX_CONTACTS": 160, "MAX_GROUP_CHANNELS": 8,
+                 "OFFLINE_QUEUE_SIZE": 128}
+        target = "Heltec_v2_companion_radio_ble"
+        for extra in ({}, {"BOARD_HAS_PSRAM": 1}, {"COMPANION_RADIO_FULL": 1}):
+            with self.subTest(extra=extra):
+                original = ram.requirements("ESP32_PLATFORM", {**flags, **extra}, target)
+                disabled = ram.requirements("ESP32_PLATFORM", {
+                    **flags, **extra, "MESH_CONTACT_CACHE": 0,
+                }, target)
+                enabled = ram.requirements("ESP32_PLATFORM", {
+                    **flags, **extra, "MESH_CONTACT_CACHE": 1,
+                }, target)
+                self.assertEqual(original, disabled)
+                self.assertNotIn("contact_cache_reader", original["components"])
+                self.assertEqual(enabled["components"]["contact_cache_reader"], 6144)
+                self.assertEqual(enabled["required_heap_bytes"],
+                                 original["required_heap_bytes"] + 6144)
+                for name, expected in (("core_tasks_usb_filesystems", 24576),
+                                       ("allocation_and_transient_margin", 16384)):
+                    self.assertEqual(original["components"][name], expected)
+                    self.assertEqual(enabled["components"][name], expected)
+                self.assertEqual({key: value for key, value in enabled["components"].items()
+                                  if key != "contact_cache_reader"}, original["components"])
+
+    def test_explicit_contact_cache_does_not_change_other_platform_budgets(self):
+        for platform in ("NRF52_PLATFORM", "RP2040_PLATFORM", "STM32_PLATFORM"):
+            with self.subTest(platform=platform):
+                original = ram.requirements(platform, {}, "board_companion_radio_ble")
+                enabled = ram.requirements(platform, {"MESH_CONTACT_CACHE": 1},
+                                           "board_companion_radio_ble")
+                self.assertEqual(enabled, original)
+
+    def test_explicit_contact_cache_elf_rejects_old_capacity_and_enforces_boundary(self):
+        flags = {"BLE_PIN_CODE": 123456, "DISPLAY_CLASS": "SSD1306Display",
+                 "MAX_CONTACTS": 160, "MAX_GROUP_CHANNELS": 8,
+                 "OFFLINE_QUEUE_SIZE": 128}
+        target = "Heltec_v2_companion_radio_ble"
+        original = ram.requirements("ESP32_PLATFORM", flags, target)
+        cached = {**flags, "MESH_CONTACT_CACHE": 1}
+        required = ram.requirements("ESP32_PLATFORM", cached, target)["required_heap_bytes"]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "firmware.elf"
+            report = Path(temporary) / "firmware.memory.json"
+            for capacity, accepted in ((original["required_heap_bytes"], False),
+                                       (required - 1, False), (required, True)):
+                with self.subTest(capacity=capacity), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    # Classic ESP32 also reclaims the fixture's 64 KiB ROM-stack
+                    # region; its first region excludes a 16 KiB reservation.
+                    esp_fixture(path, internal_length=capacity - 0x10000 + 0x4000)
+                    self.assertEqual(ram.check_firmware(path, "ESP32_PLATFORM", "esp32",
+                                                       flags, target) == 0, True)
+                    status = ram.check_firmware(path, "ESP32_PLATFORM", "esp32",
+                                                cached, target, report)
+                    result = json.loads(report.read_text())
+                    self.assertEqual(status == 0, accepted)
+                    self.assertEqual(result["passed"], accepted)
+                    self.assertEqual(result["available_internal_bytes"], capacity)
+                    self.assertEqual(result["required_heap_bytes"], required)
+                    self.assertEqual(result["components"]["contact_cache_reader"], 6144)
+
+    def test_pocket_gui_reserves_expanded_history_without_changing_other_boards(self):
+        flags = {"DISPLAY_CLASS": "GxEPDDisplay", "HELTEC_MESH_POCKET": 1,
+                 "COMPANION_RADIO_FULL": 1, "UI_MSG_PREVIEW_SIZE": 161}
+        target = "Mesh_pocket_companion_radio_full"
+        enabled = ram.requirements("NRF52_PLATFORM", flags, target)
+        self.assertEqual(enabled["components"]["screen_objects_and_history"], 12288)
+        self.assertNotIn("expanded_message_previews", enabled["components"])
+        self.assertGreaterEqual(enabled["required_contiguous_bytes"], 12288)
+
+        for changed in ({**flags, "UI_POCKET_GUI": 0},
+                        {key: value for key, value in flags.items()
+                         if key != "HELTEC_MESH_POCKET"}):
+            policy = ram.requirements("NRF52_PLATFORM", changed, target)
+            self.assertEqual(policy["components"]["screen_objects_and_history"], 8192)
+            self.assertEqual(policy["components"]["expanded_message_previews"], 2816)
+        larger = ram.requirements("NRF52_PLATFORM", {
+            **flags, "MESH_COMPANION_SCREEN_STARTUP_BYTES": 16384}, target)
+        self.assertEqual(larger["components"]["screen_objects_and_history"], 16384)
+
+    def test_st7789_budget_matches_production_allocation_peak_and_reuses_buffers(self):
+        ui = ROOT / "src/helpers/ui"
+        spi = (ui / "ST7789Spi.h").read_text()
+        oled = (ui / "OLEDDisplay.cpp").read_text()
+        header = (ui / "ST7789Display.h").read_text()
+        start = header.index("#if defined(HELTEC_VISION_MASTER_T190)")
+        constructors = header[start:header.index("#endif", start) + len("#endif")]
+        buffering = (ui / "OLEDDisplay.h").read_text()
+        start = buffering.index("#ifndef OLEDDISPLAY_REDUCE_MEMORY")
+        buffering = buffering[start:buffering.index("#endif", start) + len("#endif")]
+        fixture = r'''
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <utility>
+#include <vector>
+using std::min; using std::max;
+size_t live=0, peak=0, largest=0, calls=0;
+std::vector<std::pair<void*,size_t>> allocations;
+void* track_malloc(size_t size) {
+  void* p=std::malloc(size); assert(p); allocations.push_back({p,size});
+  live+=size; peak=max(peak,live); largest=max(largest,size); ++calls; return p;
+}
+void track_free(void* p) {
+  auto at=std::find_if(allocations.begin(),allocations.end(),[&](auto& a){return a.first==p;});
+  assert(at!=allocations.end()); live-=at->second; allocations.erase(at); std::free(p);
+}
+#define malloc track_malloc
+#define free track_free
+#define rtos_malloc track_malloc
+#define rtos_free track_free
+#define DEBUG_OLEDDISPLAY(...)
+#define LOW 0
+#define HIGH 1
+void yield() {}
+enum OLEDDISPLAY_GEOMETRY { GEOMETRY_128_128,GEOMETRY_128_64,GEOMETRY_128_32,
+                          GEOMETRY_64_48,GEOMETRY_64_32,GEOMETRY_RAWMODE };
+@BUFFERING@
+struct Bus {
+  unsigned rows=0;
+  template<class T> void beginTransaction(T) {}
+  void endTransaction() {}
+  void transfer(void*,void*,int) { ++rows; }
+};
+struct Panel {
+  uint16_t displayWidth=0,displayHeight=0,displayBufferSize=0,_buffheight=0,_RGB=0xffff;
+  OLEDDISPLAY_GEOMETRY geometry=GEOMETRY_RAWMODE;
+  unsigned logBufferSize=0,logBufferFilled=0,logBufferLine=0,logBufferMaxLines=0;
+  uint8_t* buffer=nullptr; uint8_t* buffer_back=nullptr; uint8_t* logBuffer=nullptr;
+  unsigned BufferOffset=0,_spiSettings=0;
+  Bus bus; Bus* _spi=&bus;
+  Panel(int*,uint8_t,uint8_t,uint8_t,OLEDDISPLAY_GEOMETRY g,uint16_t w,uint16_t h,
+        int=-1,int=-1,int=-1) { setGeometry(g,w,h); }
+  bool connect() { _buffheight=(displayHeight+7)/8; return true; }
+  void set_CS(int) {}
+  void setAddrWindow(uint16_t,uint16_t,uint16_t,uint16_t) {}
+@GEOMETRY@
+@ALLOCATE@
+@FLUSH@
+};
+int SPI=0,SPI1=0;
+constexpr uint8_t PIN_TFT_RST=2,PIN_TFT_DC=12,PIN_TFT_CS=11,PIN_TFT_SDA=41,PIN_TFT_SCL=40;
+constexpr uint8_t ST7789_RESET=14,ST7789_RS=15,ST7789_CS=16,ST7789_SDA=13,ST7789_MISO=14,ST7789_SCK=12;
+struct DisplayDriver { DisplayDriver(int,int) {} };
+struct ST7789Display:DisplayDriver {
+  Panel display; bool _isOn=false;
+@CONSTRUCTORS@
+};
+int main() {
+  ST7789Display d; Panel& p=d.display;
+  assert(p.allocateBuffer());
+  std::fill(p.buffer,p.buffer+p.displayBufferSize,0xff);
+#ifdef OLEDDISPLAY_DOUBLE_BUFFER
+  std::fill(p.buffer_back,p.buffer_back+p.displayBufferSize,0);
+#endif
+  p.display(); assert(p.bus.rows==p.displayHeight);
+  const auto count=calls, persistent=live;
+  assert(p.allocateBuffer()); assert(calls==count && live==persistent);
+  std::printf("%zu %zu %zu\n",live,peak,largest);
+  track_free(p.buffer);
+#ifdef OLEDDISPLAY_DOUBLE_BUFFER
+  track_free(p.buffer_back);
+#endif
+  assert(live==0);
+}
+'''
+        for marker, value in {
+                "@BUFFERING@": buffering, "@CONSTRUCTORS@": constructors,
+                "@GEOMETRY@": extract_braced(spi, "void setGeometry("),
+                "@ALLOCATE@": extract_braced(oled, "bool OLEDDisplay::allocateBuffer(").replace(
+                    "OLEDDisplay::", ""),
+                "@FLUSH@": extract_braced(spi, "void display(void)")}.items():
+            fixture = fixture.replace(marker, value)
+        with tempfile.TemporaryDirectory(prefix="st7789-ram-") as temporary:
+            for board in ({"HELTEC_T114": 1, "T114_DISPLAY_AUTODETECT": 1},
+                          {"HELTEC_VISION_MASTER_T190": 1}, {"THINKNODE_M9": 1}):
+                for buffers in ({}, {"OLEDDISPLAY_REDUCE_MEMORY": 0},
+                                {"OLEDDISPLAY_REDUCE_MEMORY": 1, "OLEDDISPLAY_DOUBLE_BUFFER": 0}):
+                    defines = {**board, **buffers, "DISPLAY_CLASS": "ST7789Display"}
+                    with self.subTest(defines=defines):
+                        binary = Path(temporary) / "allocations"
+                        compiled = subprocess.run([
+                            "c++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-x", "c++", "-",
+                            *[f"-D{k}={v}" for k,v in {**board, **buffers}.items()],
+                            "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
+                            "-o", str(binary)], input=fixture, text=True, capture_output=True)
+                        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+                        checked = subprocess.run([str(binary)], text=True, capture_output=True, timeout=15)
+                        self.assertEqual(checked.returncode, 0, checked.stderr)
+                        persistent, peak, largest = map(int, checked.stdout.split())
+                        policy = ram.requirements("NRF52_PLATFORM", defines, "display_companion")
+                        self.assertEqual(policy["components"]["display_pixels_and_driver"], peak)
+                        self.assertGreater(peak, persistent)  # Scanline is heap, freed after each transfer.
+                        self.assertGreaterEqual(policy["required_contiguous_bytes"], largest)
+
+    def test_t114_present_panel_is_budgeted_for_auto_and_legacy_with_exact_admission(self):
+        flags = {"DISPLAY_CLASS": "ST7789Display", "HELTEC_T114": 1,
+                 "T114_DISPLAY_AUTODETECT": 1, "COMPANION_RADIO_FULL": 1, "BLE_PIN_CODE": 123456}
+        target = "Heltec_t114_companion_radio_full"
+        policy = ram.requirements("NRF52_PLATFORM", flags, target)
+        self.assertEqual(policy["components"]["display_pixels_and_driver"], 8640)
+        self.assertEqual(policy["components"]["allocation_and_transient_margin"], 4096)
+        legacy = {key:value for key,value in flags.items() if key != "T114_DISPLAY_AUTODETECT"}
+        self.assertEqual(ram.requirements("NRF52_PLATFORM", legacy, target), policy)
+        required = policy["required_heap_bytes"]
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "firmware.elf"
+            for capacity, accepted in ((required-8640, False), (required-1, False), (required, True)):
+                with self.subTest(capacity=capacity), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    elf32(path, {"__HeapBase": (0x2003F800-capacity,0), "__HeapLimit": (0x2003F800,0)})
+                    self.assertEqual(ram.check_firmware(path,"NRF52_PLATFORM","nrf52840",flags,target)==0, accepted)
+
     def test_device_encoder_budget_matches_storage_and_role_gates(self):
         matrix = [
             ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "v4_repeater", True),
@@ -90,9 +308,11 @@ class FirmwareRamTest(unittest.TestCase):
                 self.assertEqual("ota_encoder_workspace" in components, enabled)
                 if enabled:
                     self.assertEqual(components["ota_encoder_workspace"], 1024 + 16)
-                self.assertEqual("ota_self_source_scratch" in components,
-                                 enabled and platform == "NRF52_PLATFORM")
-                if enabled and platform == "NRF52_PLATFORM":
+                self_source = (platform == "NRF52_PLATFORM" and "ENABLE_OTA" in defines
+                               and "OTA_SEEDER_ONLY" not in defines and any(key in defines for key in (
+                                   "OTA_QSPI_STORE", "OTA_SD_STORE", "OTA_RAK_AUTO_STORE", "OTA_TOWER_AUTO_STORE")))
+                self.assertEqual("ota_self_source_scratch" in components, self_source)
+                if self_source:
                     self.assertEqual(components["ota_self_source_scratch"], 4096 + 32)
 
     def test_device_encoder_hash_override_is_budgeted_and_bounded(self):
@@ -118,12 +338,107 @@ class FirmwareRamTest(unittest.TestCase):
         }, "muzi_base_uno_superIO_companion_radio_ble")
         self.assertEqual(policy["components"]["display_pixels_and_driver"], 4096)
 
+    def test_t096_legacy_ble_rgb332_fits_without_reducing_other_reserves(self):
+        flags = {"DISPLAY_CLASS": "ST7735Display", "BLE_PIN_CODE": 123456,
+                 "ENABLE_OTA": 1}
+        for suffix in ("femon", "femoff"):
+            target = "Heltec_t096_companion_radio_ble_" + suffix
+            with self.subTest(target=target):
+                original = ram.requirements("NRF52_PLATFORM", flags, target)
+                compact = ram.requirements("NRF52_PLATFORM", {
+                    **flags, "ST7735_BUFFER_COLOR_DEPTH": 8,
+                }, target)
+                self.assertEqual(original["required_heap_bytes"], 81474)
+                self.assertEqual(compact["required_heap_bytes"], 69697)
+                self.assertEqual(compact["components"]["display_pixels_and_driver"], 12801 + 1024)
+                self.assertGreater(original["required_heap_bytes"], 75396)
+                self.assertLess(compact["required_heap_bytes"], 75396)
+                for name, value in original["components"].items():
+                    if name != "display_pixels_and_driver":
+                        self.assertEqual(compact["components"][name], value)
+                self.assertEqual(compact["components"]["expanded_message_previews"], 2816)
+                self.assertEqual(compact["components"]["ota_generic_source_buffers"], 6176)
+                self.assertEqual(compact["components"]["allocation_and_transient_margin"], 4096)
+
+    def test_st7735_color_depth_default_and_invalid_values_fail_closed(self):
+        flags = {"DISPLAY_CLASS": "ST7735Display"}
+        default = ram.requirements("NRF52_PLATFORM", flags, "other_companion")
+        explicit = ram.requirements("NRF52_PLATFORM", {
+            **flags, "ST7735_BUFFER_COLOR_DEPTH": 16,
+        }, "other_companion")
+        self.assertEqual(default, explicit)
+        self.assertEqual(default["components"]["display_pixels_and_driver"], 25602)
+        for depth in (0, 1, 4, 12, 24, 32):
+            with self.subTest(depth=depth), self.assertRaisesRegex(ValueError, "ST7735_BUFFER_COLOR_DEPTH"):
+                ram.requirements("NRF52_PLATFORM", {
+                    **flags, "ST7735_BUFFER_COLOR_DEPTH": depth,
+                }, "other_companion")
+
+    def test_t096_canvas_configuration_does_not_reduce_companion_capacities(self):
+        config = (ROOT / "variants/heltec_t096/platformio.ini").read_text()
+        self.assertIn("-D ST7735_BUFFER_COLOR_DEPTH=8", config)
+        self.assertIn("-D MAX_CONTACTS=350", config)
+        self.assertIn("-D MAX_GROUP_CHANNELS=40", config)
+        self.assertIn("-D OFFLINE_QUEUE_SIZE=256", config)
+
+    def test_wio_l2_counts_internal_sprite_fallback_and_dma_beside_psram(self):
+        flags = {"DISPLAY_CLASS": "WioTrackerL2Display", "UI_ZOOM": 2}
+        for target in ("Wio_Tracker_L2_repeater", "Wio_Tracker_L2_companion_radio_ble"):
+            with self.subTest(target=target):
+                policy = ram.requirements("ESP32_PLATFORM", flags, target)
+                self.assertEqual(policy["components"]["display_pixels_and_driver"],
+                                 160 * 120 + 1024)
+                self.assertEqual(policy["components"]["display_dma_and_bus"], 16384)
+                self.assertGreaterEqual(policy["required_contiguous_bytes"], 160 * 120 + 1024)
+                psram = ram.requirements("ESP32_PLATFORM", {**flags, "BOARD_HAS_PSRAM": 1}, target)
+                self.assertEqual(psram, policy)
+                without = ram.requirements("ESP32_PLATFORM", {"UI_ZOOM": 2}, target)
+                display_components = (policy["components"]["display_pixels_and_driver"]
+                                      + policy["components"]["display_dma_and_bus"]
+                                      + policy["components"]["screen_objects_and_history"])
+                self.assertEqual(policy["required_heap_bytes"] - without["required_heap_bytes"],
+                                 display_components)
+
+    def test_wio_l2_zoom_and_base_color_depth_cannot_erase_actual_sprite_cost(self):
+        flags = {"DISPLAY_CLASS": "WioTrackerL2Display"}
+        cases = (({}, 320 * 240), ({"UI_ZOOM": 2, "UI_BUFFER_COLOR_DEPTH": 4}, 160 * 120),
+                 ({"UI_ZOOM": 2, "UI_COORD_SCALE": 2}, 160 * 120),
+                 ({"UI_ZOOM": 2, "UI_BUFFER_COLOR_DEPTH": 16}, 160 * 120 * 2),
+                 ({"UI_ZOOM": "1.5f", "UI_BUFFER_COLOR_DEPTH": 24}, 214 * 160 * 3),
+                 ({"UI_ZOOM": "0.5", "UI_BUFFER_COLOR_DEPTH": 32}, 640 * 480 * 4))
+        for overrides, pixels in cases:
+            with self.subTest(overrides=overrides):
+                policy = ram.requirements("ESP32_PLATFORM", {**flags, **overrides}, "Wio_Tracker_L2_repeater")
+                self.assertEqual(policy["components"]["display_pixels_and_driver"], pixels + 1024)
+                self.assertGreaterEqual(policy["required_contiguous_bytes"], pixels + 1024)
+        for override in ({"UI_ZOOM": 0}, {"UI_ZOOM": -1}, {"UI_ZOOM": "inf"},
+                         {"UI_ZOOM": "nan"}, {"UI_ZOOM": "auto"},
+                         {"UI_COORD_SCALE": 0}, {"UI_BUFFER_COLOR_DEPTH": 7}):
+            with self.subTest(invalid=override), self.assertRaises(ValueError):
+                ram.requirements("ESP32_PLATFORM", {**flags, **override}, "Wio_Tracker_L2_repeater")
+        with self.assertRaisesRegex(ValueError, "requires ESP32"):
+            ram.requirements("NRF52_PLATFORM", flags, "unsupported_display")
+
+    def test_wio_l2_budget_tracks_real_sprite_and_qspi_geometry(self):
+        display = (ROOT / "variants/wio-tracker-l2/WioTrackerL2Display.h").read_text()
+        base = (ROOT / "src/helpers/ui/LGFXDisplay.cpp").read_text()
+        self.assertIn("WioTrackerL2Display() : LGFXDisplay(320, 240, disp)", display)
+        self.assertIn("cfg.panel_width = 240;", display)
+        self.assertIn("cfg.panel_height = 320;", display)
+        self.assertIn("buffer.setColorDepth(8);", display)
+        self.assertIn("buffer.setPsram(true);", display)
+        self.assertIn("buffer.createSprite(width(), height());", display)
+        self.assertIn("lgfx::Bus_SPI _bus_instance;", display)
+        self.assertIn("buffer.setPsram(false);", base)
+        self.assertIn("buffer.setColorDepth(UI_BUFFER_COLOR_DEPTH);", base)
+        self.assertIn("buffer.createSprite(width() * _coordinateScale,", base)
+
     def test_heap_tables_and_ota_remain_in_runtime_budget(self):
         policy = ram.requirements("ESP32_PLATFORM", {
             "ENABLE_OTA": 1, "OTA_HEAP_CONTEXT": 1,
         }, "GEPRC_Linkflow_900_repeater")
         self.assertEqual(policy["components"]["client_table"], 32 * 320 + 16)
-        self.assertEqual(policy["components"]["flood_filter_table"], 63 * 200 + 16)
+        self.assertEqual(policy["components"]["flood_filter_table"], 63 * 304 + 16)
         self.assertEqual(policy["components"]["ota_context"], 16384 + 16)
         self.assertGreaterEqual(policy["required_contiguous_bytes"], 16384 + 16)
         reduced = ram.requirements("STM32_PLATFORM", {
@@ -154,6 +469,19 @@ class FirmwareRamTest(unittest.TestCase):
             self.assertEqual(local["components"]["browser_terminal_session"], 2048)
             self.assertEqual(local["components"]["browser_terminal_scrollback"], 4096)
 
+    def test_room_browser_workspaces_are_bounded_and_only_budgeted_on_eligible_rooms(self):
+        flags = {"ADMIN_PASSWORD": "test"}
+        enabled = ram.requirements("ESP32_PLATFORM", flags, "v4_room_server")
+        disabled = ram.requirements("ESP32_PLATFORM", {**flags, "WEBCONFIG_DISABLED": 1}, "v4_room_server")
+        self.assertEqual(enabled["components"]["room_browser_mailbox"], 6656 + 16)
+        self.assertEqual(enabled["components"]["room_browser_request_workspace"], 8192 + 2048 + 16)
+        self.assertGreaterEqual(enabled["required_contiguous_bytes"], 8192)
+        for policy in (disabled, ram.requirements("ESP32_PLATFORM", flags, "v4_repeater"),
+                       ram.requirements("ESP32_PLATFORM", flags, "v4_companion"),
+                       ram.requirements("NRF52_PLATFORM", flags, "RAK_4631_room_server")):
+            self.assertNotIn("room_browser_mailbox", policy["components"])
+            self.assertNotIn("room_browser_request_workspace", policy["components"])
+
     def test_longer_display_previews_reserve_heap_and_contiguous_history(self):
         defines = {"DISPLAY_CLASS": "SSD1306Display", "UI_SMALL_MESSAGE_FONT": 0}
         base = ram.requirements("ESP32_PLATFORM", defines, "v4_companion")
@@ -179,14 +507,499 @@ class FirmwareRamTest(unittest.TestCase):
         combined = ram.requirements("ESP32_PLATFORM", {
             **defines, "WITH_RS232_BRIDGE": "Serial2", "RS232_BRIDGE_MERGED": 1,
         }, "v3_repeater")
-        self.assertEqual(combined["required_heap_bytes"] - mqtt["required_heap_bytes"], 8192)
-        self.assertEqual(combined["components"]["uart_bridge_and_driver"], 8192)
+        self.assertEqual(combined["required_heap_bytes"] - mqtt["required_heap_bytes"], 3072 + 4096)
+        self.assertEqual(combined["components"]["uart_bridge_and_driver"], 3072 + 4096)
         # A selectable alternate port does not create two UART owners.
         alternate = ram.requirements("ESP32_PLATFORM", {
             **defines, "WITH_RS232_BRIDGE": "Serial2", "RS232_BRIDGE_MERGED": 1,
             "WITH_RS232_BRIDGE_ALT": "Serial1",
         }, "v3_repeater")
         self.assertEqual(alternate, combined)
+
+    def test_udp_bridge_budget_counts_enabled_case_alongside_existing_owners(self):
+        flags = {"WITH_MQTT_BRIDGE": 1, "WITH_RS232_BRIDGE": "Serial2"}
+        previous = ram.requirements("ESP32_PLATFORM", flags, "v3_repeater")
+        udp = ram.requirements("ESP32_PLATFORM", {**flags, "WITH_UDP_BRIDGE": 1}, "v3_repeater")
+        self.assertEqual(udp["required_heap_bytes"] - previous["required_heap_bytes"], 5120)
+        self.assertEqual(udp["components"]["udp_bridge_and_socket"], 3072 + 2048)
+        self.assertEqual(udp["components"]["wireless_stacks"], previous["components"]["wireless_stacks"])
+        self.assertEqual(udp["components"]["uart_bridge_and_driver"], previous["components"]["uart_bridge_and_driver"])
+        # UDP without MQTT must still reserve the shared WiFi stack.
+        udp_only = ram.requirements("ESP32_PLATFORM", {"WITH_UDP_BRIDGE": 1}, "v4_repeater")
+        self.assertEqual(udp_only["components"]["wireless_stacks"], 49152)
+        self.assertEqual(udp_only["components"]["udp_bridge_and_socket"], 5120)
+
+    def test_mqtt_startup_gate_distinguishes_maximum_slot_stack_buffer_capacity(self):
+        flags = {"WITH_MQTT_BRIDGE": 1}
+        plain = ram.requirements("ESP32_PLATFORM", flags, "v4_companion")
+        psram = ram.requirements("ESP32_PLATFORM", {**flags, "BOARD_HAS_PSRAM": 1},
+                                 "v4_companion")
+        # The potential five-slot allowance is reported separately: additional
+        # clients allocate lazily and must pass the production runtime gate.
+        self.assertEqual(plain["required_heap_bytes"], psram["required_heap_bytes"])
+        self.assertEqual(plain["components"]["mqtt_startup_allowance"], 24576)
+        self.assertEqual(psram["components"]["mqtt_startup_allowance"], 24576)
+        for policy, slots, active, potential in ((plain, 3, 2, 24576), (psram, 6, 5, 48384)):
+            with self.subTest(active=active):
+                profile = policy["mqtt"]
+                self.assertEqual(profile["runtime_slot_count"], slots)
+                self.assertEqual(profile["maximum_active_slots"], active)
+                self.assertEqual(profile["startup_active_slot_allowance"], 2)
+                self.assertEqual(profile["maximum_active_slots_without_psram"], 2)
+                self.assertEqual(profile["maximum_slot_stack_buffer_allowance_bytes"], potential)
+                self.assertEqual(profile["cold_start_allocation_allowance_bytes"], 16384)
+                self.assertEqual(profile["cold_start_dma_admission_free_bytes"], 32768)
+                self.assertEqual(profile["cold_start_dma_admission_contiguous_bytes"], 8192)
+                self.assertEqual(profile["restart_allocation_allowance_bytes"], 8192)
+                self.assertEqual(profile["restart_dma_admission_free_bytes"], 24576)
+                self.assertEqual(profile["restart_dma_admission_contiguous_bytes"], 8192)
+                self.assertFalse(profile["maximum_runtime_load_qualified"])
+                self.assertFalse(profile["physical_validation_performed"])
+        ordinary = ram.requirements("ESP32_PLATFORM", {"BOARD_HAS_PSRAM": 1}, "v4_companion")
+        self.assertNotIn("mqtt", ordinary)
+
+    def test_mqtt_without_build_time_wifi_credentials_reserves_wifi_stack_exactly_once(self):
+        # MQTT can use persisted station credentials without either compile-time
+        # WiFi option. Isolate the wireless budget from optional browser sessions.
+        base = {"WEBCONFIG_DISABLED": 1}
+        for target in ("Tbeam_SX1262_repeater_observer_mqtt", "v4_companion"):
+            ordinary = ram.requirements("ESP32_PLATFORM", base, target)
+            self.assertEqual(ordinary["components"]["wireless_stacks"], 0)
+            mqtt = ram.requirements("ESP32_PLATFORM", {**base, "WITH_MQTT_BRIDGE": 1}, target)
+            self.assertEqual(mqtt["components"]["wireless_stacks"], 49152)
+            self.assertEqual(mqtt["required_heap_bytes"] - ordinary["required_heap_bytes"],
+                             49152 + 24576)
+            for extra in ({"WIFI_SSID": ""}, {"WIFI_OTA_SEEDER": 1},
+                          {"WIFI_SSID": "saved-at-runtime", "WIFI_OTA_SEEDER": 1}):
+                with self.subTest(target=target, extra=extra):
+                    combined = ram.requirements("ESP32_PLATFORM", {
+                        **base, "WITH_MQTT_BRIDGE": 1, **extra,
+                    }, target)
+                    self.assertEqual(combined, mqtt)
+
+    def test_mqtt_only_elf_gate_rejects_the_previously_omitted_wifi_allowance(self):
+        defines = {"WITH_MQTT_BRIDGE": 1, "WEBCONFIG_DISABLED": 1}
+        target = "Tbeam_SX1262_repeater_observer_mqtt"
+        policy = ram.requirements("ESP32_PLATFORM", defines, target)
+        self.assertEqual(policy["components"]["wireless_stacks"], 49152)
+        required = policy["required_heap_bytes"]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "firmware.elf"
+            report = Path(temporary) / "firmware.memory.json"
+            # The old WiFi-omitted policy accepted the first linked capacity.
+            # The corrected gate must reject it and enforce the exact new bound.
+            for capacity, expected in ((required - 49152, False),
+                                       (required - 1, False), (required, True)):
+                with self.subTest(capacity=capacity), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    esp_fixture(path, modern=True, internal_length=capacity + 0x4000)
+                    status = ram.check_firmware(path, "ESP32_PLATFORM", "esp32s3",
+                                                defines, target, report)
+                    result = json.loads(report.read_text())
+                    self.assertEqual(status == 0, expected)
+                    self.assertEqual(result["passed"], expected)
+                    self.assertEqual(result["available_internal_bytes"], capacity)
+                    self.assertEqual(result["required_heap_bytes"], required)
+
+    def test_mqtt_worker_stack_growth_raises_gate_and_contiguous_requirement(self):
+        flags = {"WITH_MQTT_BRIDGE": 1, "BOARD_HAS_PSRAM": 1}
+        base = ram.requirements("ESP32_PLATFORM", flags, "v4_companion")
+        large = ram.requirements("ESP32_PLATFORM", {
+            **flags, "MQTT_TASK_STACK_SIZE": 32768,
+        }, "v4_companion")
+        self.assertEqual(large["required_heap_bytes"] - base["required_heap_bytes"], 24576)
+        self.assertEqual(large["required_contiguous_bytes"], 32768)
+        self.assertEqual(large["mqtt"]["maximum_slot_stack_buffer_allowance_bytes"], 72960)
+        small = ram.requirements("ESP32_PLATFORM", {
+            **flags, "MQTT_TASK_STACK_SIZE": 4096, "MQTT_RUNTIME_SLOT_COUNT": 1,
+        }, "v4_companion")
+        self.assertEqual(small["required_heap_bytes"], base["required_heap_bytes"])
+        self.assertEqual(small["mqtt"]["maximum_active_slots"], 1)
+        for slots in (0, 7):
+            with self.subTest(slots=slots), self.assertRaisesRegex(ValueError, "between 1 and 6"):
+                ram.requirements("ESP32_PLATFORM", {
+                    **flags, "MQTT_RUNTIME_SLOT_COUNT": slots,
+                }, "v4_companion")
+        with self.assertRaisesRegex(ValueError, "positive"):
+            ram.requirements("ESP32_PLATFORM", {**flags, "MQTT_TASK_STACK_SIZE": 0}, "v4_companion")
+
+    def test_mqtt_report_at_startup_boundary_does_not_qualify_maximum_load(self):
+        flags = {"WITH_MQTT_BRIDGE": 1, "BOARD_HAS_PSRAM": 1}
+        policy = ram.requirements("ESP32_PLATFORM", flags, "v4_companion")
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "firmware.elf"
+            report = Path(temp) / "firmware.memory.json"
+            for delta, expected in ((-1, False), (0, True)):
+                with self.subTest(delta=delta), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    capacity = policy["required_heap_bytes"] + delta
+                    esp_fixture(path, modern=True, internal_length=capacity + 0x4000)
+                    status = ram.check_firmware(path, "ESP32_PLATFORM", "esp32s3", flags,
+                                                "v4_companion", report)
+                    result = json.loads(report.read_text())
+                    self.assertEqual(status == 0, expected)
+                    self.assertEqual(result["passed"], expected)
+                    self.assertEqual(result["available_internal_bytes"], capacity)
+                    self.assertEqual(result["mqtt"]["maximum_slot_stack_buffer_allowance_bytes"], 48384)
+                    self.assertFalse(result["mqtt"]["maximum_runtime_load_qualified"])
+                    self.assertFalse(result["mqtt"]["physical_validation_performed"])
+
+    def test_mqtt_report_admission_thresholds_match_production_guard(self):
+        source = (ROOT / "src/helpers/MQTTConnectionAdmission.h").read_text()
+        profile = ram.requirements("ESP32_PLATFORM", {"WITH_MQTT_BRIDGE": 1}, "v4_companion")["mqtt"]
+        for key, name in (
+            ("client_task_stack_bytes", "kClientTaskStackBytes"),
+            ("client_task_priority", "kClientTaskPriority"),
+            ("cold_start_allocation_allowance_bytes", "kColdStartAllowanceBytes"),
+            ("cold_start_dma_admission_contiguous_bytes", "kColdStartLargestBytes"),
+            ("restart_allocation_allowance_bytes", "kRestartAllowanceBytes"),
+            ("restart_dma_admission_contiguous_bytes", "kRestartLargestBytes"),
+            ("dma_admission_free_bytes", "kDmaReserveBytes"),
+            ("dma_admission_contiguous_bytes", "kDmaLargestBytes"),
+            ("tls_internal_admission_free_bytes", "kTlsInternalFreeBytes"),
+            ("tls_internal_admission_contiguous_bytes", "kTlsRecordAllocationBytes"),
+        ):
+            with self.subTest(key=key):
+                self.assertIn(f"{name} = {profile[key]};", source)
+        self.assertEqual(profile["cold_start_dma_admission_free_bytes"],
+                         profile["dma_admission_free_bytes"] + profile["cold_start_allocation_allowance_bytes"])
+        self.assertEqual(profile["restart_dma_admission_free_bytes"],
+                         profile["dma_admission_free_bytes"] + profile["restart_allocation_allowance_bytes"])
+
+    def test_combined_rak_budgets_uart_beside_exclusive_ethernet_and_ota(self):
+        defines = {
+            "RAK_4631": 1, "ETHERNET_ENABLED": 1, "OTA_RAK_AUTO_STORE": 1,
+            "ENABLE_OTA": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1,
+            "WITH_RS232_BRIDGE": "Serial2", "DISPLAY_CLASS": "SSD1306Display",
+        }
+        legacy = ram.requirements("NRF52_PLATFORM", defines,
+                                  "RAK_4631_repeater_unified_lora_ota")
+        combined = ram.requirements("NRF52_PLATFORM", {
+            **defines, "RAK4631_COMBINED_ETHERNET": 1,
+        }, "RAK_4631_repeater_unified_lora_ota")
+        components = combined["components"]
+        self.assertEqual(components["uart_bridge_and_driver"], 3072)
+        self.assertEqual(components["ethernet_or_external_ota_workspaces"], 11344)
+        self.assertNotIn("ota_encoder_workspace", components)
+        self.assertNotIn("ota_self_source_scratch", components)
+        self.assertEqual(components["display_pixels_and_driver"], 2048)
+        self.assertEqual(combined["required_heap_bytes"] - legacy["required_heap_bytes"], 3072)
+        self.assertEqual(components["loop_and_callback_stacks"], 8192 + 3072)
+        self.assertEqual(components["flood_filter_table"], 63 * 304 + 16)
+        # An alternate port selects the same bridge instead of allocating two.
+        alternate = ram.requirements("NRF52_PLATFORM", {
+            **defines, "RAK4631_COMBINED_ETHERNET": 1,
+            "WITH_RS232_BRIDGE_ALT": "Serial1",
+        }, "RAK_4631_repeater_unified_lora_ota")
+        self.assertEqual(alternate, combined)
+
+    def test_combined_rak_worker_budget_tracks_stack_and_encoder_overrides(self):
+        defines = {
+            "RAK_4631": 1, "ETHERNET_ENABLED": 1, "OTA_RAK_AUTO_STORE": 1,
+            "RAK4631_COMBINED_ETHERNET": 1, "ENABLE_OTA": 1,
+            "MESHCORE_OTA_DEVICE_DEFLATE": 1,
+        }
+        for words, expected in ((1024, 11344), (1536, 11344), (2048, 11344), (3072, 13120)):
+            with self.subTest(words=words):
+                policy = ram.requirements("NRF52_PLATFORM", {
+                    **defines, "RAK4631_ETHERNET_TASK_STACK_WORDS": words,
+                }, "RAK_4631_sensor")
+                self.assertEqual(policy["components"]["ethernet_or_external_ota_workspaces"], expected)
+                self.assertGreaterEqual(policy["required_contiguous_bytes"], expected)
+        no_encoder = ram.requirements("NRF52_PLATFORM", {
+            **defines, "MESHCORE_OTA_DEVICE_DEFLATE": 0,
+        }, "RAK_4631_sensor")
+        self.assertEqual(no_encoder["components"]["ethernet_or_external_ota_workspaces"], 10304)
+        for bits in (7, 8, 9, 10):
+            with self.subTest(bits=bits):
+                policy = ram.requirements("NRF52_PLATFORM", {
+                    **defines, "MESHCORE_OTA_DEFLATE_HASH_BITS": bits,
+                }, "RAK_4631_sensor")
+                self.assertEqual(policy["components"]["ethernet_or_external_ota_workspaces"],
+                                 max(4928, (1 << bits) * 2 + 16 + 4096 + 32 + 6176))
+        for capacity, expected in ((512, 11344), (1024, 11344), (2048, 11344)):
+            with self.subTest(tx_capacity=capacity):
+                policy = ram.requirements("NRF52_PLATFORM", {
+                    **defines, "ETHERNET_CLI_TX_BUFFER_BYTES": capacity,
+                }, "RAK_4631_sensor")
+                self.assertEqual(policy["components"]["ethernet_or_external_ota_workspaces"], expected)
+
+    def test_bounded_source_proofs_reserve_real_workspace_without_cutting_other_allowances(self):
+        for platform in ("ESP32_PLATFORM", "NRF52_PLATFORM", "RP2040_PLATFORM", "STM32_PLATFORM"):
+            for full in (False, True):
+                for psram in (False, True):
+                    flags = {"ENABLE_OTA": 1, "WIFI_SSID": "test", "BLE_PIN_CODE": 123456,
+                             "WITH_MQTT_BRIDGE": 1}
+                    if full:
+                        flags["COMPANION_RADIO_FULL"] = 1
+                    if psram:
+                        flags["BOARD_HAS_PSRAM"] = 1
+                    with self.subTest(platform=platform, full=full, psram=psram):
+                        legacy = ram.requirements(platform, {**flags, "OTA_BOUNDED_SOURCE_PROOFS": 0},
+                                                  "board_companion_radio_full")
+                        selected = ram.requirements(platform, flags, "board_companion_radio_full")
+                        expected = 1536 if platform == "ESP32_PLATFORM" and full and not psram else (
+                            16384 if platform == "ESP32_PLATFORM" else 4096)
+                        self.assertEqual(selected["components"]["ota_generic_source_buffers"],
+                                         expected + 2048 + 32)
+                        for name, amount in legacy["components"].items():
+                            if name != "ota_generic_source_buffers":
+                                self.assertEqual(selected["components"][name], amount)
+        for custom in (0, 3, 32768):
+            flags = {"ENABLE_OTA": 1, "COMPANION_RADIO_FULL": 1, "OTA_PROOFGEN_SCRATCH": custom}
+            extended = ram.requirements("ESP32_PLATFORM", flags, "board_companion_radio_full")
+            self.assertEqual(extended["components"]["ota_generic_source_buffers"], custom + 2048 + 32)
+            with self.assertRaises(ValueError):
+                ram.requirements("ESP32_PLATFORM", {**flags, "OTA_BOUNDED_SOURCE_PROOFS": 1},
+                                 "board_companion_radio_full")
+        odd_limit = ram.requirements("ESP32_PLATFORM", {
+            "ENABLE_OTA": 1, "COMPANION_RADIO_FULL": 1, "OTA_PROOFGEN_SCRATCH": 16383,
+        }, "board_companion_radio_full")
+        self.assertEqual(odd_limit["components"]["ota_generic_source_buffers"], 1536 + 2048 + 32)
+        for invalid in (-1, 2, "invalid"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                ram.requirements("ESP32_PLATFORM", {
+                    "ENABLE_OTA": 1, "OTA_BOUNDED_SOURCE_PROOFS": invalid,
+                }, "board_companion_radio_full")
+
+    def test_compact_tables_keep_capacity_and_reserve_active_ota_allocations(self):
+        for platform, leaf_limit in (("NRF52_PLATFORM", 1536), ("ESP32_PLATFORM", 1536),
+                                     ("RP2040_PLATFORM", 4096), ("STM32_PLATFORM", 4096)):
+            with self.subTest(platform=platform):
+                flags = {"ENABLE_OTA": 1, "MESH_CLIENT_REPEATER_ONLY": 1,
+                         "MAX_RECENT_REPEATERS": 512}
+                compact = ram.requirements(platform, flags, "board_repeater")["components"]
+                self.assertEqual(compact["client_table"], 32 * 284 + 16)
+                self.assertEqual(compact["ota_generic_source_buffers"], leaf_limit + 2048 + 32)
+                full = ram.requirements(platform, {**flags, "MESH_CLIENT_REPEATER_ONLY": 0},
+                                        "board_repeater")["components"]
+                self.assertEqual(full["client_table"] - compact["client_table"], 36 * 32)
+                if platform == "ESP32_PLATFORM":
+                    self.assertEqual(compact["neighbor_history"], 512 * 9 + 16)
+        sd = ram.requirements("NRF52_PLATFORM", {"ENABLE_OTA": 1, "OTA_SD_STORE": 1},
+                              "board_repeater")["components"]
+        self.assertEqual(sd["ota_generic_source_buffers"], 8192 + 2048 + 32)
+        custom = ram.requirements("NRF52_PLATFORM", {
+            "ENABLE_OTA": 1, "OTA_PROOFGEN_SCRATCH": 12000, "OTA_MAX_BLOCK": 1024,
+        }, "board_repeater")["components"]
+        self.assertEqual(custom["ota_generic_source_buffers"], 12000 + 1024 + 32)
+        for default, expected in ((256, 256), (2048, 2048)):
+            parts = ram.requirements("ESP32_PLATFORM", {
+                "MESH_RAM_DEFAULT_RECENT_REPEATERS": default,
+            }, "board_repeater")["components"]
+            self.assertEqual(parts["neighbor_history"], expected * 9 + 16)
+        disabled = ram.requirements("ESP32_PLATFORM", {"MESH_ENABLE_RECENT_REPEATERS": 0},
+                                    "board_repeater")["components"]
+        self.assertEqual(disabled["neighbor_history"], 0)
+        s3 = ram.requirements("ESP32_PLATFORM", {}, "board_repeater")
+        self.assertGreaterEqual(s3["required_contiguous_bytes"], 2048 * 9 + 16)
+        alias = ram.requirements("ESP32_PLATFORM", {"MESH_CLIENT_REPEATER_ONLY": 1},
+                                 "custom_companion_alias")
+        self.assertEqual(alias["components"]["client_table"], 32 * 284 + 16)
+        self.assertEqual(alias["components"]["flood_filter_table"], 63 * 304 + 16)
+        self.assertEqual(alias["components"]["neighbor_history"], 2048 * 9 + 16)
+        self.assertEqual(alias["components"]["radio_packet_pool"], 10240)
+
+    def test_qualified_esp32_repeaters_stream_source_proofs_without_cutting_other_budgets(self):
+        for psram in (False, True):
+            flags = {"ENABLE_OTA": 1, "MESH_CLIENT_REPEATER_ONLY": 1,
+                     "WITH_MQTT_BRIDGE": 1, "WIFI_SSID": "test", "MAX_CLIENTS": 32}
+            if psram:
+                flags["BOARD_HAS_PSRAM"] = 1
+            with self.subTest(psram=psram):
+                legacy = ram.requirements("ESP32_PLATFORM", {
+                    **flags, "OTA_BOUNDED_SOURCE_PROOFS": 0}, "board_repeater")["components"]
+                selected = ram.requirements("ESP32_PLATFORM", flags, "board_repeater")["components"]
+                expected = 1536
+                self.assertEqual(selected["ota_generic_source_buffers"], expected + 2048 + 32)
+                for name, amount in legacy.items():
+                    if name != "ota_generic_source_buffers":
+                        self.assertEqual(selected[name], amount)
+
+    def test_nrf52_repeater_proofs_keep_sensor_profiles_limits_and_other_reserves(self):
+        for full_sensors in (False, True):
+            for store in ({}, {"OTA_RAK_AUTO_STORE": 1}, {"OTA_SD_STORE": 1}):
+                flags = {"ENABLE_OTA": 1, "MESH_CLIENT_REPEATER_ONLY": 1,
+                         "ENV_INCLUDE_BME680_BSEC": int(full_sensors), **store}
+                for scratch in (None, 4, 4096, 8192, 16383, 16384, 32768):
+                    if scratch is not None:
+                        flags["OTA_PROOFGEN_SCRATCH"] = scratch
+                    with self.subTest(full_sensors=full_sensors, store=store, scratch=scratch):
+                        legacy = ram.requirements("NRF52_PLATFORM", {
+                            **flags, "OTA_BOUNDED_SOURCE_PROOFS": 0}, "RAK_3401_repeater")
+                        selected = ram.requirements("NRF52_PLATFORM", flags, "RAK_3401_repeater")
+                        leaf_limit = scratch if scratch is not None else (8192 if "OTA_SD_STORE" in store else 4096)
+                        workspace = 1536 if 4 <= leaf_limit <= 16384 else leaf_limit
+                        self.assertEqual(selected["components"]["ota_generic_source_buffers"],
+                                         workspace + 2048 + 32)
+                        for name, amount in legacy["components"].items():
+                            if name != "ota_generic_source_buffers":
+                                self.assertEqual(selected["components"][name], amount)
+                        self.assertEqual(legacy["required_heap_bytes"] - selected["required_heap_bytes"],
+                                         leaf_limit - workspace)
+                        self.assertEqual(legacy["required_contiguous_bytes"],
+                                         selected["required_contiguous_bytes"])
+
+    def test_rak_repeater_compact_rule_and_oled_budgets_keep_every_other_reserve(self):
+        flags = {
+            "ENABLE_OTA": 1, "OTA_RAK_AUTO_STORE": 1, "OTA_QSPI_STORE": 1,
+            "OTA_RAK15002_SD_STORE": 1, "OTA_FLASH_STORE": 1,
+            "MESHCORE_OTA_DEVICE_DEFLATE": 1, "MESH_CLIENT_REPEATER_ONLY": 1,
+            "DISPLAY_CLASS": "SSD1306Display",
+        }
+        selected = ram.requirements("NRF52_PLATFORM", flags, "RAK_4631_repeater")
+        self.assertEqual(selected["components"], {
+            "loop_and_callback_stacks": 11264,
+            "core_usb_filesystems_sensors": 12288,
+            "sd_fat_volume_and_files": 2048,
+            "radio_packet_pool": 10240,
+            "client_table": 9104,
+            "flood_filter_table": 63 * 304 + 16,
+            "ota_generic_source_buffers": 3616,
+            "ota_encoder_workspace": 1040,
+            "ota_self_source_scratch": 4128,
+            "display_pixels_and_driver": 2048,
+            "screen_objects_and_history": 2048,
+            "allocation_and_transient_margin": 4096,
+        })
+        self.assertEqual(selected["required_heap_bytes"], 81088)
+        self.assertEqual(selected["required_contiguous_bytes"], 19168)
+        # The fresh Full baseline's 81,668 bytes passed only after the real
+        # 32-byte per-row reduction and same-driver OLED accounting proof.
+        # Neither a one-byte deficit nor the old failed capacity can bypass
+        # the existing real-ELF gate.
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "firmware.elf"
+            for available, expected in ((81087, False), (81088, True), (81668, True)):
+                with self.subTest(available=available):
+                    elf32(path, {"__HeapBase": (0x20010000, 0),
+                                 "__HeapLimit": (0x20010000 + available, 0)})
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        passed = ram.check_firmware(path, "NRF52_PLATFORM", "nrf52840",
+                                                    flags, "RAK_4631_repeater") == 0
+                    self.assertEqual(passed, expected)
+
+    def test_nrf52_oled_bound_matches_same_source_guard_without_changing_other_displays(self):
+        defines = {
+            "RAK_4631": 1, "ETHERNET_ENABLED": 1, "OTA_RAK_AUTO_STORE": 1,
+            "RAK4631_COMBINED_ETHERNET": 1,
+        }
+        for driver, expected in (("SSD1306Display", 2048), ("SH1106Display", 4096),
+                                 ("SH1107Display", 4096), ("ST7735Display", 25602)):
+            with self.subTest(driver=driver):
+                combined = ram.requirements("NRF52_PLATFORM", {
+                    **defines, "DISPLAY_CLASS": driver,
+                }, "RAK_4631_repeater")
+                self.assertEqual(combined["components"]["display_pixels_and_driver"], expected)
+        ordinary = ram.requirements("NRF52_PLATFORM", {
+            "DISPLAY_CLASS": "SSD1306Display",
+        }, "RAK_4631_repeater")
+        self.assertEqual(ordinary["components"]["display_pixels_and_driver"], 2048)
+
+    def test_esp32_fixed_oled_and_uart_bounds_preserve_full_runtime_reserves(self):
+        defines = {
+            "WIFI_OTA_SEEDER": 1, "WITH_MQTT_BRIDGE": 1,
+            "WITH_RS232_BRIDGE": "Serial2", "WITH_ESPNOW_BRIDGE": 1,
+            "ENABLE_OTA": 1, "ADMIN_PASSWORD": "test",
+            "MESHCORE_OTA_DEVICE_DEFLATE": 1,
+            "MESH_CLIENT_REPEATER_ONLY": 1,
+            "DISPLAY_CLASS": "SSD1306Display",
+        }
+        full = ram.requirements("ESP32_PLATFORM", defines, "Heltec_v3_repeater_observer_mqtt")
+        parts = full["components"]
+        self.assertEqual(full["required_heap_bytes"], 201904)
+        self.assertEqual(parts["display_pixels_and_driver"], 2048)
+        self.assertEqual(parts["uart_bridge_and_driver"], 3072 + 4096)
+        self.assertEqual(parts["wireless_stacks"], 49152)
+        self.assertEqual(parts["mqtt_startup_allowance"], 24576)
+        self.assertEqual(parts["allocation_and_transient_margin"], 16384)
+        self.assertEqual(full["required_contiguous_bytes"], 19168)
+        for driver, expected in (("SH1106Display", 2048), ("SH1107Display", 4096),
+                                 ("ST7735Display", 25602)):
+            with self.subTest(driver=driver):
+                other = ram.requirements("ESP32_PLATFORM", {
+                    **defines, "DISPLAY_CLASS": driver,
+                }, "Heltec_v3_repeater_observer_mqtt")
+                self.assertEqual(other["components"]["display_pixels_and_driver"], expected)
+                self.assertEqual(other["components"], {
+                    **parts, "display_pixels_and_driver": expected,
+                })
+                self.assertEqual(other["required_contiguous_bytes"], max(19168, expected))
+
+    def test_sh1106_full_mqtt_release_profile_is_linked_in_ci(self):
+        workflow = (ROOT / ".github/workflows/run-unit-tests.yml").read_text()
+        command = re.search(
+            r"bash build\.sh build-firmware Station_G3_ESP32_r2_repeater_observer_mqtt"
+            r"(?P<args>(?:\n          [^\n]+)+)", workflow)
+        self.assertIsNotNone(command)
+        self.assertIn("--full-exact", command["args"])
+        self.assertIn("--firmware-version v1.18.0.1-halo-keymind-cascade-dev", command["args"])
+        self.assertIn("--require-ota", command["args"])
+
+    def test_source_allocation_guards_reject_growth_at_the_budget_boundary(self):
+        # Compile the production guards themselves with exact-size stand-ins.
+        # Actual firmware compilation additionally checks the real classes;
+        # these negative cases prove future growth cannot silently bypass them.
+        sources = (
+            ("src/helpers/bridges/RS232Bridge.cpp", "RS232Bridge::RS232Bridge(",
+             "struct RS232Bridge { unsigned char bytes[OBJECT_BYTES]; };\n",
+             ((2816, 0, True), (2817, 0, False))),
+            ("src/helpers/bridges/UDPBridge.cpp", "UDPBridge::UDPBridge(",
+             "namespace mesh { namespace bridge { namespace udp {} } }\n"
+             "struct UDPBridge { unsigned char bytes[OBJECT_BYTES]; };\n",
+             ((3072, 0, True), (3073, 0, False))),
+            ("src/helpers/ui/SSD1306Display.cpp", "bool SSD1306Display::i2c_probe(",
+             "struct SSD1306Display { unsigned char bytes[OBJECT_BYTES]; "
+             "static constexpr unsigned FRAMEBUFFER_BYTES = FRAME_BYTES; };\n",
+             ((992, 1024, True), (993, 1024, False), (124, 1025, False))),
+            ("src/helpers/ui/SH1106Display.cpp", "bool SH1106Display::i2c_probe(",
+             "struct Adafruit_I2CDevice { unsigned char bytes[16]; };\n"
+             "struct SH1106Display { unsigned char bytes[OBJECT_BYTES]; "
+             "static constexpr unsigned FRAMEBUFFER_BYTES = FRAME_BYTES; };\n",
+             ((944, 1024, True), (945, 1024, False), (124, 1025, False))),
+        )
+        for path, end, stand_in, cases in sources:
+            prefix = (ROOT / path).read_text().split(end, 1)[0]
+            prefix = "\n".join(line for line in prefix.splitlines()
+                               if not line.lstrip().startswith("#include"))
+            if path.endswith(("RS232Bridge.cpp", "UDPBridge.cpp")):
+                prefix += "\n#endif\n"  # The feature guard also encloses the methods below.
+            for platform in (("ESP32=1", "ESP32_PLATFORM=1"),
+                             ("NRF52_PLATFORM=1", "RAK4631_COMBINED_ETHERNET=1"),
+                             ("NRF52_PLATFORM=1",)):
+                for size, frame, bounded in cases:
+                    with self.subTest(path=path, platform=platform, size=size, frame=frame):
+                        result = subprocess.run([
+                            "c++", "-std=c++17", "-fsyntax-only", "-x", "c++", "-",
+                            "-DWITH_RS232_BRIDGE=1", "-DWITH_UDP_BRIDGE=1", f"-DOBJECT_BYTES={size}",
+                            f"-DFRAME_BYTES={frame}", *["-D" + flag for flag in platform],
+                        ], input=stand_in + prefix, text=True, capture_output=True)
+                        enforced = "ESP32=1" in platform or ("NRF52_PLATFORM=1" in platform
+                            and path.endswith("SSD1306Display.cpp")) or (
+                            "RAK4631_COMBINED_ETHERNET=1" in platform
+                            and not path.endswith(("SH1106Display.cpp", "UDPBridge.cpp")))
+                        self.assertEqual(result.returncode == 0, bounded or not enforced,
+                                         result.stderr)
+
+    def test_combined_rak_budget_rejects_unmatched_hardware_or_short_task_stack(self):
+        defines = {
+            "RAK_4631": 1, "ETHERNET_ENABLED": 1, "OTA_RAK_AUTO_STORE": 1,
+            "RAK4631_COMBINED_ETHERNET": 1,
+        }
+        for missing in ("RAK_4631", "ETHERNET_ENABLED", "OTA_RAK_AUTO_STORE"):
+            invalid = {name: value for name, value in defines.items() if name != missing}
+            with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, "adaptive nRF52 storage"):
+                ram.requirements("NRF52_PLATFORM", invalid, "RAK_4631_repeater")
+        with self.assertRaisesRegex(ValueError, "adaptive nRF52 storage"):
+            ram.requirements("ESP32_PLATFORM", defines, "esp_repeater")
+        for words in (0, 512, 1023):
+            with self.subTest(words=words), self.assertRaisesRegex(ValueError, "1024 stack words"):
+                ram.requirements("NRF52_PLATFORM", {
+                    **defines, "RAK4631_ETHERNET_TASK_STACK_WORDS": words,
+                }, "RAK_4631_repeater")
+        for capacity in (0, 256, 511, 2049):
+            with self.subTest(tx_capacity=capacity), self.assertRaisesRegex(ValueError, "512..2048 bytes"):
+                ram.requirements("NRF52_PLATFORM", {
+                    **defines, "ETHERNET_CLI_TX_BUFFER_BYTES": capacity,
+                }, "RAK_4631_repeater")
 
     def test_published_image_tables_match_elf_and_use_its_own_reservations(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -225,7 +1038,20 @@ class FirmwareRamTest(unittest.TestCase):
     def test_lazy_manual_stage_allocation_failure_and_clear(self):
         source = (ROOT / "src/helpers/ota/OtaContext.h").read_text()
         begin = source.index("#if defined(ESP32_PLATFORM) || (defined(NRF52_PLATFORM) && !defined(OTA_SEEDER_ONLY))")
-        end = source.index("#endif", begin) + len("#endif")
+        # The actual buffer methods contain their own platform/owner guards.
+        # Compile the complete outer branch rather than its first nested #if.
+        end, depth = begin, 0
+        for line in source[begin:].splitlines(keepends=True):
+            directive = line.lstrip()
+            if directive.startswith("#if"):
+                depth += 1
+            elif directive.startswith("#endif"):
+                depth -= 1
+            end += len(line)
+            if depth == 0:
+                break
+        else:
+            self.fail("unterminated manual-stage buffer platform branch")
         branch = source[begin:end]
         code = r'''
 #include <cstdlib>
@@ -341,6 +1167,80 @@ int main() {
             with self.assertRaises(ValueError):
                 ram.requirements(platform, definitions, "companion")
 
+    def test_optional_rak_sd_counts_lazy_volume_and_files_without_hiding_source_scratch(self):
+        flags = {"ENABLE_OTA": 1, "OTA_SD_STORE": 1}
+        base = ram.requirements("NRF52_PLATFORM", flags, "RAK_4631_repeater")
+        flags["OTA_RAK15002_SD_STORE"] = 1
+        sd = ram.requirements("NRF52_PLATFORM", flags, "RAK_4631_repeater")
+        self.assertEqual(sd["required_heap_bytes"] - base["required_heap_bytes"], 2048)
+        self.assertEqual(sd["components"]["sd_fat_volume_and_files"], 2048)
+        self.assertEqual(sd["components"]["ota_generic_source_buffers"],
+                         base["components"]["ota_generic_source_buffers"])
+
+    def test_optional_sd_room_excludes_workspaces_but_companion_counts_worker_additively(self):
+        flags = {"ENABLE_OTA": 1, "OTA_SD_STORE": 1, "OTA_RAK15002_SD_STORE": 1,
+                 "ETHERNET_ENABLED": 1, "RAK_4631": 1, "OTA_RAK_AUTO_STORE": 1,
+                 "MESHCORE_OTA_DEVICE_DEFLATE": 1}
+        room = ram.requirements("NRF52_PLATFORM", flags, "RAK_4631_room_server")
+        parts = room["components"]
+        self.assertIn("ethernet_or_external_ota_workspaces", parts)
+        self.assertEqual(parts["ethernet_or_external_ota_workspaces"], 15440)
+        self.assertEqual(parts["sd_fat_volume_and_files"], 2048)
+        self.assertNotIn("ota_generic_source_buffers", parts)
+        large = ram.requirements("NRF52_PLATFORM", {**flags, "RAK4631_ETHERNET_TASK_STACK_WORDS": 4096},
+                                 "RAK_4631_room_server")
+        self.assertEqual(large["components"]["ethernet_or_external_ota_workspaces"], 17216)
+        companion = ram.requirements("NRF52_PLATFORM", {**flags, "OTA_SEEDER_ONLY": 1},
+                                     "RAK_4631_companion_radio_full")
+        self.assertNotIn("ethernet_or_external_ota_workspaces", companion["components"])
+        self.assertIn("ota_generic_source_buffers", companion["components"])
+        self.assertEqual(companion["components"]["ethernet_companion_worker"], 4096 + 256)
+        without_eth = ram.requirements("NRF52_PLATFORM", {
+            **{key: value for key, value in flags.items() if key != "ETHERNET_ENABLED"},
+            "OTA_SEEDER_ONLY": 1}, "RAK_4631_companion_radio_full")
+        self.assertEqual(companion["required_heap_bytes"] - without_eth["required_heap_bytes"], 4352)
+        self.assertEqual(companion["components"]["ota_generic_source_buffers"],
+                         without_eth["components"]["ota_generic_source_buffers"])
+
+    def test_companion_rak_worker_budget_covers_legacy_and_stack_overrides(self):
+        flags = {"ETHERNET_ENABLED": 1, "ETHERNET_USE_RAK13800": 1}
+        base = ram.requirements("NRF52_PLATFORM", {}, "RAK_4631_companion_radio_ethernet")
+        for words in (1024, 2048, 8192):
+            with self.subTest(words=words):
+                worker = ram.requirements("NRF52_PLATFORM", {
+                    **flags, "RAK4631_ETHERNET_TASK_STACK_WORDS": words},
+                    "RAK_4631_companion_radio_ethernet")
+                expected = words * 4 + 256
+                self.assertEqual(worker["required_heap_bytes"] - base["required_heap_bytes"], expected)
+                self.assertEqual(worker["components"]["ethernet_companion_worker"], expected)
+                self.assertGreaterEqual(worker["required_contiguous_bytes"], expected)
+        for words in (0, 1023, 65536):
+            with self.subTest(words=words), self.assertRaisesRegex(ValueError, "1024..65535"):
+                ram.requirements("NRF52_PLATFORM", {
+                    **flags, "RAK4631_ETHERNET_TASK_STACK_WORDS": words},
+                    "RAK_4631_companion_radio_ethernet")
+        for platform, defines, target in (
+                ("ESP32_PLATFORM", flags, "esp32_companion_radio_full"),
+                ("NRF52_PLATFORM", {"ETHERNET_ENABLED": 1}, "other_companion"),
+                ("NRF52_PLATFORM", flags, "RAK_4631_repeater")):
+            with self.subTest(platform=platform, defines=defines, target=target):
+                self.assertNotIn("ethernet_companion_worker",
+                                 ram.requirements(platform, defines, target)["components"])
+
+    def test_only_rak_sd_full_companion_counts_large_name_lookup(self):
+        flags = {"ENABLE_OTA": 1, "OTA_SD_STORE": 1, "OTA_RAK15002_SD_STORE": 1,
+                 "OTA_TARGET_NAME_FRONT_CODED": 1, "COMPANION_RADIO_FULL": 1, "OTA_SEEDER_ONLY": 1}
+        full = ram.requirements("NRF52_PLATFORM", flags, "RAK_4631_companion_radio_full")
+        self.assertEqual(full["components"]["ota_target_name_lookup"], 4112)
+        for missing in ("OTA_RAK15002_SD_STORE", "OTA_TARGET_NAME_FRONT_CODED"):
+            other = ram.requirements("NRF52_PLATFORM", {key: value for key, value in flags.items() if key != missing},
+                                     "RAK_4631_companion_radio_full")
+            self.assertNotIn("ota_target_name_lookup", other["components"])
+        receiver = ram.requirements("NRF52_PLATFORM", {key: value for key, value in flags.items()
+                                     if key not in ("COMPANION_RADIO_FULL", "OTA_SEEDER_ONLY")},
+                                     "RAK_4631_repeater_unified_lora_ota")
+        self.assertNotIn("ota_target_name_lookup", receiver["components"])
+
     def test_queue_sharing_applies_to_qualified_direct_full_builds_only(self):
         source = '#include "src/helpers/ota/OtaMemoryPolicy.h"\n#ifdef OTA_SHARED_COMPANION_QUEUE\nSHARING_ENABLED\n#endif\n'
         for flags, expected in (
@@ -359,7 +1259,10 @@ int main() {
 
     def test_affected_esp32_full_overlay_keeps_documented_capacity_and_transports(self):
         for target in ("Heltec_v3_companion_radio_full", "Xiao_C3_companion_radio_full",
+                       "Heltec_ct62_companion_radio_full",
                        "heltec_tracker_v2_companion_radio_full_femon",
+                       "heltec_tracker_v2_companion_radio_full_femoff",
+                       "generic_espnow_companion_radio_full",
                        "Heltec_Wireless_Paper_companion_radio_full"):
             result = subprocess.run(["bash", "-c", '''
 source build.sh
@@ -380,7 +1283,16 @@ printf '%s\\n' "$PLATFORMIO_BUILD_FLAGS"
                     self.assertNotIn("-DOFFLINE_QUEUE_SIZE=", result.stdout)
                 else:
                     self.assertIn("-DOFFLINE_QUEUE_SIZE=224", result.stdout)
-                self.assertNotIn("-DOTA_SHARED_COMPANION_QUEUE", result.stdout)
+                if target in ("Xiao_C3_companion_radio_full", "Heltec_ct62_companion_radio_full",
+                              "heltec_tracker_v2_companion_radio_full_femon",
+                              "heltec_tracker_v2_companion_radio_full_femoff"):
+                    self.assertIn("-DOTA_SHARED_COMPANION_QUEUE=1", result.stdout)
+                    self.assertIn("-DONE_KEY_DM_COMPACT_HELD=1", result.stdout)
+                else:
+                    self.assertNotIn("-DOTA_SHARED_COMPANION_QUEUE", result.stdout)
+            if target in ("Heltec_v3_companion_radio_full", "generic_espnow_companion_radio_full",
+                          "Heltec_Wireless_Paper_companion_radio_full"):
+                self.assertNotIn("-DONE_KEY_DM_COMPACT_HELD", result.stdout)
             self.assertIn("-DWIFI_OTA_SEEDER=1", result.stdout)
             self.assertIn("-DBLE_PIN_CODE=123456", result.stdout)
 

@@ -9,6 +9,10 @@
 #include <helpers/ContactSecretCache.h>
 #endif
 #include <helpers/CompanionReaderConfig.h>
+#include <helpers/ui/PocketGuiConfig.h>
+#if UI_POCKET_GUI
+#include <helpers/ui/PocketGuiSettings.h>
+#endif
 #if defined(ESP32_PLATFORM)
 namespace mesh { class ContactFileTransaction; }
 #endif
@@ -22,6 +26,8 @@ public:
   virtual bool getContactForSave(uint32_t idx, ContactInfo& contact) =0;
   virtual ContactInfo* getContactForStore(uint32_t idx) =0;
   virtual void onContactCacheFlushed() {}
+  // Only called by explicit recovery between packet/app callbacks.
+  virtual bool resetContactsForRecovery() { return false; }
   virtual bool onChannelLoaded(uint8_t channel_idx, const ChannelDetails& ch) =0;
   virtual bool getChannelForSave(uint8_t channel_idx, ChannelDetails& ch) =0;
 };
@@ -44,6 +50,37 @@ class DataStore
   IdentityStore identity_store;
   bool _identity_creation_blocked = false;
   bool _prefs_load_incomplete = false;
+  // Contact-only recovery must not reinterpret a channel/migration error as
+  // permission to discard contacts. No recovery files or boot counters needed.
+  enum : uint8_t { ContactRecoveryPending = 1, ContactRecoveryLegacy = 2,
+                   ContactRecoveryBackup = 4, ContactStorageUnavailable = 8,
+                   ContactMigrationDeferred = 16,
+#if MESH_CONTACT_CACHE
+                   ContactRecoveryRawOnly = 32,
+#endif
+  };
+  uint8_t _contact_recovery = 0;
+  void queueContactRecovery(bool legacy = false) {
+#if MESH_CONTACT_CACHE
+    // Source/publication uncertainty always supersedes a raw-read retry.
+    _contact_recovery &= ~ContactRecoveryRawOnly;
+#endif
+    _contact_recovery |= ContactRecoveryPending
+        | (legacy ? ContactRecoveryLegacy : 0);
+  }
+#if MESH_CONTACT_CACHE
+  void queueContactReadRecovery(bool legacy = false) {
+    if (!(_contact_recovery & ContactRecoveryPending))
+      _contact_recovery |= ContactRecoveryRawOnly;
+    _contact_recovery |= ContactRecoveryPending
+        | (legacy ? ContactRecoveryLegacy : 0);
+  }
+#endif
+  void clearContactLoadFailure();
+#if !defined(NRF52_PLATFORM)
+  const char* selectContactFile(bool& present);
+  bool prepareContactSave();
+#endif
 #if defined(ESP32_PLATFORM)
   const char* _prefs_recovery_source = nullptr;
   const char* _channel_recovery_source = nullptr;
@@ -113,8 +150,8 @@ class DataStore
   void invalidateAdvertWrite(const uint8_t key[], int key_len);
   void retireAdvertWrite(const uint8_t key[], int key_len);
 #endif
-#if !defined(NRF52_PLATFORM)
   bool _channel_load_incomplete = false;
+#if !defined(NRF52_PLATFORM)
 #if !MESH_CONTACT_CACHE
   bool _uncached_contact_load_incomplete = false;
 #endif
@@ -188,6 +225,11 @@ public:
 #if defined(NRF52_PLATFORM)
   void useVolatilePrimaryFS(FILESYSTEM& fs);
   bool isVolatilePrimaryFS() const { return _volatile_primary_fs; }
+  // Meshtext settings belong to the primary store, alongside the identity.
+  // An absent record is size zero; unreadable or volatile storage is failure.
+  bool loadMeshtextSettings(uint8_t image[40], size_t& size);
+  bool saveMeshtextSettings(const uint8_t image[40]);
+  bool eraseMeshtextSettings();
 #endif
   void markPrimaryFSUnavailable();
   void disableSecondaryFS(bool authority_unknown = true);
@@ -197,11 +239,22 @@ public:
   bool loadPrefs(CompanionNodePrefs& prefs, double& node_lat,
                  double& node_lon);
   bool savePrefs(const CompanionNodePrefs& prefs, double node_lat, double node_lon);
+#if UI_POCKET_GUI
+  bool loadPocketGuiSettings(mesh::ui::pocket::Settings& settings);
+  bool savePocketGuiSettings(const mesh::ui::pocket::Settings& settings);
+#endif
 #if COMPANION_FEATURE_READER
   bool loadReaderBookmark(mesh::bible::Position& pos);
   bool saveReaderBookmark(mesh::bible::Position pos);
 #endif
   void loadContacts(DataStoreHost* host);
+  bool contactRecoveryPending() const {
+    return (_contact_recovery & ContactRecoveryPending) != 0;
+  }
+  bool contactsAreVolatile() const {
+    return (_contact_recovery & (ContactStorageUnavailable | ContactMigrationDeferred)) != 0;
+  }
+  void recoverContacts(DataStoreHost* host);
   bool saveContacts(DataStoreHost* host, bool (*filter)(const ContactInfo& c) = NULL);
   bool markContactDirty(const ContactInfo& contact);
   bool releaseContact(const ContactInfo& contact);
@@ -210,6 +263,7 @@ public:
   bool flushContactWrites(DataStoreHost* host, bool (*filter)(const ContactInfo& c) = NULL);
   bool hasPendingContactWrites() const;
   bool hasIncompleteContactLoad() const;
+  bool hasIncompleteChannelLoad() const { return _channel_load_incomplete; }
   void loadChannels(DataStoreHost* host);
   bool saveChannels(DataStoreHost* host);
   bool migrateToSecondaryFS();

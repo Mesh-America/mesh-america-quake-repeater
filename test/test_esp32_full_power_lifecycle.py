@@ -18,12 +18,17 @@ FLAGS = ["-DESP32_PLATFORM=1", "-DESP_PLATFORM=1", "-DADMIN_PASSWORD=1",
          "-DWEBCONFIG_UNCONFIGURED_SETUP_TIMEOUT_MS=1800000"]
 
 FIXTURE = r'''
+#define MESH_MANAGEMENT_PASSWORD_HOST_TEST 1
+#include <helpers/esp32/ManagementPassword.h>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <new>
 #include <helpers/WebConfigBatch.h>
+#include <helpers/PowerManagementUtils.h>
+#include <helpers/PowerSavingDiagnostics.h>
+#include <helpers/WiFiNetworkPowerPolicy.h>
 #include <helpers/WirelessControl.h>
 uint32_t now = 0;
 uint32_t millis() { return now; }
@@ -98,6 +103,7 @@ struct Prefs {
   int bridge_enabled = 0, espnow_bridge_enabled = 0, rs232_bridge_enabled = 0;
   bool battery_alert_enabled = false;
   const char* node_name = "test";
+  const char* password = "password";
   float freq = 915, bw = 125; uint8_t sf = 7, cr = 5, disable_fwd = 0;
 };
 struct ObserverPrefs { char wifi_ssid[33] = {}; };
@@ -143,6 +149,8 @@ struct MQTTNodeInfo {
   uint8_t* sf; uint8_t* cr; uint8_t* repeat_flag; bool repeat_when_nonzero; bool canonical_wifi = false;
 };
 struct MQTTBridge : AbstractBridge {
+  bool network_suspended = false;
+  bool isNetworkSuspended() const { return network_suspended; }
   template<class... Args> explicit MQTTBridge(Args...) {}
   void setDeviceID(const char*) {} void setFirmwareVersion(const char*) {}
   void setBoardModel(const char*) {} void setBuildDate(const char*) {}
@@ -156,6 +164,8 @@ struct WebConfigServer {
   uint32_t _setup_started_at = 0;
   int _mode = 0;
   static constexpr int MODE_SETUP = 1;
+  static constexpr int MODE_LAN = 2;
+  uint32_t foreground_until = 0;
   char _wifi_ssid[33] = {};
   template<class... Args> WebConfigServer(void*, void* prefs, bool owner, Args...) : owns(owner) {
     if (prefs) strcpy(_wifi_ssid, static_cast<ObserverPrefs*>(prefs)->wifi_ssid);
@@ -165,6 +175,14 @@ struct WebConfigServer {
   bool isRunning() const { return running; }
   bool isStopping() const { return stopping; }
   void updateWiFiOwnership(bool owner) { owns = owner; }
+  void requestNetworkAccess() {
+    foreground_until = millis() + 120000;
+    mesh::wifi::networkPower().requestProbe();
+  }
+  bool isNetworkForegroundActive(uint32_t tick) const {
+    return _mode == MODE_SETUP || stopping
+        || (foreground_until && int32_t(tick - foreground_until) < 0);
+  }
   bool startSetupMode(char* reply) {
     if (!allow_start) {
       if (owns) stopOwnedWiFiRadio();
@@ -213,7 +231,9 @@ struct MyMesh {
   bool isMillisTimerDue(unsigned long) const { return false; }
   bool getNextQueueWakeDelay(uint32_t&) const { return false; }
   bool getNextRetryWakeDelay(uint32_t&) const { return false; }
+  bool getNextNoiseFloorWakeDelay(uint32_t&) const { return false; }
   bool isDualRadioActive() const { return false; }
+  bool canIdleDualRadio() const { return true; }
   uint32_t limitSleepToMillisTimer(unsigned long, uint32_t secs) const { return secs; }
   uint32_t limitSleepToScheduledRadioWork(uint32_t secs) const { return secs; }
   const AbstractBridge* activeBridge() const { return @WORKER@; }
@@ -223,8 +243,11 @@ struct MyMesh {
   void configureBridgeFilter(AbstractBridge*) {} void drainOutbound(unsigned) {} void otaAlert(const char*) {}
   void suspendUnconfiguredSetupBridges(); void serviceIdleWiFi();
   bool startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup);
+  @WIFI_OWNER_DECLARATION@
   bool startWebConfig(bool force_ap, char* reply); bool stopWebConfig(char* reply);
+  uint32_t getPowerSaveSleepMilliseconds(uint32_t) const;
   bool hasPendingWork() const; uint32_t getPowerSaveSleepSeconds(uint32_t) const;
+  mesh::powerdiag::Mask pendingWorkReason() const;
   @INLINE_METHODS@
   void defaults() { @DEFAULTS@ }
   void startupSetup() { @STARTUP@ }
@@ -373,7 +396,13 @@ class ESP32FullPowerLifecycleTest(unittest.TestCase):
             "void MyMesh::suspendUnconfiguredSetupBridges()", "void MyMesh::serviceIdleWiFi()",
             "bool MyMesh::startWebConfig(", "bool MyMesh::startWebConfigImpl(",
             "bool MyMesh::stopWebConfig(",
-            "bool MyMesh::hasPendingWork() const", "uint32_t MyMesh::getPowerSaveSleepSeconds("))
+            "bool MyMesh::hasPendingWork() const", "mesh::powerdiag::Mask MyMesh::pendingWorkReason() const",
+            "uint32_t MyMesh::getPowerSaveSleepMilliseconds(",
+            "uint32_t MyMesh::getPowerSaveSleepSeconds("))
+        wifi_owner_signature = "bool MyMesh::webConfigOwnsWiFi("
+        wifi_owner = (extract_braced(source, wifi_owner_signature)
+                      if wifi_owner_signature in source else "")
+        methods += "\n" + wifi_owner
         defaults_start = source.index("  // bridge defaults")
         defaults = source[defaults_start:source.index("  _prefs.bridge_delay", defaults_start)]
         startup = source[source.index("  bool start_webui = WebConfigServer::loadEnabled(false);"):]
@@ -393,6 +422,7 @@ class ESP32FullPowerLifecycleTest(unittest.TestCase):
         stop_owned = extract_braced(web_source, "static void stopOwnedWiFiRadio()")
         return (FIXTURE.replace("@INLINE_METHODS@", inline.replace(" override", ""))
                 .replace("@METHODS@", methods).replace("@DEFAULTS@", defaults)
+                .replace("@WIFI_OWNER_DECLARATION@", "bool webConfigOwnsWiFi() const;" if wifi_owner else "")
                 .replace("@STARTUP@", startup).replace("@PORTAL_LOOP@", portal_loop)
                 .replace("@MANIFEST@", manifest).replace("@OTA_CLI@", cli[begin:end])
                 .replace("@OTA_STATE@", state)
@@ -405,6 +435,51 @@ class ESP32FullPowerLifecycleTest(unittest.TestCase):
         for role in ("simple_repeater", "simple_room_server"):
             with self.subTest(role=role):
                 self.compile_and_run(self.fixture(role), *FLAGS)
+
+    def test_suspended_mqtt_idle_portal_and_foreground_ownership(self):
+        checks = r'''
+int main() {
+  MyMesh node; char reply[160] = {};
+  strcpy(node._cli.prefs.wifi_ssid, "working-network");
+  auto& power = mesh::wifi::networkPower();
+  power.setManaged(true);
+  assert(node.setMqttBridgeState(true));
+  assert(node.startWebConfig(false, reply));
+  node._webconfig->_mode = WebConfigServer::MODE_LAN;
+  now += 120001; // Explicit-start lease has elapsed; listener is idle.
+  power.consumeProbeRequest();
+  node.@WORKER@->network_suspended = true;
+  power.setSuspended(true);
+  unsigned off_before = WiFi.off_modes;
+  node.serviceIdleWiFi();
+  assert(WiFi.off_modes == off_before && sdk_started);
+  assert(node.hasPendingWork()); // Cannot sleep before worker shutdown completes.
+  WiFi.mode(WIFI_OFF); // Only the Core 0 network owner performs this shutdown.
+  node.serviceIdleWiFi();
+  assert(!sdk_initialized && !node.hasPendingWork());
+  assert(node.getPowerSaveSleepSeconds(30) == 30);
+  // An operator can wake the existing listener without creating a second
+  // server, taking station ownership, or deinitializing the worker's driver.
+  assert(node.startWebConfig(false, reply));
+  assert(power.consumeProbeRequest());
+  assert(node._webconfig->isNetworkForegroundActive(now));
+  assert(node.hasPendingWork());
+  now += 120001;
+  assert(!node.hasPendingWork());
+  power.setHold(mesh::wifi::NetworkPowerHold::OtaSeeder, true);
+  assert(node.hasPendingWork());
+  power.setHold(mesh::wifi::NetworkPowerHold::OtaSeeder, false);
+  assert(!node.hasPendingWork());
+  power.setSuspended(false);
+  node.@WORKER@->network_suspended = false;
+  node.serviceIdleWiFi();
+  assert(node.hasPendingWork()); // Resume is owned by the MQTT worker too.
+  power.setManaged(false);
+}
+'''
+        for role in ("simple_repeater", "simple_room_server"):
+            with self.subTest(role=role):
+                self.compile_and_run(self.fixture(role, checks), *FLAGS)
 
     def test_primary_radios_and_wifi_disabled_images_do_not_reclaim_wifi(self):
         for role in ("simple_repeater", "simple_room_server"):

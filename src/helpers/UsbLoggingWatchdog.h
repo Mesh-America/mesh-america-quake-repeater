@@ -18,6 +18,8 @@ bool handleUsbLoggingWatchdogCommand(const char* command, char* reply,
 // and dirty-contact ownership and is rechecked after the durable tier commit.
 // True authorizes the caller's board.reboot(); this helper never reboots.
 bool serviceUsbLoggingWatchdog(bool (*safe)(void*), void* context = nullptr);
+// Awake/service hint, not reset authorization. nRF52's interrupt wait keeps
+// policy time running, so only unfinished USB transport recovery inhibits it.
 bool isUsbLoggingWatchdogArmed();
 bool isUsbLoggingWatchdogUpdateActive();
 

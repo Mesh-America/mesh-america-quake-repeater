@@ -27,9 +27,136 @@ def function_body(source: str, signature: str) -> str:
 
 
 class CompanionContactSleepContractTest(unittest.TestCase):
+    def test_recovery_resets_at_outer_boundary_and_volatile_saves_stay_truthful(self):
+        mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
+        store = (ROOT / "examples/companion_radio/DataStore.cpp").read_text()
+        loop = function_body(mesh, "void MyMesh::loop()")
+        self.assertLess(loop.index("_store->recoverContacts(this)"),
+                        loop.index("BaseChatMesh::loop()"))
+        self.assertIn("contactRecoveryPending() && !mesh::morseTimingActive(_radio)", loop)
+        self.assertIn("|| _store->contactRecoveryPending()",
+                      function_body(mesh, "mesh::powerdiag::Mask MyMesh::pendingWorkReason() const"))
+        reset = function_body(mesh, "bool MyMesh::resetContactsForRecovery()")
+        self.assertNotIn("stopContactsIterator()", reset)
+        self.assertLess(reset.index("_iter_pending_contact = ContactInfo()"),
+                        reset.index("resetContacts()"))
+        self.assertIn("#if MESH_CONTACT_CACHE\n  _iter_pending_contact = ContactInfo();\n#endif",
+                      reset)
+        self.assertLess(reset.index("_iter_contact_pending = false"),
+                        reset.index("resetContacts()"))
+        self.assertIn("MyMesh::onContactCacheFlushed()", reset)
+        clear = function_body(mesh, "void MyMesh::onContactCacheFlushed()")
+        self.assertIn("mesh::resetLazyPersistenceAfterSuccess(dirty_contacts_expiry, dirty_contacts_failures)", clear)
+        recovery = function_body(store, "void DataStore::recoverContacts(")
+        self.assertNotIn("format(", recovery)
+        self.assertNotIn("reboot(", recovery)
+        self.assertNotIn('"/.extrafs.mig"', recovery)
+        signatures = (
+            "void MyMesh::onContactCacheFlushed()",
+            "bool MyMesh::flushContactsBeforeReboot()",
+            "bool MyMesh::prepareForUiShutdown()",
+            "void MyMesh::rebootNow()",
+            "void MyMesh::saveContacts()",
+        )
+        methods = "\n".join(signature + " {" + function_body(mesh, signature) + "}"
+                            for signature in signatures)
+        recovery_guard = "if (_store->contactRecoveryPending() && !mesh::morseTimingActive(_radio))"
+        methods += "\nvoid MyMesh::serviceRecovery() {" + recovery_guard + " {"
+        methods += function_body(loop, recovery_guard) + "}}\n"
+        fixture = r'''
+#include <cassert>
+#include <cstdint>
+#include <initializer_list>
+#define MESH_DEBUG_PRINTLN(...) do {} while (0)
+namespace mesh {
+void resetLazyPersistenceAfterSuccess(uint32_t& deadline, uint8_t& failures) {
+  deadline = 0; failures = 0;
+}
+uint32_t nonzeroLazyPersistenceDeadline(uint32_t value) { return value ? value : 1; }
+bool morseTimingActive(int) { return false; }
+}
+constexpr unsigned CONTACT_PAGE_WRITE_GAP = 10;
+constexpr unsigned LAZY_CONTACTS_WRITE_DELAY = 50;
+bool save_filter(int) { return true; }
+struct Board { unsigned resets = 0; void reboot() { ++resets; } } board;
+struct Store {
+  bool vol = false, saved = true, pending = true, recovery = false;
+  unsigned writes = 0;
+  bool contactsAreVolatile() const { return vol; }
+  bool hasPendingContactWrites() const { return pending; }
+  bool contactRecoveryPending() const { return recovery; }
+  void recoverContacts(void*) { recovery = false; }
+  bool flushContactWrites(void*, bool (*)(int)) { ++writes; return saved; }
+  bool saveContacts(void*, bool (*)(int)) { ++writes; return saved; }
+};
+struct MyMesh {
+  Store store; Store* _store = &store;
+  uint32_t dirty_contacts_expiry = 1;
+  uint8_t dirty_contacts_failures = 1;
+  unsigned retries = 0;
+  int _radio = 0;
+  void updateGpsTelemetryPolicy() {}
+  void serviceRecovery();
+  uint32_t futureMillis(unsigned value) { return 100 + value; }
+  void scheduleContactWriteRetry() { ++retries; }
+  bool flushContactsBeforeReboot(); bool prepareForUiShutdown();
+  virtual void onContactCacheFlushed();
+  void rebootNow(); void saveContacts();
+};
+@METHODS@
+int main() {
+  MyMesh node;
+  node.store.vol = true;
+  assert(!node.flushContactsBeforeReboot()); // tx.contact must not promise durability
+  assert(node.store.writes == 0 && node.retries == 0);
+  assert(node.prepareForUiShutdown());
+  node.rebootNow(); assert(board.resets == 1);
+  node.saveContacts();
+  assert(node.dirty_contacts_expiry == 0 && node.dirty_contacts_failures == 0);
+  assert(node.store.writes == 0 && node.retries == 0);
+  node.store.vol = false; node.store.saved = false;
+  node.dirty_contacts_expiry = 1;
+  assert(!node.flushContactsBeforeReboot());
+  assert(node.store.writes == 1 && node.retries == 1);
+  node.rebootNow(); assert(board.resets == 1);
+  node.store.saved = true; node.store.pending = false;
+  assert(node.flushContactsBeforeReboot());
+  assert(node.dirty_contacts_expiry == 0 && node.dirty_contacts_failures == 0);
+  node.rebootNow(); assert(board.resets == 2);
+  struct Derived : MyMesh {
+    unsigned overrides = 0;
+    void onContactCacheFlushed() override { ++overrides; }
+  } derived;
+  derived.store.vol = true;
+  derived.saveContacts();
+  assert(derived.overrides == 0 && derived.dirty_contacts_expiry == 0);
+  assert(derived.dirty_contacts_failures == 0 && derived.store.writes == 0);
+  // Execute the actual outer-loop recovery preamble. Fast raw-read recovery
+  // must not postpone even an already-overdue accepted mutation deadline.
+  for (uint32_t deadline : {1u, 321u}) {
+    node.dirty_contacts_expiry = deadline;
+    node.dirty_contacts_failures = 3;
+    node.store.pending = true; node.store.recovery = true;
+    node.serviceRecovery();
+    assert(node.dirty_contacts_expiry == deadline);
+    assert(node.dirty_contacts_failures == 3 && !node.store.recovery);
+  }
+  node.dirty_contacts_expiry = 0; node.store.recovery = true;
+  node.serviceRecovery();
+  assert(node.dirty_contacts_expiry == 100 + LAZY_CONTACTS_WRITE_DELAY);
+}
+'''.replace("@METHODS@", methods)
+        with tempfile.TemporaryDirectory(prefix="companion-contact-recovery-") as directory:
+            source, binary = Path(directory) / "recovery.cpp", Path(directory) / "recovery"
+            source.write_text(fixture, encoding="ascii")
+            subprocess.run([os.environ.get("CXX", "g++"), "-std=c++17", "-Wall", "-Wextra",
+                            "-Werror", "-fsanitize=address,undefined", "-fno-pie", "-no-pie",
+                            str(source), "-o", str(binary)], check=True, timeout=30)
+            subprocess.run([str(binary)], check=True, timeout=5)
+
     def test_initial_write_polls_but_failed_backoff_can_sleep(self):
         mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
-        body = function_body(mesh, "bool MyMesh::hasPendingWork() const")
+        body = function_body(mesh, "mesh::powerdiag::Mask MyMesh::pendingWorkReason() const")
 
         nrf_start = body.index("#if defined(NRF52_PLATFORM)")
         other_start = body.index("#else", nrf_start)
@@ -48,7 +175,7 @@ class CompanionContactSleepContractTest(unittest.TestCase):
             other,
             r"contact_write_needs_polling\s*=\s*isContactWriteDue\s*\(\s*\)",
         )
-        self.assertRegex(body, r"\|\|\s*contact_write_needs_polling")
+        self.assertRegex(body, r"if\s*\(\s*contact_write_needs_polling\s*\|\|")
 
     def test_contact_write_is_serviced_only_after_its_deadline(self):
         mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
@@ -111,20 +238,79 @@ class CompanionContactSleepContractTest(unittest.TestCase):
         self.assertIn("retry in %lu ms", retry)
         for body in (save, loop):
             self.assertIn("scheduleContactWriteRetry();", body)
-            self.assertIn("mesh::resetLazyPersistenceAfterSuccess(", body)
+            self.assertIn("MyMesh::onContactCacheFlushed()", body)
 
     def test_main_loop_gates_sleep_on_pending_work(self):
         main = (ROOT / "examples/companion_radio/main.cpp").read_text()
-        sleep_start = main.index("bool can_sleep =")
-        sleep_end = main.index("if (can_sleep)", sleep_start)
+        sleep_start = main.index("  using mesh::powerdiag::Reason;")
+        sleep_end = main.index("if (can_sleep", sleep_start)
         sleep_gate = main[sleep_start:sleep_end]
 
-        self.assertIn("!the_mesh.hasPendingWork()", sleep_gate)
+        self.assertIn("the_mesh.pendingWorkReason()", sleep_gate)
+        self.assertIn("if (pending) return pending;", sleep_gate)
+        self.assertIn("const bool can_sleep = sleep_reason == 0;", sleep_gate)
 
         nrf52 = (ROOT / "src/helpers/NRF52Board.cpp").read_text()
         body = function_body(nrf52, "void NRF52Board::sleep(uint32_t secs)")
         self.assertIn("event-driven sleep instead of timed sleep", body)
         self.assertIn("sd_app_evt_wait();", body)
+
+    def test_polled_rak_ethernet_holds_event_sleep_through_pending_off(self):
+        main = (ROOT / "examples/companion_radio/main.cpp").read_text()
+        start = main.index("  using mesh::powerdiag::Reason;")
+        gate = main[start:main.index("if (can_sleep", start)]
+        fixture = r'''
+#include <cassert>
+#include <helpers/PowerSavingDiagnostics.h>
+uint32_t millis() { return 0; }
+struct Prefs { bool powersaving_enabled; };
+struct Mesh {
+  Prefs prefs; bool pending;
+  Prefs* getNodePrefs() { return &prefs; }
+  bool hasPendingWork() const { return pending; }
+  mesh::powerdiag::Mask pendingWorkReason() const {
+    return pending ? mesh::powerdiag::mask(mesh::powerdiag::Reason::Mesh) : 0;
+  }
+  bool getNextNoiseFloorWakeDelay(uint32_t&) const { return false; }
+} the_mesh;
+struct Board { bool usb; bool isUsbHostConnected() const { return usb; } } board;
+struct Ethernet { bool active; bool hardwareActive() const { return active; } } ethernet_interface;
+namespace mesh {
+bool watchdog;
+bool isUsbLoggingWatchdogArmed() { return watchdog; }
+namespace wireless {
+struct Control { bool work; bool pending() const { return work; } } instance;
+Control& control() { return instance; }
+} }
+int main() {
+  for (unsigned flags = 0; flags < 128; ++flags) {
+    the_mesh.prefs.powersaving_enabled = !(flags & 1);
+    the_mesh.pending = flags & 2;
+    bool morse_timing = flags & 4;
+    mesh::watchdog = flags & 8;
+    mesh::wireless::instance.work = flags & 16;
+    board.usb = flags & 32;
+    ethernet_interface.active = flags & 64; // includes OFF accepted but unreleased
+    @GATE@
+#if defined(ETHERNET_USE_RAK13800)
+    assert(can_sleep == (flags == 0));
+#else
+    assert(can_sleep == ((flags & 63) == 0));
+#endif
+  }
+}
+'''.replace('@GATE@', gate)
+        with tempfile.TemporaryDirectory(prefix='companion-ethernet-sleep-') as directory:
+            source, binary = Path(directory) / 'sleep.cpp', Path(directory) / 'sleep'
+            source.write_text(fixture, encoding='ascii')
+            for ethernet in (False, True):
+                with self.subTest(ethernet=ethernet):
+                    subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17',
+                                    '-Wall', '-Wextra', '-Werror', '-DNRF52_PLATFORM=1',
+                                    *(['-DETHERNET_USE_RAK13800=1'] if ethernet else []),
+                                    '-I', str(ROOT / 'src'),
+                                    str(source), '-o', str(binary)], check=True, timeout=30)
+                    subprocess.run([str(binary)], check=True, timeout=5)
 
     def test_all_runtime_reboots_flush_contacts_first(self):
         mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
@@ -134,27 +320,29 @@ class CompanionContactSleepContractTest(unittest.TestCase):
         flush = function_body(mesh, "bool MyMesh::flushContactsBeforeReboot()")
         self.assertIn("_store->flushContactWrites(this, save_filter)", flush)
         self.assertIn("scheduleContactWriteRetry();", flush)
-        self.assertIn("mesh::resetLazyPersistenceAfterSuccess(", flush)
+        self.assertIn("MyMesh::onContactCacheFlushed()", flush)
 
         framed = function_body(mesh, "void MyMesh::handleCmdFrame(")
         reboot_at = framed.index("cmd_frame[0] == CMD_REBOOT")
         framed_reboot = framed[reboot_at : framed.index(
             "cmd_frame[0] == CMD_GET_BATT_AND_STORAGE", reboot_at
         )]
-        self.assertIn("flushContactsBeforeReboot()", framed_reboot)
+        self.assertIn("MyMesh::prepareForUiShutdown()", framed_reboot)
 
         rescue = function_body(mesh, "void MyMesh::checkCLIRescueCmd()")
         rescue_reboot = rescue[rescue.index('strcmp(cli_command, "reboot")') :]
-        self.assertIn("flushContactsBeforeReboot()", rescue_reboot)
+        self.assertIn("MyMesh::prepareForUiShutdown()", rescue_reboot)
 
         callback = function_body(mesh, "void MyMesh::rebootNow()")
-        self.assertIn("flushContactsBeforeReboot()", callback)
+        self.assertIn("MyMesh::prepareForUiShutdown()", callback)
 
         loop = function_body(mesh, "void MyMesh::loop()")
         scheduled = loop[: loop.index("#if COMPANION_FEATURE_TEMP_RADIO")]
-        self.assertIn("flushContactsBeforeReboot()", scheduled)
+        self.assertIn("MyMesh::prepareForUiShutdown()", scheduled)
+        shutdown = function_body(mesh, "bool MyMesh::prepareForUiShutdown()")
+        self.assertIn("_store->contactsAreVolatile() || flushContactsBeforeReboot()", shutdown)
 
-        pending = function_body(mesh, "bool MyMesh::hasPendingWork() const")
+        pending = function_body(mesh, "mesh::powerdiag::Mask MyMesh::pendingWorkReason() const")
         self.assertIn("|| _scheduled_reboot_at != 0", pending)
 
     def test_ota_apply_reboot_uses_companion_persistence_hook(self):
@@ -248,9 +436,9 @@ int main() {
         for role_source in role_sources:
             role = role_source.read_text()
             signature = (
-                "bool SensorMesh::hasPendingWork() const"
+                "mesh::powerdiag::Mask SensorMesh::pendingWorkReason() const"
                 if role_source.name == "SensorMesh.cpp"
-                else "bool MyMesh::hasPendingWork() const"
+                else "mesh::powerdiag::Mask MyMesh::pendingWorkReason() const"
             )
             has_pending_work = function_body(role, signature)
             self.assertIn("hasPendingOtaApply()", has_pending_work, role_source)
@@ -288,7 +476,7 @@ int main() {
         save_identity_at = identity_import.index("_store->saveMainIdentity(")
         load_at = identity_import.index("_store->loadContacts(this)")
         reset_at = identity_import.index(
-            "mesh::resetLazyPersistenceAfterSuccess(", save_identity_at
+            "MyMesh::onContactCacheFlushed()", save_identity_at
         )
         rearm_at = identity_import.index(
             "mesh::scheduleLazyPersistenceMutation(", load_at

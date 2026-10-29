@@ -16,8 +16,11 @@ public:
 
   HeltecTowerV2Board() : NRF52Board("TOWER_V2_OTA") {}
   void begin();
+  void applyLedPolicy() override;
   void onBeforeTransmit() override;
   void onAfterTransmit() override;
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
   const char* getManufacturerName() const override;
   void powerOff() override;

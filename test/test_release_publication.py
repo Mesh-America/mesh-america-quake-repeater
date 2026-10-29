@@ -104,6 +104,55 @@ class ReleasePublicationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "different family"):
                 catalogs.read_stage(directory)
 
+    def test_catalog_distinguishes_qualified_bootloader_firmware_from_ordinary_images(self):
+        from nrf52_embedded_bootloader import (BOOT_SIZE, MANIFEST_SHA256, VERSION as BL_VERSION,
+                                              load_manifest, select_profile)
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            plan = self.stage(directory)
+            target = "RAK_4631_repeater"
+            artifact = target + "-with-bootloader-" + BL_VERSION + "-full-ota"
+            row, _ = self.record(directory / "lora-ota", artifact, "NRF52_PLATFORM", "full")
+            row["target"] = target
+            profile, _ = select_profile(load_manifest(), target)
+            row["capabilities"] = ["bootloader.embedded"]
+            row["verification"] = [{"capability": "bootloader.embedded", "present": True,
+                                     "source": "packaged application"}]
+            row["embedded_bootloader"] = {
+                "release": BL_VERSION, "profile": profile["id"],
+                "candidate_sha256": "a" * 64,
+                "asset_sha256": profile["files"]["zip"]["sha256"],
+                "manifest_sha256": MANIFEST_SHA256, "legacy_sha256": None,
+                "app_offset": 4, "image_bytes": BOOT_SIZE,
+                "activation": "ota bootloader update", "automatic_delay_seconds": 70}
+            folder = directory / "lora-ota"
+            rows = json.loads((folder / "TARGET-MANIFEST.json").read_text()) + [row]
+            def inventory():
+                (folder / "TARGET-MANIFEST.json").write_text(json.dumps(rows))
+                (folder / "SHA256SUMS.txt").write_text("".join(
+                    hashlib.sha256(p.read_bytes()).hexdigest() + "  " + p.name + "\n"
+                    for p in sorted(folder.iterdir()) if p.name != "SHA256SUMS.txt"))
+            inventory()
+            next(group for group in plan["groups"] if group["key"] == "lora-ota")["target_count"] = 3
+            (directory / "release-plan.json").write_text(json.dumps(plan))
+            plan, family, records = catalogs.read_stage(directory)
+            targets = {r["publication_target"] for r, _, _ in records} | {
+                "Station_G2_companion_radio_full", "Station_G2_repeater", target}
+            result = catalogs.generate(self.template(), plan, family, records,
+                                       catalogs.target_profiles(targets), "mikecarper/MeshCore")
+            entries = result["device"][1]["firmware"]
+            self.assertEqual(len(entries), 3)
+            embedded = next(item for item in entries if artifact in item["subTitle"])
+            self.assertIn("OTAFIX " + BL_VERSION + " bootloader", embedded["subTitle"])
+            self.assertIn("70 seconds", embedded["version"][FAMILY]["notes"])
+            for ordinary in (item for item in entries if item is not embedded):
+                self.assertIn("preserve the installed bootloader", ordinary["version"][FAMILY]["notes"])
+            # A publication name cannot opt into automatic bootloader changes.
+            row.pop("embedded_bootloader")
+            inventory()
+            with self.assertRaisesRegex(ValueError, "embedded bootloader lacks qualified metadata"):
+                catalogs.read_stage(directory)
+
     def test_catalog_does_not_guess_an_unknown_hardware_card(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)

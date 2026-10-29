@@ -6,7 +6,7 @@
 #ifdef LILYGO_TECHO
 
 void TechoBoard::begin() {
-  NRF52Board::begin();
+  NRF52BoardDCDC::begin();
 
   Wire.begin();
 
@@ -26,6 +26,6 @@ uint16_t TechoBoard::getBattMilliVolts() {
   adcvalue = analogRead(PIN_VBAT_READ);
   // Convert the raw value to compensated mv, taking the resistor-
   // divider into account (providing the actual LIPO voltage)
-  return (uint16_t)((float)adcvalue * REAL_VBAT_MV_PER_LSB);
+  return calibrateBatteryMillivolts((uint16_t)((float)adcvalue * REAL_VBAT_MV_PER_LSB));
 }
 #endif

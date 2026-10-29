@@ -15,41 +15,84 @@ FS_STUB = r'''
 #include <vector>
 #include <cstring>
 #include <cstdint>
+#define FILE_O_READ 1
+#define FILE_O_WRITE 2
 struct FakeFS;
 struct File {
   FakeFS* fs = nullptr;
   std::string name;
+  File() = default;
+  explicit File(FakeFS& backing) : fs(&backing) {}
+  File(FakeFS* backing, const char* path) : fs(backing), name(path) {}
   explicit operator bool() const { return fs != nullptr; }
+  bool open(const char*, int);
   size_t size() const;
   size_t read(uint8_t*, size_t);
   size_t write(const uint8_t*, size_t);
+  void flush() {}
+  bool isDirectory() const { return false; }
   void close() {}
 };
 struct FakeFS {
   std::map<std::string, std::vector<uint8_t>> files;
   bool fail_write = false, fail_publish = false;
-  bool exists(const char* name) { return files.count(name); }
-  bool remove(const char* name) { files.erase(name); return true; }
+  bool corrupt_write = false, fail_temp_read = false, fail_open_write = false;
+  bool false_publish = false, late_publish_error = false, fail_public_read = false;
+  bool corrupt_public = false, replace_after_validation = false, published = false;
+  unsigned calls = 0, public_reads = 0;
+  bool exists(const char* name) { ++calls; return files.count(name); }
+  bool remove(const char* name) { ++calls; files.erase(name); return true; }
   bool rename(const char* from, const char* to) {
+    ++calls;
     if (fail_publish && std::string(from) == "/display_prefs.tmp") return false;
-    if (!exists(from) || exists(to)) return false;
-    files[to] = files[from]; files.erase(from); return true;
+    if (!exists(from)) return false;
+#if !defined(NRF52_PLATFORM)
+    if (exists(to)) return false;
+#endif
+    if (false_publish && std::string(from) == "/display_prefs.tmp") return true;
+    files[to] = files[from]; files.erase(from);
+    if (std::string(from) == "/display_prefs.tmp") {
+      published = true; public_reads = 0;
+      if (corrupt_public) files[to][0] ^= 1;
+      if (late_publish_error) return false;
+    }
+    return true;
   }
   File open(const char* name, const char* mode, bool = false) {
-    if (*mode == 'w') files[name].clear();
+    ++calls;
+    if (*mode == 'w') {
+      if (fail_open_write) return {};
+      files[name].clear();
+    }
     if (!exists(name)) return {};
-    return File{this, name};
+    return File(this, name);
   }
 };
+inline bool File::open(const char* path, int mode) {
+  *this = fs->open(path, mode == FILE_O_WRITE ? "w" : "r");
+  return bool(*this);
+}
 inline size_t File::size() const { return fs->files[name].size(); }
 inline size_t File::read(uint8_t* out, size_t count) {
+  if (fs->fail_temp_read && name == "/display_prefs.tmp") return 0;
+  if (fs->published && name == "/display_prefs") {
+    if (fs->fail_public_read) return 0;
+    // Change to another valid image only after AtomicFileWriter's public
+    // verification, exercising the caller's independent exact-format readback.
+    if (++fs->public_reads == 2 && fs->replace_after_validation) {
+      auto& altered = fs->files[name];
+      altered[4] ^= 1; altered[11] ^= 1;
+    }
+  }
   const auto& bytes = fs->files[name];
   count = count < bytes.size() ? count : bytes.size();
   memcpy(out, bytes.data(), count); return count;
 }
 inline size_t File::write(const uint8_t* in, size_t count) {
-  if (fs->fail_write) return 0;
-  fs->files[name].assign(in, in + count); return count;
+  const size_t written = fs->fail_write ? count / 2 : count;
+  fs->files[name].assign(in, in + written);
+  if (fs->corrupt_write && written) fs->files[name][0] ^= 1;
+  return written;
 }
 #define FILESYSTEM FakeFS
 '''
@@ -57,6 +100,10 @@ inline size_t File::write(const uint8_t* in, size_t count) {
 TEST = r'''
 #include <cassert>
 #include <helpers/ui/DisplayPowerSettings.h>
+#if defined(NRF52_PLATFORM)
+#define ATOMIC_FILE_WRITER_IMPLEMENTATION
+#include <helpers/AtomicFileWriter.h>
+#endif
 using namespace mesh::ui;
 void policyTests() {
   for (unsigned mode = 0; mode <= 5; ++mode) {
@@ -326,7 +373,200 @@ int main() {
 '''
 
 
+NRF_ATOMIC_TESTS = r'''
+// Independent persisted bytes preserve the existing v2 disk layout.
+std::vector<uint8_t> powerRecord(uint16_t timeout) {
+  std::vector<uint8_t> data = {'D', 'P', 2, 4, uint8_t(timeout),
+      uint8_t(timeout >> 8), 4, 15, 0, 0, 0, 0};
+  for (unsigned i = 0; i < 11; ++i) data[11] ^= data[i];
+  return data;
+}
+void atomicPersistenceTests() {
+  const auto previous = powerRecord(15), candidate = powerRecord(27);
+  for (unsigned failure = 0; failure < 9; ++failure) {
+    FakeFS fs;
+    fs.files["/display_prefs"] = previous;
+    fs.files["/display_prefs.bak"] = previous;
+    assert(loadDisplayPowerSettings(&fs, true));
+    switch (failure) {
+      case 0: fs.fail_write = true; break;
+      case 1: fs.corrupt_write = true; break;
+      case 2: fs.fail_temp_read = true; break;
+      case 3: fs.fail_open_write = true; break;
+      case 4: fs.fail_publish = true; break;
+      case 5: fs.false_publish = true; break;
+      case 6: fs.fail_public_read = true; break;
+      case 7: fs.corrupt_public = true; break;
+      case 8: fs.replace_after_validation = true; break;
+    }
+    char reply[160];
+    assert(handleDisplayPowerCommand("set display.timeout 27", reply, sizeof(reply)));
+    assert(std::string(reply) == "Error: display settings save failed");
+    assert(displayPowerPrefs().battery.seconds == 15);
+    assert(fs.files.at("/display_prefs.bak") == previous);
+    assert(!fs.files.count("/display_prefs.tmp"));
+    if (failure < 6) assert(fs.files.at("/display_prefs") == previous);
+    if (failure == 6) assert(fs.files.at("/display_prefs") == candidate);
+    // A post-publication failure is not proof that the old record survived.
+    if (failure >= 7) assert(fs.files.at("/display_prefs") != previous);
+  }
+  for (bool late_error : {false, true}) {
+    FakeFS fs;
+    fs.files["/display_prefs"] = previous;
+    fs.files["/display_prefs.bak"] = previous;
+    fs.files["/display_prefs.tmp"] = {'s', 't', 'a', 'l', 'e'};
+    assert(loadDisplayPowerSettings(&fs, true));
+    fs.late_publish_error = late_error;
+    char reply[160];
+    assert(handleDisplayPowerCommand("set display.timeout 27", reply, sizeof(reply)));
+    assert(std::string(reply) == "OK");
+    assert(fs.files.at("/display_prefs") == candidate);
+    assert(!fs.files.count("/display_prefs.bak"));
+    assert(!fs.files.count("/display_prefs.tmp"));
+    assert(displayPowerPrefs().battery.seconds == 27);
+    assert(loadDisplayPowerSettings(&fs, true));
+    assert(displayPowerPrefs().battery.seconds == 27);
+  }
+}
+'''
+
+
+HEADLESS_TEST = r'''
+#include <cassert>
+#include <helpers/ui/DisplayPowerSettings.h>
+using namespace mesh::ui;
+int main() {
+  FakeFS fs;
+  fs.files["/display_prefs"] = {'D', 'P', 2, 5, 42, 0, 1, 57, 0, 2, 0, 0};
+  fs.files["/display_prefs.bak"] = {'b', 'a', 'c', 'k', 'u', 'p'};
+  fs.files["/display_prefs.tmp"] = {'t', 'e', 'm', 'p'};
+  const auto original = fs.files;
+  for (bool pairing : {false, true}) for (bool wake : {false, true}) {
+    displayPowerPrefs().battery = {DisplayMode::Off, 123};
+    displayPowerPrefs().usb = {DisplayMode::On, 456};
+    displayPowerPrefs().inbox = DisplayInboxMode::Unread;
+    assert(!loadDisplayPowerSettings(&fs, pairing, wake));
+    const auto& prefs = displayPowerPrefs();
+    const auto mode = pairing ? DisplayMode::ButtonPairing : DisplayMode::Button;
+    assert(prefs.battery.mode == mode && prefs.usb.mode == mode);
+    assert(prefs.battery.seconds == 15 && prefs.usb.seconds == 15);
+    assert(prefs.inbox == DisplayInboxMode::History && prefs.wake_on_boot == wake);
+    assert(displayPairingSupported() == pairing);
+    for (const char* key : {"display.mode", "display.timeout", "display.usb.mode",
+                            "display.usb.timeout", "display.inbox"}) {
+      for (const char* prefix : {"get ", "set "}) for (const char* suffix : {"", " off", " typo"}) {
+        char reply[160] = {};
+        const std::string text = std::string(prefix) + key + suffix;
+        assert(handleDisplayPowerCommand(text.c_str(), reply, sizeof(reply), true));
+        assert(std::string(reply) == "Error: display unsupported");
+      }
+    }
+    char reply[32] = "untouched";
+    assert(!handleDisplayPowerCommand("get display.model", reply, sizeof(reply)));
+    assert(std::string(reply) == "untouched");
+    char bounded[3] = {'x', 'y', 'z'};
+    assert(handleDisplayPowerCommand("get display.mode", bounded, 1));
+    assert(bounded[0] == 0 && bounded[1] == 'y' && bounded[2] == 'z');
+    migrateLegacyDisplayTimeout(0);
+    assert(displayPowerPrefs().battery.mode == DisplayMode::On);
+    assert(displayPowerPrefs().usb.mode == DisplayMode::On);
+    migrateLegacyDisplayTimeout(42);
+    assert(displayPowerPrefs().battery.mode == DisplayMode::Automatic);
+    assert(displayPowerPrefs().usb.mode == DisplayMode::Automatic);
+    assert(displayPowerPrefs().battery.seconds == 42 && displayPowerPrefs().usb.seconds == 42);
+    assert(displayPowerPrefs().wake_on_boot == wake && displayPairingSupported() == pairing);
+    migrateLegacyDisplayTimeout(3601);
+    assert(displayPowerPrefs().battery.seconds == 42 && displayPowerPrefs().usb.seconds == 42);
+    assert(fs.calls == 0 && fs.files == original);
+    assert(!loadDisplayPowerSettings(nullptr, pairing, wake));
+    assert(displayPowerPrefs().battery.mode == mode && displayPowerPrefs().wake_on_boot == wake);
+    assert(fs.calls == 0 && fs.files == original);
+  }
+}
+'''
+
+
+EINK_TEST = r'''
+#include <cassert>
+#include <helpers/ui/DisplayPowerSettings.h>
+using namespace mesh::ui;
+int main() {
+  for (bool ble : {false, true}) for (bool companion : {false, true}) {
+    FakeFS fs;
+    assert(!loadDisplayPowerSettings(&fs, ble, companion));
+    const auto& prefs = displayPowerPrefs();
+    assert(prefs.battery.seconds == 900 && prefs.usb.seconds == 900);
+    for (bool usb : {false, true}) {
+      DisplayPowerPolicy policy;
+      const uint32_t start = UINT32_MAX - 1000;
+      policy.update(prefs, usb, false, false, start);
+      assert(policy.on() == companion);
+      assert(policy.wake(DisplayWake::Button, start));
+      // Redraw/service calls and an app connection do not count as input.
+      policy.update(prefs, usb, true, false, start + 899999);
+      assert(policy.on());
+      policy.update(prefs, usb, true, false, start + 900000);
+      assert(!policy.on());
+      assert(policy.wake(DisplayWake::Button, start + 900001));
+      assert(policy.on());
+    }
+    char reply[160];
+    for (const char* command : {"set display.timeout 27", "set display.usb.timeout 123"}) {
+      assert(handleDisplayPowerCommand(command, reply, sizeof(reply)));
+      assert(std::string(reply) == "OK");
+    }
+    const auto saved = fs.files.at("/display_prefs");
+    assert(saved.size() == 12 && saved[2] == 2);
+    assert(loadDisplayPowerSettings(&fs, ble, companion));
+    assert(prefs.battery.seconds == 27 && prefs.usb.seconds == 123);
+    assert(fs.files.at("/display_prefs") == saved);
+    for (bool usb : {false, true}) {
+      DisplayPowerPolicy policy;
+      policy.update(prefs, usb, false, false, 0);
+      policy.wake(DisplayWake::Button, 0);
+      const uint32_t timeout = usb ? 123000 : 27000;
+      policy.update(prefs, usb, false, false, timeout - 1);
+      assert(policy.on());
+      policy.update(prefs, usb, false, false, timeout);
+      assert(!policy.on());
+    }
+    // A legacy explicit always-on setting must not become a timed profile.
+    migrateLegacyDisplayTimeout(0);
+    assert(loadDisplayPowerSettings(&fs, ble, companion));
+    for (bool usb : {false, true}) {
+      DisplayPowerPolicy policy;
+      policy.update(prefs, usb, false, false, 0);
+      policy.update(prefs, usb, false, false, 3600000);
+      assert(policy.on());
+    }
+  }
+}
+'''
+
+
 class DisplayPowerTest(unittest.TestCase):
+    def test_all_eink_drivers_default_to_fifteen_minute_idle_without_overriding_saved_profiles(self):
+        compiler = shutil.which("g++") or shutil.which("clang++")
+        self.assertIsNotNone(compiler, "host C++ compiler required")
+        with tempfile.TemporaryDirectory(prefix="mesh-eink-timeout-test-") as name:
+            work = Path(name)
+            (work / "helpers").mkdir()
+            (work / "helpers/IdentityStore.h").write_text(FS_STUB)
+            (work / "test.cpp").write_text(EINK_TEST)
+            for driver in ("GxEPDDisplay", "E213Display", "E290Display"):
+                with self.subTest(driver=driver):
+                    executable = work / (driver + ".exe")
+                    result = subprocess.run([
+                        compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                        "-DDISPLAY_CLASS=" + driver, "-I" + str(work),
+                        "-I" + str(ROOT / "src"), str(work / "test.cpp"),
+                        str(ROOT / "src/helpers/ui/DisplayPowerSettings.cpp"),
+                        "-o", str(executable),
+                    ], capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_companion_boot_wake_is_transport_and_layout_independent(self):
         mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
         self.assertRegex(mesh, re.compile(
@@ -344,6 +584,27 @@ class DisplayPowerTest(unittest.TestCase):
         infrastructure = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
         self.assertIn("loadDisplayPowerSettings(fs, false);", infrastructure)
 
+    def test_headless_defaults_commands_and_legacy_migration_do_not_touch_files(self):
+        compiler = shutil.which("g++") or shutil.which("clang++")
+        self.assertIsNotNone(compiler, "host C++ compiler required")
+        with tempfile.TemporaryDirectory(prefix="mesh-headless-display-test-") as name:
+            work = Path(name)
+            (work / "helpers").mkdir()
+            (work / "helpers/IdentityStore.h").write_text(FS_STUB)
+            (work / "test.cpp").write_text(HEADLESS_TEST)
+            for label, definitions in (("absent", ()), ("null", ("-DDISPLAY_CLASS=NullDisplayDriver",))):
+                with self.subTest(display=label):
+                    executable = work / (label + ".exe")
+                    result = subprocess.run([
+                        compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                        *definitions, "-I" + str(work), "-I" + str(ROOT / "src"),
+                        str(work / "test.cpp"), str(ROOT / "src/helpers/ui/DisplayPowerSettings.cpp"),
+                        "-o", str(executable),
+                    ], capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_policy_and_persistent_commands(self):
         compiler = shutil.which("g++") or shutil.which("clang++")
         self.assertIsNotNone(compiler, "host C++ compiler required")
@@ -358,6 +619,27 @@ class DisplayPowerTest(unittest.TestCase):
                 "-DDISPLAY_CLASS=SSD1306Display", "-I" + str(work),
                 "-I" + str(ROOT / "src"), str(work / "test.cpp"),
                 str(ROOT / "src/helpers/ui/DisplayPowerSettings.cpp"),
+                "-o", str(executable),
+            ], capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_nrf52_atomic_publication_failures_and_legacy_format(self):
+        compiler = shutil.which("g++") or shutil.which("clang++")
+        self.assertIsNotNone(compiler, "host C++ compiler required")
+        with tempfile.TemporaryDirectory(prefix="mesh-nrf-display-test-") as name:
+            work = Path(name)
+            (work / "helpers").mkdir()
+            (work / "helpers/IdentityStore.h").write_text(FS_STUB, encoding="ascii")
+            code = TEST.replace("int main() {", NRF_ATOMIC_TESTS + "\nint main() {\n  atomicPersistenceTests();")
+            (work / "test.cpp").write_text(code, encoding="ascii")
+            executable = work / "nrf-display-test.exe"
+            result = subprocess.run([
+                compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                "-DNRF52_PLATFORM", "-DDISPLAY_CLASS=SSD1306Display",
+                "-I" + str(work), "-I" + str(ROOT / "src"),
+                str(work / "test.cpp"), str(ROOT / "src/helpers/ui/DisplayPowerSettings.cpp"),
                 "-o", str(executable),
             ], capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

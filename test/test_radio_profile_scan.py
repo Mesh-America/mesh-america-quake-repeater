@@ -5,41 +5,56 @@ import subprocess
 import tempfile
 import unittest
 from test_radio_receive_contract import method
+from radio_regulator_harness import regulator_members
 
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = r'''
 #include <cassert>
 #include <initializer_list>
 #include <RadioProfiles.h>
+#include <helpers/radiolib/RadioInterruptEvents.h>
 #include <helpers/radiolib/RXPowerSaving.h>
 #include <helpers/radiolib/NoiseFloorEstimator.h>
 #define RADIOLIB_ERR_NONE 0
 #define STATE_IDLE 0
 #define STATE_RX 1
 #define STATE_TX_WAIT 3
-#define STATE_INT_READY 16
 #define NF_CALIB_SETTLE_MS 7UL
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 namespace mesh { enum class RadioParamApplyResult { APPLIED, BUSY, FAILED }; }
 static uint64_t elapsed_us;
-static uint8_t state;
 uint32_t micros() { return (uint32_t)elapsed_us; }
 static bool profile_clock_active=false;
 void syncProfileClock(bool dual_profile) { profile_clock_active=dual_profile; }
-uint32_t profileTimestamp(bool) { return micros(); }
+uint32_t profileTimestamp(bool dual) { syncProfileClock(dual); return micros(); }
 uint32_t profileElapsedUs(uint32_t since, uint32_t now, bool) { return now - since; }
 uint32_t millis() { return (uint32_t)(elapsed_us / 1000); }
 struct Chip { bool standbyXOSC=false; int standby() { return 0; } };
 using CustomSX1262 = Chip;
+#if defined(ESP32_PLATFORM)
+struct Board {
+  bool prepareRadioProfileCpuClock(bool, bool& changed) { changed=false;return true; }
+};
+#endif
 struct RadioLibWrapper {
+#if defined(ESP32_PLATFORM)
+  Board board; Board* _board=&board;
+#endif
+  uint8_t state = STATE_RX;
+  RadioInterruptEvents events;
+  bool hasPendingRadioInterrupt() const { return events.pending(); }
+  bool claimRadioInterrupt() { return events.claim(); }
   bool _cw_active=false;
   Chip chip; Chip* _radio = &chip;
   mesh::RadioProfiles _profiles;
   bool _params_valid=true, packet=false, busy=false, fail=false;
+  bool _profile_repair_required=false, _rx_hold_continuous=false;
   bool _rx_ps_enabled=true, _rx_ps_armed=true, _rx_ps_continuous_fallback=false;
   bool _profile_saved_rxps=false, _profile_rxps_suspended=false;
   bool _profile_standby_held=false, _saved_standby_xosc=false;
   bool _nf_calib_active=false, _nf_refresh_requested=false, _noise_floor_valid=true, _noise_floor_secondary_valid=true, _profile_refresh_required=false;
+  bool _nf_window_armed=false, _nf_lazy_refresh=false, _nf_refresh_attempted=false;
+  uint8_t _nf_published_valid=0;
   unsigned long _nf_last_calib=0, _nf_calib_deadline=0, _nf_sample_from=0;
   NoiseFloorEstimator _floor_estimator;
   NoiseFloorEstimator _secondary_floor_estimator;
@@ -48,6 +63,8 @@ struct RadioLibWrapper {
     return profile == 1 ? _secondary_floor_estimator : _floor_estimator;
   }
   uint32_t _rx_ps_rx_us=50000, _rx_ps_sleep_us=50000;
+  RxPowerSavingArmRetryState _rx_ps_arm_retry;
+  int16_t _rx_ps_last_error = RADIOLIB_ERR_NONE;
   uint8_t _active_profile=0, _cur_sf=7, _cur_cr=5;
   uint32_t _profile_generation=1, _profile_visit_stamp=0, _profile_retry_at=0;
   uint32_t _profile_scan_generation[2]={};
@@ -64,11 +81,11 @@ struct RadioLibWrapper {
     _profile_visit_stamp=profileTimestamp(_profiles.enabled());
   }
   bool isChipBusy() { return busy; }
-  bool isInRecvMode() const { return (state & ~STATE_INT_READY) == STATE_RX; }
+  bool isInRecvMode() const { return state == STATE_RX; }
   void beginProfileRetune(bool) {}
   void endProfileRetune(bool) {}
   bool isReceivingPacket() { return packet; }
-  bool isPacketPendingOrReceiving() { return packet || (state & STATE_INT_READY); }
+  bool isPacketPendingOrReceiving() { return packet || hasPendingRadioInterrupt(); }
   bool supportsRxPowerSaving() { return true; }
   void startRecv() {
     if (failRxStarts) { --failRxStarts; state=STATE_IDLE; return; }
@@ -104,6 +121,20 @@ int main() {
   using Result=mesh::RadioParamApplyResult;
   {
     RadioLibWrapper w;
+    w._nf_window_armed=w._nf_lazy_refresh=w._nf_refresh_attempted=true;
+    w.enable();
+    assert(!w._nf_window_armed && !w._nf_lazy_refresh && !w._nf_refresh_attempted);
+    w._nf_window_armed=w._nf_lazy_refresh=w._nf_refresh_attempted=true;
+    mesh::RadioProfileConfig replacement;
+    replacement.params=w._profiles.primary;
+    replacement.params.freq=911.5;
+    replacement.mode=mesh::RadioProfileMode::RxTx;
+    w._profiles.setSecondary(replacement,false);
+    w.serviceProfileScan();
+    assert(!w._nf_window_armed && !w._nf_lazy_refresh && !w._nf_refresh_attempted);
+  }
+  {
+    RadioLibWrapper w;
     w.enable();
     assert(profile_clock_active);
     w._cw_active=true;
@@ -116,16 +147,23 @@ int main() {
     assert(w._profiles.switchTestReady());
     assert(w._profiles.switch_test_samples[0]==4 && w._profiles.switch_test_samples[1]==4);
     assert(w._profiles.switchBudgetUs()==1320); // measured 1200 us plus 10%, no nominal floor
-    assert(w._profiles.preamble(0,32)>=32 && w._profiles.preamble(0,32)<=128);
-    assert(w._profiles.preamble(1,32)>=32 && w._profiles.preamble(1,32)<=128);
+    assert(w._profiles.preamble(0,32)>=32 && w._profiles.preamble(0,32)<=512);
+    assert(w._profiles.preamble(1,32)>=32 && w._profiles.preamble(1,32)<=512);
     assert(w._profiles.preamble(0,32)%8==0 && w._profiles.preamble(1,32)%8==0);
   }
   {
     RadioLibWrapper w; w._profiles.primary.bw=w._cur_bw=500; w.switch_apply_us=8428;
     w.enable();
     assert(w._profiles.switchTestReady() && w._profiles.switchBudgetUs()==9271);
-    assert(w._profiles.preamble(0,32)==128 && w._profiles.preamble(1,32)<=128);
-    assert(w._profiles.chirpTiming().preamble[0]>128);
+    assert(w._profiles.preamble(0,32)==168 && w._profiles.preamble(1,32)<=512);
+    assert(w._profiles.chirpTiming().preamble[0]==168);
+  }
+  {
+    RadioLibWrapper w; w._profiles.primary.bw=w._cur_bw=500; w.switch_apply_us=40000;
+    w.enable();
+    assert(w._profiles.switchTestReady() && w._profiles.switchBudgetUs()==44000);
+    assert(w._profiles.preamble(0,32)==512 && w._profiles.preamble(1,32)<=512);
+    assert(w._profiles.chirpTiming().preamble[0]>512);
   }
   {
     RadioLibWrapper w; w.packet=true; w.enable();
@@ -143,25 +181,25 @@ int main() {
   for (unsigned blocked=0; blocked<5; ++blocked) {
     RadioLibWrapper w;
     w._cw_active = blocked==0; w.busy = blocked==1; w.packet = blocked==2;
-    if (blocked==3) state |= STATE_INT_READY;
-    if (blocked==4) state = STATE_TX_WAIT;
+    if (blocked==3) w.events.record();
+    if (blocked==4) w.state = STATE_TX_WAIT;
     assert(w.tryRestoreCodingRate(5)==Result::BUSY && w.coding_writes==0);
   }
   for (bool success : {false,true}) {
     RadioLibWrapper w; w.coding_success=success;
     assert(w.tryRestoreCodingRate(5)==(success?Result::APPLIED:Result::FAILED));
-    assert(w.coding_writes==1 && state==STATE_RX);
+    assert(w.coding_writes==1 && w.state==STATE_RX);
     assert(w._profile_refresh_required==!success);
   }
   {
-    RadioLibWrapper w; state=STATE_IDLE;
+    RadioLibWrapper w; w.state=STATE_IDLE;
     assert(w.tryRestoreCodingRate(5)==Result::APPLIED);
-    assert(w.coding_writes==1 && state==STATE_IDLE && !w._profile_refresh_required);
+    assert(w.coding_writes==1 && w.state==STATE_IDLE && !w._profile_refresh_required);
   }
   {
     RadioLibWrapper w; w.failRxStarts=1;
     assert(w.tryRestoreCodingRate(5)==Result::FAILED);
-    assert(w.coding_writes==1 && state==STATE_IDLE && w._profile_refresh_required);
+    assert(w.coding_writes==1 && w.state==STATE_IDLE && w._profile_refresh_required);
     // The normal receive re-arm and profile refresh can recover after a
     // transient restart failure; a later coding-rate restore then succeeds.
     w.startRecv(); w.serviceProfileScan();
@@ -390,11 +428,11 @@ int main() {
     RadioLibWrapper w;
     if (reason==0) w.busy=true;
     if (reason==1) w.packet=true;
-    if (reason==2) state=STATE_RX|STATE_INT_READY;
-    if (reason==3) state=STATE_TX_WAIT;
+    if (reason==2) { w.state=STATE_RX; w.events.record(); }
+    if (reason==3) w.state=STATE_TX_WAIT;
     w.enable();
     assert(!w._profile_standby_held && !w.chip.standbyXOSC && w._rx_ps_enabled);
-    w.busy=w.packet=false; state=STATE_RX; w.serviceProfileScan();
+    w.busy=w.packet=false; w.events.claim(); w.state=STATE_RX; w.serviceProfileScan();
     assert(w.chip.standbyXOSC && w._profile_rxps_suspended);
     w._profiles.setSecondary({},false); w.busy=true; w.serviceProfileScan();
     assert(w.chip.standbyXOSC && w._profile_rxps_suspended);
@@ -422,17 +460,19 @@ class ProfileScanTest(unittest.TestCase):
             (Path(folder)/'Arduino.h').write_text('#pragma once\n#include <cstdint>\n#include <cmath>\n')
             cpp.write_text(HARNESS.replace('@METHODS@',methods))
             result=subprocess.run([os.environ.get('CXX','g++'),'-std=c++17','-Wall','-Wextra',
-                '-I',folder,'-I',str(ROOT/'src'),str(cpp),'-o',str(exe)],capture_output=True,text=True)
+                '-I',folder,'-I',str(ROOT/'src'),'-I',str(ROOT/'src'),str(cpp),'-o',str(exe)],capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
             result=subprocess.run([str(exe)],capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
 
     def test_warm_oscillator_is_not_used_before_tcxo_reinitialization(self):
         source=(ROOT/'src/helpers/radiolib/CustomSX1262.h').read_text()
-        begin=method(source,'int16_t begin(')
+        begin=method(source,'int16_t begin(float')
         harness=r'''
 #include <cassert>
 #include <cstdint>
+#include <helpers/radiolib/RadioRegulatorState.h>
+#define MESH_DEBUG_PRINTLN(...) ((void)0)
 #define RADIOLIB_SX126X_SYNC_WORD_PRIVATE 0x12
 #define RADIOLIB_ERR_NONE 0
 struct SX1262 {
@@ -445,6 +485,7 @@ struct SX1262 {
   }
 };
 struct CustomSX1262: SX1262 {
+  @REGULATOR@
   bool _coldStandby=false;
   bool _tcxoWakePending=true;
   struct { bool invalidated=false; void invalidate() { invalidated=true; } } _profileSwitch;
@@ -471,9 +512,9 @@ int main() {
 '''
         with tempfile.TemporaryDirectory() as folder:
             cpp=Path(folder)/'test.cpp'; exe=Path(folder)/'test.exe'
-            cpp.write_text('#include <initializer_list>\n'+harness.replace('@BEGIN@',begin))
+            cpp.write_text('#include <initializer_list>\n'+harness.replace('@BEGIN@',begin).replace('@REGULATOR@',regulator_members(source)))
             result=subprocess.run([os.environ.get('CXX','g++'),'-std=c++17','-Wall','-Wextra',
-                str(cpp),'-o',str(exe)],capture_output=True,text=True)
+                '-I',str(ROOT/'src'),str(cpp),'-o',str(exe)],capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
             result=subprocess.run([str(exe)],capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)

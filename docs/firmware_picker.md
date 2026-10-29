@@ -4,71 +4,36 @@
 
 # Firmware picker
 
-Each result now includes **Restore your settings after flashing**. Its commands
-follow the selected logging mode and the exact image's verified role/hardware
-controls. Click On, Off, or Check to view and copy the commands; Companion
-MQTT and GPS show their app/WebConfig steps instead. See
-[feature switches by role](role_feature_switches.md) for the full reference.
-The [USB web console](https://flasher.meshcore.io/console) works with the
-default ASCII terminal on USB Companion and infrastructure roles.
-
-Pick the choices in any order. The controls stay limited to compatible
-firmware combinations that were actually built in the current release set.
-The result count stays visible while you scroll through the filters on a phone.
-Once the exact board and role are selected, the picker skips logging,
-connection, and profile choices that all select the same firmware. Logging
-settings move into **Restore your settings after flashing** beneath the files.
-Choices that select different images remain visible.
-The optional chip-family filter (ESP32, nRF52, RP2040, or STM32) can narrow the
-hardware list first. You can skip it: picking hardware fills it in automatically.
-Chip family and hardware are the only dropdowns. All remaining choices use
-buttons. **Firmware profile** combines OTA support, Full/standard, and sensor
-or storage differences when a choice between different images is needed.
-
-The picker reads public release metadata from GitHub. It does not upload device
-information. Hardware names, target names, and download links come directly
-from the published firmware assets.
-
-<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.9-88c85108" data-bootloaders-url="../_data/bootloader_manifest.json?v=20261002-1" data-share-url="https://mikecarper.github.io/MeshCore/firmware_picker/">
-  <div class="firmware-picker-intro" role="note">
-    <strong>Current release set</strong>
-    <p data-role="release-set">Loading release information...</p>
-    <p>
-      For a new installation, choose the exact board and role, and select
-      <strong>Full install / layout migration (merged .bin)</strong>. Current ESP32
-      releases combine the supported features in Full; use runtime settings to
-      choose the active transports. Where separate profiles remain, prefer
-      <strong>FULL / complete</strong> when it meets your update and hardware
-      requirements. Other chip families retain their qualified profiles.
-    </p>
-    <p>
-      Upgrading an existing ESP32 infrastructure node from a smaller partition
-      layout? The selected Full result links directly to its exact board and
-      role partition-expansion ZIP when published. Follow its included README
-      to check the installed OTA target and source layout for a supported Wi-Fi
-      or LoRa route. If no unique matching ZIP is available, the picker links
-      to the utility release to check availability. USB installation uses the matching
-      merged image instead. An app-only .bin cannot change the partition table.
-      If the installed firmware supports it, run <code>get storage.layout</code>
-      to see the live flash size and OTA slots. Firmware version alone does not
-      prove the installed layout.
-    </p>
-  </div>
-
-  <p class="firmware-picker-order-note">
-    Pick in any order. Use <strong>Any</strong> to clear one choice, or clear
-    everything with the button below. The address bar updates with your choices;
-    copy its URL to reopen or share the same selection.
-  </p>
-
+<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=t114-autodisplay-794f5f7b" data-bootloaders-url="../_data/bootloader_manifest.json?v=20261002-1" data-share-url="https://mikecarper.github.io/MeshCore/p/">
   <form class="firmware-picker-form" data-role="form">
     <div class="firmware-picker-feedback firmware-picker-wide" data-role="filter-feedback" hidden>
       <div aria-live="polite" aria-atomic="true">
         <strong data-role="filter-count"></strong>
-        <p data-role="filter-note"></p>
+      <p data-role="filter-note"></p>
       </div>
       <a data-role="view-results" hidden>View files</a>
     </div>
+
+    <div class="firmware-picker-control firmware-picker-select-control">
+      <label for="firmware-picker-hardware-family">Hardware</label>
+      <select id="firmware-picker-hardware-family" data-field="hardwareFamily" disabled>
+        <option value="">Loading hardware...</option>
+      </select>
+    </div>
+
+    <fieldset class="firmware-picker-control firmware-picker-radio-control" data-radio-field="role" disabled>
+      <legend>Firmware role</legend>
+      <div class="firmware-picker-radio-options" data-field="role">
+        Loading roles...
+      </div>
+    </fieldset>
+
+    <fieldset class="firmware-picker-control firmware-picker-radio-control firmware-picker-wide" data-radio-field="hardware" data-role="hardware-variant-control" disabled hidden>
+      <legend>Hardware variant</legend>
+      <div class="firmware-picker-radio-options" data-field="hardware">
+        Choose hardware first
+      </div>
+    </fieldset>
 
     <details class="firmware-picker-chip-family firmware-picker-wide">
       <summary data-role="chip-family-summary">Optional: chip family</summary>
@@ -81,31 +46,10 @@ from the published firmware assets.
       </div>
     </details>
 
-    <div class="firmware-picker-control firmware-picker-select-control">
-      <label for="firmware-picker-hardware-family">Hardware</label>
-      <select id="firmware-picker-hardware-family" data-field="hardwareFamily" disabled>
-        <option value="">Loading hardware...</option>
-      </select>
-    </div>
-
-    <fieldset class="firmware-picker-control firmware-picker-radio-control firmware-picker-wide" data-radio-field="hardware" data-role="hardware-variant-control" disabled hidden>
-      <legend>Hardware variant</legend>
-      <div class="firmware-picker-radio-options" data-field="hardware">
-        Choose hardware first
-      </div>
-    </fieldset>
-
     <fieldset class="firmware-picker-control firmware-picker-radio-control firmware-picker-wide" data-radio-field="install" disabled>
       <legend>Install operation</legend>
       <div class="firmware-picker-radio-options" data-field="install">
         Loading install choices...
-      </div>
-    </fieldset>
-
-    <fieldset class="firmware-picker-control firmware-picker-radio-control" data-radio-field="role" disabled>
-      <legend>Firmware role</legend>
-      <div class="firmware-picker-radio-options" data-field="role">
-        Loading roles...
       </div>
     </fieldset>
 
@@ -134,10 +78,15 @@ from the published firmware assets.
     <div class="firmware-picker-form-actions firmware-picker-wide">
       <button type="reset" data-action="clear" disabled>Clear all choices</button>
       <button type="button" data-action="copy-link" disabled>Copy link to settings</button>
-      <a data-role="share-link" hidden>Link to these settings</a>
+      <a data-role="share-link" hidden>Short link to these settings</a>
       <p data-role="link-status" aria-live="polite"></p>
     </div>
   </form>
+
+  <div class="firmware-picker-intro" role="note">
+    <strong>Current release set</strong>
+    <p data-role="release-set">Loading release information...</p>
+  </div>
 
   <section class="firmware-picker-result" data-role="bootloader" aria-live="polite" hidden>
     <h2 data-role="bootloader-title">nRF52 bootloader</h2>
@@ -161,6 +110,27 @@ from the published firmware assets.
     <a href="https://github.com/mikecarper/MeshCore/releases">Browse all firmware releases</a>
   </section>
 
+  <details class="firmware-picker-help">
+    <summary>Picker help</summary>
+    <p>
+      Pick in any order. Use <strong>Any</strong> to clear one choice, or
+      <strong>Clear all choices</strong> to start over. Use
+      <strong>Copy link to settings</strong> to share your selection.
+    </p>
+    <p>
+      Choices stay limited to compatible builds. Picking hardware selects its
+      chip family automatically. Filters disappear when they select the same
+      file; runtime options appear under
+      <strong>Restore your settings after flashing</strong> instead.
+      Installation instructions and board-specific guidance follow your download.
+    </p>
+    <p>
+      The picker reads public release metadata from GitHub. It does not upload
+      device information. Hardware names, targets, and download links come from
+      the published firmware assets.
+    </p>
+  </details>
+
   <details class="firmware-asset-browser">
     <summary>Advanced: search current release filenames</summary>
     <p>
@@ -176,6 +146,46 @@ from the published firmware assets.
 </div>
 
 ## What the choices mean
+
+New **Heltec T114** images detect the optional screen automatically, so the
+same firmware works with or without it. Choose the board and firmware role;
+there is no screen option for an automatic-detection image. See the
+[T114 update guide](heltec_t114.md) when moving from an older screenless target.
+
+Pick the choices in any order. The controls stay limited to compatible
+firmware combinations that were actually built in the current release set.
+The result count stays visible while you scroll through the filters on a phone.
+Once the exact board and role are selected, the picker skips logging,
+connection, and profile choices that all select the same firmware. Logging
+settings move into **Restore your settings after flashing** beneath the files.
+Choices that select different images remain visible.
+For qualified nRF52 sensor pairs, Full is the normal recommendation and both
+Full and Reduced profiles are shown by default. **Show Reduced sensor images**
+under **Advanced: sensor compatibility** starts checked, including after clearing
+the picker. Uncheck it to show only the recommended Full profiles. Shared links
+retain their selected profile; showing Reduced does not switch a Full selection
+or change either image's OTA identity.
+The optional chip-family filter (ESP32, nRF52, RP2040, or STM32) can narrow the
+hardware list first. You can skip it: picking hardware fills it in automatically.
+Chip family and hardware are the only dropdowns. All remaining choices use
+buttons. **Firmware profile** combines OTA support, Full/standard, and sensor
+or storage differences when a choice between different images is needed.
+
+Use **Any** to clear one choice, or **Clear all choices** to start over.
+The address bar updates with your choices; use **Copy link to settings** for a
+shorter link to the same selection.
+
+Each result includes **Restore your settings after flashing**. Its commands
+follow the selected logging mode and the exact image's verified role/hardware
+controls. Click On, Off, or Check to view and copy the commands; Companion
+MQTT and GPS show their app/WebConfig steps instead. See
+[feature switches by role](role_feature_switches.md) for the full reference.
+The [USB web console](https://flasher.meshcore.io/console) works with the
+default ASCII terminal on USB Companion and infrastructure roles.
+
+The picker reads public release metadata from GitHub. It does not upload device
+information. Hardware names, target names, and download links come directly
+from the published firmware assets.
 
 | Choice | Use |
 | --- | --- |
@@ -198,9 +208,8 @@ Connection and bridge choices depend on the selected role. Companion firmware
 may offer Full, combined USB + Bluetooth, Bluetooth, USB, Wi-Fi, serial, or
 Ethernet transports.
 Normal repeater firmware includes runtime-controlled RS-232 support where the
-board has room; use `set bridge.enabled on` after configuring `bridge.uart` and
-`bridge.baud`. The Wio-E5 remains the capacity exception and offers a separate
-RS-232 image. Choose Wi-Fi MQTT in the result's saved logging settings when
+board has room; use the selected image's runtime directions to configure it.
+Choose Wi-Fi MQTT in the result's saved logging settings when
 it shares the Full image; separate MQTT images retain a **Logging / MQTT**
 filter. Full ESP32 LoRa repeaters include runtime
 ESP-NOW when capacity permits; dedicated ESP-NOW images remain for measured
@@ -217,11 +226,9 @@ supported, `set mqtt.enabled on|off` for MQTT. Newly combined ordinary
 repeaters start with ESP-NOW off until explicitly enabled, including the first
 upgrade from unmarked legacy preferences. Later reboots preserve that setting.
 On combined RS-232 boards without MQTT, `bridge.enabled` controls the UART.
-Full Heltec V3, WSL3 and RAK3112 MQTT images also retain RS-232;
-use `set rs232.enabled on|off` and `get rs232.running` for their independent
-UART. T-LoRa V2.1 keeps two Full choices due to its internal RAM limit:
-the normal repeater has UART plus ESP-NOW, and the observer has MQTT plus
-ESP-NOW. MQTT and ESP-NOW use one 2.4 GHz radio, so when both are enabled the ESP-NOW bridge channel must
+Use the selected download's board notes and runtime controls for images with
+independent UART, MQTT, and ESP-NOW services.
+MQTT and ESP-NOW use one 2.4 GHz radio, so when both are enabled the ESP-NOW bridge channel must
 match the connected WiFi access point's fixed channel. ESP-NOW-only mode does
 not require WiFi credentials. Its runtime
 `bridge.format` setting chooses the peer protocol: `wrapped` (the
@@ -230,37 +237,41 @@ backward-compatible bridge-to-bridge default using `bridge.secret`) or `raw`
 `SenseCapIndicator-ESPNow`, and other primary-ESP-NOW nodes). This is one
 firmware choice, not two board images. Match `bridge.channel` to the primary
 nodes' `espnow.channel` before selecting `set bridge.format raw`.
-For Heltec V4 specifically, `companion_radio_full` is still a LoRa-primary
-Companion; choose the combined `heltec_v4_repeater` Full firmware and enable
-ESP-NOW to make that board the LoRa/ESP-NOW gateway. Use its exact merged artifact when
-changing roles or partition layouts.
 
 ## Share a selection
 
-Select any combination of choices, then copy the address bar or use **Copy link
-to settings**. Opening the link restores those choices after the release
+Select any combination of choices, then use **Copy link to settings** for a
+short URL under `https://mikecarper.github.io/MeshCore/p/`. Opening the link
+restores those choices after the release
 catalog loads. Partial selections work too, so you can share a board and role
 while leaving other choices open. **Clear all choices** removes the picker
 parameters from the URL. Changes update the current browser-history entry
 without reloading the page or adding a Back-button entry for every click.
 
-For example, [RAK3401 repeater with internal storage](?hardware=RAK_3401&role=repeater&ota=lora-receiver&variant=no-external-sensors)
-preselects that board, role, OTA capability, and storage profile.
+For example, [RAK3401 unified Full repeater](https://mikecarper.github.io/MeshCore/p/?s=1.hRAK_3401.rrepeater.olora-receiver.ffull.vdefault)
+preselects that board, role, OTA capability, and Full sensor policy. Supported
+internal or external storage is detected by the unified image.
 
-The query parameters are `chipFamily`, `hardwareFamily`, `hardware`, `role`,
+Short links encode only the selected choices in a versioned `s` parameter.
+Hardware identifiers stay readable, and the link omits redundant hardware-family
+and automatically selected chip-family values. It keeps profile and install
+choices explicitly rather than relying on the current catalog's defaults.
+The address bar also uses the compact selection format; copying it works too.
+
+Existing long links still work. Their query parameters are `chipFamily`, `hardwareFamily`, `hardware`, `role`,
 `logging`, `ota`, `mode`, `feature`, `variant`, and `install`. Values use the
 picker's internal identifiers rather than the displayed labels. One Firmware
 profile button sets `ota`, `feature`, and `variant` together. Existing links
 with only some of those choices still work and show their partial selection.
-The generated
-link also records `chipAuto` so automatic chip-family selection or an explicit
+The selection also records when chip-family filtering was chosen manually so
+automatic chip-family selection or an explicit
 **Any** choice behaves the same after reopening. Existing section anchors and
 unrelated query parameters are preserved.
 
 Links use the current release catalog. If a linked choice is no longer available
 or conflicts with another choice, the picker identifies it and asks you to
 review the remaining selections. The downloadable HTML's **Copy link to
-settings** button creates a public website link that other people can open.
+settings** button creates a short public website link that other people can open.
 
 ## FULL versus standard
 
@@ -268,8 +279,8 @@ Current ESP32 ordinary releases use one Full / complete image per exact board
 and role. Full keeps the supported feature set and CLI; runtime switches select
 USB, Bluetooth, Wi-Fi, logging, and other qualified features. Separate portable,
 minimal, and single-transport ESP32 images are installation/recovery recipes,
-not additional ordinary release choices. The documented T-LoRa UART/MQTT RAM
-split remains two Full images. Other chip families retain their qualified
+not additional ordinary release choices. Board-specific capacity exceptions
+are shown with the selected download. Other chip families retain their qualified
 capacity and sensor-profile choices.
 
 Moving an older ESP32 installation to an expanded Full layout requires a
@@ -324,6 +335,35 @@ combined and single-transport names are explicit-build compatibility aliases.
 SSD1306 Full Companion builds use `set display.rotation 90|180|270`; `0`
 restores the board default, so a separate rotated release image is not
 recommended.
+
+New display-capable RAK4631 and RAK3401 images with OLED controller detection
+also offer saved `display.controller` choices: `auto`, `ssd1306` or `sh1106`.
+This applies after restart and avoids a custom image when a panel needs an
+explicit controller. See [controller selection](cli_commands.md#select-rak-oled-controller).
+
+New Heltec V4 R8 TFT images also support saved rotation in Companion,
+Repeater, Room Server and Sensor roles. The observer dashboard follows the
+selected portrait or landscape orientation. Once the canonical image proves
+this capability, the picker replaces separate portrait recommendations with
+runtime rotation controls. The stock R8 kit has no accelerometer, so automatic
+orientation is not offered. See [display rotation](cli_commands.md#set-display-rotation).
+
+Other new canonical images can replace redundant hardware or transport choices:
+the Heltec V4 OLED covers its matching OLED expansion kit, Pico W Companion
+combines USB/Bluetooth/WiFi, and RC32 detects its optional T108 display. The
+picker requires verified capabilities from the actual downloadable application
+before replacing an older recommendation. Existing downloads remain available
+through the advanced filename search; changing target names still requires
+the matching local migration rather than a cross-target LoRa update.
+
+Muzi Base Companion also includes the optional SuperIO accessory for its exact
+Uno or Duo radio, and T-Echo Lite Companion detects its e-paper panel. A new
+verified canonical image can therefore replace the matching SuperIO or
+non-shell recommendation. These accessory choices do not change the radio
+hardware selection. See [optional screens](optional_screens.md).
+
+The [variant consolidation validation](test-results/firmware_variant_consolidation.md)
+records the qualified package hashes, controls checks and pending hardware tests.
 
 Ordinary non-OTA roles also use one artifact for normal operation and USB
 logging. On ESP32 1.17.1.5, run `set powersaving off` before `set usb.logging on`.
@@ -404,7 +444,7 @@ set radio2.cross on
 
 This copies new messages to both `radio` and `tempradio2`. The setting is saved,
 outlasts the temporary session and reboot, and also allows OTA traffic to cross
-profiles. **Default isolation** copies `set radio2.cross auto`; **Check** shows
+profiles. **Default isolation** copies `set radio2.cross off`; **Check** shows
 the temporary profile, crossing policy and per-profile transmit counters.
 See the [two-profile setup guide](radio_profiles.md#companion-messages-on-both-profiles).
 
@@ -481,6 +521,45 @@ enough that the images have little or no size difference. Packaging requires
 both profiles with matching packaged OTA identity and flash geometry, even
 when a matrix is resumed or partial publication is requested. A failed build
 is reported, never presented as a supported download. Companion is unchanged.
+
+Normal SolarXiao, XIAO nRF52, Ikoka Nano/Stick/Handheld, T-Echo, T-Echo Lite,
+ThinkNode M1/M6, Wio Tracker L1 and SenseCAP Solar Room Server builds use
+onboard QSPI storage through their exact `*_room_server_lora_ota` targets,
+with both sensor profiles retained. T-Echo Lite Repeater similarly uses its
+exact `LilyGo_T-Echo-Lite_repeater_lora_ota` target. Each requires the
+board-matched QSPI-capable OTAFIX bootloader; a shared board-family name is
+not enough to choose a bootloader.
+Internal-only Room recipes remain available by exact name for explicit
+compatibility/recovery builds, but are excluded from ordinary build menus
+and future releases. For newly converted boards, the picker keeps an existing
+release's internal Room choice until that same release provides its qualified,
+source-matched QSPI Full/Reduced pair. This preserves working Room links during
+rollout; SolarXiao's already-retired internal choices stay hidden. Existing
+downloads remain available through exact filename searches. The legacy and
+QSPI images have
+different OTA identities and layouts: a QSPI package is not a cross-target
+LoRa update for an internal-only installation. Use the matching bootloader
+and documented local migration path when changing layouts.
+
+T-Echo, SenseCAP Solar, ThinkNode M1/M6 and Wio Tracker L1 already use QSPI
+in their ordinary Repeater targets. Their older
+`*_repeater_lora_ota_no_external_sensors` identities remain explicit
+compatibility builds, not extra normal Full/Reduced choices. The picker hides
+these aliases only when a source-matched, qualified ordinary QSPI pair exists.
+XIAO nRF52 Repeater now also includes its runtime RS232 bridge, disabled by
+default (`set rs232.enabled on|off`). The separate bridge recommendation is
+hidden only after both ordinary sensor profiles prove the linked driver and
+packaged runtime controls. Existing bridge OTA identities remain unchanged.
+
+Muzi Base Uno/Duo, T-Echo Card and Nano G2 Ultra have explicit
+`*_repeater_lora_ota` and `*_room_server_lora_ota` qualification recipes.
+Their dedicated bootloader ports still require physical qualification and
+publication. These experimental recipes reserve raw QSPI for OTA (no shared
+QSPI filesystem), are excluded from ordinary menus and bulk builds, and carry
+`hardware.qualification.pending` in their capability manifests so release
+packaging refuses them. Their current normal builds and picker choices remain
+available; do not install another board's bootloader to bypass this gate.
+
 The legacy `no_external_sensors` profile is labeled **Receives LoRa OTA -
 Reduced optional sensors** on the same button. On RAK3401 and RAK4631 this
 compact profile uses internal storage without an external storage board. The
@@ -534,6 +613,9 @@ image. Once migrated, routine app-only updates still need the same target and
 partition signature.
 
 ## Maintaining the runtime directions
+
+See [optional screens](optional_screens.md) for manufacturer-confirmed screen
+options, automatic detection support, and integral-screen exclusions.
 
 The online picker and downloadable HTML use the same command renderer.
 Hardware-specific controls are enabled only when `_data/firmware_controls.json`

@@ -4,7 +4,8 @@
  * API and are unaffected. Build-local linker wrapping is qualified by the
  * SDK archive hash in scripts/nrf52_flash_trim.py, never by MCU name alone.
  */
-#if defined(MESH_NRF52_FLASH_TRIM) && MESH_NRF52_FLASH_TRIM
+#if (defined(MESH_NRF52_FLASH_TRIM) && MESH_NRF52_FLASH_TRIM) || \
+    (defined(MESH_NRF52_COMPANION_TRIM) && MESH_NRF52_COMPANION_TRIM)
 #include <stddef.h>
 #include "crys_ecpki_domain.h"
 

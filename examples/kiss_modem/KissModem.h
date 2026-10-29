@@ -69,6 +69,11 @@
 #define HW_CMD_GET_RADIO2        0x1C
 #define HW_CMD_SET_TEMPRADIO2    0x1D
 #define HW_CMD_GET_TEMPRADIO2    0x1E
+#define HW_CMD_SET_RADIO2_EXT    0x1F
+#define HW_CMD_GET_RADIO2_EXT    0x20
+#define HW_CMD_GET_LAB_TX_GUARD  0x21
+#define HW_CMD_GET_RADIO_SLOT    0x22
+#define HW_CMD_SET_RADIO_SLOT    0x23
 
 /* Response code = command code | 0x80.  Generic / unsolicited use 0xF0+. */
 #define HW_RESP(cmd)             ((cmd) | 0x80)
@@ -88,13 +93,25 @@
 #define HW_ERR_UNKNOWN_CMD       0x05
 #define HW_ERR_ENCRYPT_FAILED    0x06
 #define HW_ERR_TX_BUSY           0x07
+#define HW_ERR_SAVE_FAILED       0x08
 
 #define KISS_RADIO_PARAMS_SIZE       10
 #define KISS_RADIO2_PARAMS_SIZE      13
+#define KISS_RADIO2_EXT_PARAMS_SIZE  14
 #define KISS_TEMPRADIO2_PARAMS_SIZE  15
 #define KISS_MAX_TEMPRADIO2_MINUTES  10080
+#define KISS_RADIO_SLOT_STATUS_SIZE 4
 
-/* Version 2 adds the logical secondary-radio KISS port and radio2 commands. */
+/* Station G3 physical socket selection, not the logical radio2 PHY:
+ * GET_RADIO_SLOT: no payload; response 0xA2 payload is
+ * [saved (0=auto,1,2), active (0=none,1,2), detected (bit0=1,bit1=2),
+ *  reboot_required (saved mode differs from the mode used at boot)].
+ * SET_RADIO_SLOT: exactly one byte (0=auto,1,2); persistent, reboot-only.
+ * Success is generic OK, failure is framed ERROR (SAVE_FAILED for storage).
+ * Unsupported boards return UNKNOWN_CMD for both additive commands. */
+
+/* Version 2 adds the logical secondary-radio KISS port and radio2 commands.
+ * Extended radio2 commands are additive; old firmware returns UnknownCmd. */
 #define KISS_FIRMWARE_VERSION 2
 
 typedef void (*SetRadioCallback)(float freq, float bw, uint8_t sf, uint8_t cr);
@@ -215,10 +232,14 @@ class KissModem {
   void handleSetRadio(const uint8_t* data, uint16_t len);
   void handleSetTxPower(const uint8_t* data, uint16_t len);
   void handleGetRadio();
-  void handleSetRadio2(const uint8_t* data, uint16_t len);
-  void handleGetRadio2();
+  void handleSetRadio2(const uint8_t* data, uint16_t len, bool extended = false);
+  void handleGetRadio2(bool extended = false);
   void handleSetTempRadio2(const uint8_t* data, uint16_t len);
   void handleGetTempRadio2();
+#if defined(STATION_G3_ESP32)
+  void handleGetRadioSlot(uint16_t len);
+  void handleSetRadioSlot(const uint8_t* data, uint16_t len);
+#endif
   void handleGetTxPower();
   void handleGetVersion();
   void handleGetCurrentRssi();

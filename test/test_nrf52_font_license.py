@@ -27,12 +27,16 @@ class BuildEnvironment(dict):
         self.update(changes)
         self.actions = []
         self.dependencies = []
+        self.middleware = []
 
     def Depends(self, target, sources):
         self.dependencies.append((target, sources))
 
     def AddPostAction(self, target, action):
         self.actions.append((target, action))
+
+    def AddBuildMiddleware(self, callback, pattern):
+        self.middleware.append((callback, pattern))
 
     def subst(self, value):
         return (value.replace("$PROJECT_DIR", str(ROOT))

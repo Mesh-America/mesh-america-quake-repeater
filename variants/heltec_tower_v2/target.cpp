@@ -1,12 +1,23 @@
 #include "target.h"
+#include <helpers/radiolib/TunableRadioHal.h>
 
 #include <Arduino.h>
 #include <helpers/ArduinoHelpers.h>
+#include <helpers/nrf52/Nrf52HilSpim1Owner.h>
+#if MC_NRF52_HIL_SPIM1_RADIO
+#include <helpers/radiolib/Nrf52BufferedRadioHal.h>
+#endif
 #include <helpers/sensors/MicroNMEALocationProvider.h>
 
 HeltecTowerV2Board board;
 
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
+#if MC_NRF52_HIL_SPIM1_RADIO
+static Nrf52BufferedRadioHal radioHal(SPI, 8000000);
+RADIO_CLASS radio = new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+#else
+static TunableRadioHal radio_hal(SPI);
+RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+#endif
 
 WRAPPER_CLASS radio_driver(radio, board);
 

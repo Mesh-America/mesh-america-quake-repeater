@@ -1,6 +1,10 @@
 #include "fixedint.h"
 #include "sc.h"
 
+#if defined(ED25519_COMPACT_SCALAR) && ED25519_COMPACT_SCALAR
+#include "sc_compact.h"
+#else
+
 static uint64_t load_3(const unsigned char *in) {
     uint64_t result;
 
@@ -807,3 +811,5 @@ void sc_muladd(unsigned char *s, const unsigned char *a, const unsigned char *b,
     s[30] = (unsigned char) (s11 >> 9);
     s[31] = (unsigned char) (s11 >> 17);
 }
+
+#endif

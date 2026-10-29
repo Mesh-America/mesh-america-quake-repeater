@@ -21,11 +21,16 @@ class WebConfigStationOwnershipTest(unittest.TestCase):
                 start = extract_braced(source, "bool MyMesh::startWebConfig(")
                 start += "\n" + extract_braced(source, "bool MyMesh::startWebConfigImpl(")
                 tick = source.index("_webconfig->tick(millis());")
-                refresh_start = source.rfind("#ifdef WITH_MQTT_BRIDGE", 0, tick)
-                refresh_end = source.index("#endif", refresh_start) + len("#endif")
-                self.assertLess(refresh_end, tick)
-                self.assertFalse(source[refresh_end:tick].strip())
-                refresh = source[refresh_start:refresh_end]
+                if role == "simple_repeater":
+                    start += "\n" + extract_braced(source, "bool MyMesh::webConfigOwnsWiFi(")
+                    refresh_start = source.rfind("_webconfig->updateWiFiOwnership(", 0, tick)
+                    refresh = source[refresh_start:tick].strip()
+                else:
+                    refresh_start = source.rfind("#ifdef WITH_MQTT_BRIDGE", 0, tick)
+                    refresh_end = source.index("#endif", refresh_start) + len("#endif")
+                    self.assertLess(refresh_end, tick)
+                    self.assertFalse(source[refresh_end:tick].strip())
+                    refresh = source[refresh_start:refresh_end]
                 self.assertIn("_webconfig->updateWiFiOwnership(", refresh)
                 body = fixture.replace("@WORKER@", worker).replace("@START@", start)
                 body = body.replace("@SUSPEND@", extract_braced(source,
@@ -34,8 +39,9 @@ class WebConfigStationOwnershipTest(unittest.TestCase):
                 self.compile_and_run(body, "-DWITH_MQTT_BRIDGE=1")
                 # A stopped/unconfigured MQTT implementation used to keep
                 # ownership forever merely because its code was compiled in.
-                stale = re.sub(r"owns_wifi = !.*?;", "owns_wifi = false;", body,
-                               count=1, flags=re.DOTALL)
+                stale = (body.replace("return owns_wifi;", "return false;", 1)
+                         if role == "simple_repeater" else re.sub(
+                             r"owns_wifi = !.*?;", "owns_wifi = false;", body, count=1, flags=re.DOTALL))
                 self.assertNotEqual(body, stale)
                 with self.assertRaises(AssertionError):
                     self.compile_and_run(stale, "-DWITH_MQTT_BRIDGE=1")
@@ -48,6 +54,7 @@ class WebConfigStationOwnershipTest(unittest.TestCase):
         start = extract_braced(source, "bool WebConfigServer::startAutoMode(")
         attempt = extract_braced(source, "bool WebConfigServer::beginSavedStation(")
         setter = extract_braced(header, "void updateWiFiOwnership(")
+        prepare = extract_braced(source, "bool WebConfigServer::prepareStationOwner(")
         tick = extract_braced(source, "void WebConfigServer::tick(")
         # Execute the complete production join/fallback/retry/promotion blocks.
         # HTTP batching, display, and settings routes below them are irrelevant.
@@ -60,6 +67,7 @@ class WebConfigStationOwnershipTest(unittest.TestCase):
         capability = re.search(r'  doc\["wifi_psk64"\] = .*?;', source).group(0)
         return (fixture.replace("@CONSTRUCTOR@", constructor).replace("@START@", start)
                 .replace("@SETTER@", setter).replace("@RECOVERY@", recovery)
+                .replace("@PREPARE@", prepare)
                 .replace("@ATTEMPT@", attempt).replace("@CREDENTIAL_BATCH@", batch)
                 .replace("@PSK_CAPABILITY@", capability))
 
@@ -69,6 +77,10 @@ class WebConfigStationOwnershipTest(unittest.TestCase):
     def test_external_owner_excluded_and_runtime_ownership_can_transfer(self):
         self.compile_and_run(self.station_fixture(), "-DWITH_MQTT_BRIDGE=1",
                              "-DTEST_EXTERNAL_OWNER=1")
+
+    def test_udp_claims_connecting_or_idle_recovery_ap_and_preserves_explicit_ap(self):
+        self.compile_and_run(self.station_fixture(), "-DWITH_MQTT_BRIDGE=1",
+                             "-DTEST_UDP_STATION_OWNER=1")
 
     def test_canonical_raw_psk_wins_and_legacy_mqtt_credentials_still_load(self):
         fixture = self.station_fixture()
@@ -86,6 +98,10 @@ class WebConfigStationOwnershipTest(unittest.TestCase):
 
     def test_non_mqtt_portal_retains_saved_station_recovery(self):
         self.compile_and_run(self.station_fixture())
+
+    def test_shared_outage_blocks_idle_portal_reconnect_and_allows_foreground(self):
+        self.compile_and_run(self.station_fixture(), "-DWITH_MQTT_BRIDGE=1",
+                             "-DTEST_BACKGROUND_SUSPEND=1")
 
     def test_manual_companion_start_preserves_legacy_join_and_15s_fallback(self):
         self.compile_and_run(self.station_fixture(), "-DWITH_MQTT_BRIDGE=1",

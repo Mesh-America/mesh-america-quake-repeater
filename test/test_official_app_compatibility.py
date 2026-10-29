@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Execute pinned stock app code against actual firmware ACL/radio outputs.
 
-The public web build is the source witness, not proof of the installed iOS app.
-The whole app remains outside Git. A changed upstream bundle fails its SHA gate;
-an explicit source-pin update is required, never silent parser replacement.
+The official v1.50.0+78 web archive is the source witness, not proof of the
+installed iOS app. The whole app remains outside Git. Both the archive and its
+JavaScript have size/SHA gates; updates require an explicit source-pin review.
 No PlatformIO, devices, app fork, settings writes or real radio are involved.
 """
 
 from pathlib import Path
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -16,7 +17,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import urllib.request
+import zipfile
 
 from test_client_acl_response import production_acl_methods
 from test_companion_primary_radio_persistence import (
@@ -25,9 +28,14 @@ from test_companion_delayed_reply_delivery import production_delayed_reply_input
 from test_replay_reset_integration import extract_braced
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_URL = "https://app.meshcore.nz/main.dart.js"
-APP_SHA256 = "84bc39a950735aaffa93d912556852a4c22e235d0cc4e4d04790113207f13a68"
-APP_BYTES = 9494192
+# Use the publisher's versioned archive: the live app URL changes independently
+# of firmware and cannot reproduce the contract witness on a cold CI cache.
+APP_URL = ("https://files.liamcottle.net/MeshCore/v1.50.0/"
+           "MeshCore-v1.50.0%2B78-b7528a7-web.zip")
+APP_ARCHIVE_SHA256 = "c28f5549a63ce42a50a8a5bd80081c69ef85aeb1dca221c36bc692b838a92dd7"
+APP_ARCHIVE_BYTES = 16950142
+APP_SHA256 = "aafc714732d1e1af749104da446cd250ea72e288f7cd60ce742f9733da30f309"
+APP_BYTES = 9491330
 JS = ROOT / "test/fixtures/official_app_compatibility/app_contract.js"
 SANITIZERS = (["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                "-fno-pie", "-no-pie"] if sys.platform.startswith("linux") else [])
@@ -41,7 +49,15 @@ def official_app_bundle():
         if explicit:
             raise AssertionError(f"Missing explicit official app bundle: {path}")
         with urllib.request.urlopen(APP_URL, timeout=45) as response:
-            data = response.read(APP_BYTES + 1)
+            archive = response.read(APP_ARCHIVE_BYTES + 1)
+        if (len(archive) != APP_ARCHIVE_BYTES or
+                hashlib.sha256(archive).hexdigest() != APP_ARCHIVE_SHA256):
+            raise AssertionError("Official app archive SHA/size mismatch: review its source pin")
+        with zipfile.ZipFile(io.BytesIO(archive)) as release:
+            member = release.getinfo("web/main.dart.js")
+            if member.file_size != APP_BYTES:
+                raise AssertionError("Official app JavaScript archive size mismatch")
+            data = release.read(member)
         if len(data) != APP_BYTES or hashlib.sha256(data).hexdigest() != APP_SHA256:
             raise AssertionError("Official app changed: obtain the pinned cached build or review/update its source pin")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,16 +267,65 @@ public:
     checked([compiler, "-std=c++17", "-Wall", "-Wextra", "-Wno-unused-function",
              "-Wno-unused-parameter", "-Wno-sign-compare", "-Wno-reorder",
              "-DESP32_PLATFORM=1", *SANITIZERS,
-             f"-I{work}", f"-I{ROOT / 'test/fixtures/radio_profiles/mocks'}",
+             f"-I{work}", f"-I{ROOT / 'test/fixtures'}",
+             f"-I{ROOT / 'test/fixtures/radio_profiles/mocks'}",
              f"-I{ROOT / 'test/mocks'}", f"-I{ROOT / 'src'}", f"-I{ROOT / 'src/helpers'}", f"-I{ROOT}",
              str(work / "radio.cpp"), *[str(ROOT / "src/helpers" / name) for name in (
                  "ConfigSerializer.cpp", "DynamicConfigSerializer.cpp", "CommonRadioPrefs.cpp",
+                 "radiolib/RXPowerSaving.cpp", "radiolib/RXPowerSavingCLI.cpp",
                  "TxtDataHelpers.cpp", "RadioProfileCLI.cpp")], "-o", str(binary)])
     output = checked([str(binary)], timeout=20)
     replies = [line.removeprefix("RADIO:") for line in output.splitlines() if line.startswith("RADIO:")]
     if len(replies) != 8:
         raise AssertionError(output)
     return replies
+
+
+class OfficialAppSourcePinTests(unittest.TestCase):
+    def test_archive_and_member_gates_before_caching(self):
+        script = b"stock app witness"
+
+        def archive_for(contents):
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w") as release:
+                release.writestr("web/main.dart.js", contents)
+            return output.getvalue()
+
+        archive = archive_for(script)
+        wrong_member = archive_for(script[:-1] + b"!")
+        wrong_size = archive_for(script + b"!")
+        digest = hashlib.sha256(script).hexdigest()
+        cases = (
+            ("short archive", archive[:-1], archive),
+            ("changed archive", bytes([archive[0] ^ 1]) + archive[1:], archive),
+            ("changed member", wrong_member, wrong_member),
+            ("wrong member size", wrong_size, wrong_size),
+            ("verified", archive, archive),
+        )
+        with tempfile.TemporaryDirectory(prefix="official-app-source-pin-") as directory:
+            home = Path(directory)
+            cache = home / ".cache/meshcore-tests" / digest / "main.dart.js"
+            with mock.patch.dict(os.environ, {"MESHCORE_OFFICIAL_APP_BUNDLE": ""}), \
+                    mock.patch.object(Path, "home", return_value=home):
+                for name, downloaded, expected_archive in cases:
+                    with self.subTest(name=name), mock.patch.multiple(
+                            sys.modules[__name__], APP_BYTES=len(script), APP_SHA256=digest,
+                            APP_ARCHIVE_BYTES=len(expected_archive),
+                            APP_ARCHIVE_SHA256=hashlib.sha256(expected_archive).hexdigest()), \
+                            mock.patch.object(urllib.request, "urlopen",
+                                              return_value=io.BytesIO(downloaded)) as fetch:
+                        if name != "verified":
+                            with self.assertRaises(AssertionError):
+                                official_app_bundle()
+                            self.assertFalse(cache.exists())
+                        else:
+                            self.assertEqual(official_app_bundle(), cache.resolve())
+                            self.assertEqual(cache.read_bytes(), script)
+                            self.assertEqual(official_app_bundle(), cache.resolve())
+                            fetch.assert_called_once_with(APP_URL, timeout=45)
+                            cache.write_bytes(script[:-1] + b"!")
+                            with self.assertRaisesRegex(AssertionError, "source SHA/size mismatch"):
+                                official_app_bundle()
 
 
 class OfficialAppCompatibilityTests(unittest.TestCase):

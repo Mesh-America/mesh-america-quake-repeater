@@ -4,16 +4,18 @@
 #include <Mesh.h>
 #include "AbstractUITask.h"
 #include "CompanionFeatures.h"
+#include <helpers/CompanionReader.h>
+#include <helpers/PowerSavingDiagnostics.h>
 
 /*------------ Frame Protocol --------------*/
 #define FIRMWARE_VER_CODE 14
 
 #ifndef FIRMWARE_BUILD_DATE
-#define FIRMWARE_BUILD_DATE "14 Aug 2026"
+#define FIRMWARE_BUILD_DATE "15 Oct 2026"
 #endif
 
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "v1.17.1"
+#define FIRMWARE_VERSION "v1.18.0"
 #endif
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
@@ -26,6 +28,17 @@
 
 #include "DataStore.h"
 #include <helpers/RadioProfileCLI.h>
+#include <helpers/MorseReplyHandoff.h>
+#include <helpers/MeshtextConfig.h>
+#if MESH_ENABLE_ETHERNET_TUNNEL
+#include <helpers/EthernetTunnelSettings.h>
+#include <helpers/esp32/EthernetKissServer.h>
+#endif
+namespace mesh { class BeaconManager; }
+#if MESH_ENABLE_MESHTEXT_CHAT
+#include <helpers/CompanionMeshtextChannel.h>
+#include <helpers/MeshtextDelivery.h>
+#endif
 #include <helpers/CompanionNotificationPolicy.h>
 #include "NodePrefs.h"
 
@@ -43,6 +56,10 @@
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/BaseSerialInterface.h>
 #include <helpers/CompanionDelayedReplies.h>
+#if MESH_ENABLE_LOST_REPLY
+#include <helpers/CompanionLostReply.h>
+#endif
+#include <helpers/TrackerProtocol.h>
 #include <helpers/CompanionMotaControl.h>
 #include <helpers/IdentityStore.h>
 #include <helpers/LogicalMessageCache.h>
@@ -52,6 +69,9 @@
 #include <helpers/TerminalDisplayFilter.h>
 #include <helpers/UsbLogging.h>
 #include <target.h>
+#if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+#include <helpers/SdCardCLI.h>
+#endif
 #if defined(OTA_SHARED_COMPANION_QUEUE)
 #include <helpers/BorrowableFrameBuffer.h>
 #include <helpers/ota/OtaContext.h>
@@ -104,6 +124,18 @@
 #define ONE_KEY_DM_SHARED_OFFLINE_QUEUE 0
 #endif
 
+// Constrained Full recipes may retain only the authenticated plain DM data.
+// This is independent of the ordinary offline queue and its OTA workspace.
+#ifndef ONE_KEY_DM_COMPACT_HELD
+#define ONE_KEY_DM_COMPACT_HELD 0
+#endif
+#if ONE_KEY_DM_COMPACT_HELD != 0 && ONE_KEY_DM_COMPACT_HELD != 1
+#error "ONE_KEY_DM_COMPACT_HELD must be 0 or 1"
+#endif
+#if ONE_KEY_DM_COMPACT_HELD && ONE_KEY_DM_SHARED_OFFLINE_QUEUE
+#error "Compact held DMs and shared held-DM queue storage are separate policies"
+#endif
+
 #ifndef OFFLINE_QUEUE_SIZE
 #if defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
 #define OFFLINE_QUEUE_SIZE 512
@@ -117,6 +149,8 @@
 #define OFFLINE_QUEUE_SIZE 16
 #endif
 #endif
+
+#include <helpers/CompanionRtcQueue.h>
 
 static_assert(OFFLINE_QUEUE_SIZE > 0, "OFFLINE_QUEUE_SIZE must be positive");
 #if ONE_KEY_DM_SHARED_OFFLINE_QUEUE
@@ -229,6 +263,10 @@ public:
   }
 #endif
 
+#if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
+  bool isManagementPasswordReady() const { return _management_password_ready; }
+#endif
+
 #ifdef WITH_WEBCONFIG
   bool startWebConfig(bool force_ap, char* reply);
   void stopWebConfig();
@@ -247,7 +285,10 @@ public:
   bool ownsStreamTerminal(const Stream& output) const override {
     return isNetworkTerminalMode(output);
   }
-  void runStreamTerminal(char* command) override { handleTerminalCommand(command); }
+  void runStreamTerminal(char* command) override { handleTerminalCommand(command, false); }
+#if COMPANION_FEATURE_READER
+  bool streamTerminalBusy() const override;
+#endif
   void endStreamTerminal(Stream& output) override;
 #endif
   void rebootNow() override;
@@ -271,6 +312,15 @@ public:
   void setNotificationOutputMute(mesh::notify::Output, bool) {}
   #endif
   bool handleNotificationCommand(const char* command, char* reply, size_t size);
+  bool handleAlertCommand(const char* command, char* reply, size_t size);
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  bool handleCompactLedCommand(const char* command, char* reply, size_t size);
+#endif
+#if defined(STM32_PLATFORM)
+  // Keep this large dispatcher separate from contact streaming on flash-
+  // constrained STM32 targets; merging their branches increases code size.
+  __attribute__((noinline))
+#endif
   void handleCmdFrame(size_t len);
   bool advert();
   void enterCLIRescue();
@@ -288,9 +338,15 @@ public:
   bool isTerminalWaitingForInput() const {
     return _terminal_mode && _terminal_usb_silent;
   }
-  void handleTerminalCommand(char* command);
+  // The input parser publishes its real edit state for this exact owner.
+  // Silent default-ASCII ownership above is a separate protocol state.
+  void setTerminalInputEditing(const Stream& output, bool editing) {
+    if (_terminal_output == &output) _terminal_input_editing = editing;
+  }
+  void handleTerminalCommand(char* command, bool reader_prompt = true,
+                             mesh::ReaderTryWrite reader_try_write = nullptr);
 #if COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG)
-  bool enterNetworkTerminalMode(Stream& output);
+  bool enterNetworkTerminalMode(Stream& output, bool atomic_output = false);
   void exitNetworkTerminalMode(Stream& output);
   bool isNetworkTerminalMode(const Stream& output) const;
   bool isAnyNetworkTerminalMode() const {
@@ -309,6 +365,10 @@ public:
   void beginUsbLoggingReplyBarrier(BaseSerialInterface* route);
   void endUsbLoggingReplyBarrier(bool reply_queued);
   bool handleTxRoutingCommand(const char* command, char* reply, size_t reply_size);
+  bool handleTrafficRoutingCommand(const char* command, char* reply, size_t reply_size);
+  bool sendClientGroupData(mesh::GroupChannel& channel, uint8_t* path, uint8_t path_len,
+                           uint16_t data_type, const uint8_t* data, int data_len);
+  bool sendClientRawData(const uint8_t* data, size_t data_len, uint8_t* path, uint8_t path_len);
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
 
@@ -335,6 +395,7 @@ protected:
   int getAGCResetInterval() const override {
     return ((int)_prefs.agc_reset_interval) * 4000;   // milliseconds
   }
+  bool useAdaptiveAGC() const override { return _prefs.powersaving_enabled != 0; }
   int calcRxDelay(float score, uint32_t air_time) const override;
   uint32_t getRetransmitDelay(const mesh::Packet *packet) override;
   uint32_t getDirectRetransmitDelay(const mesh::Packet *packet) override;
@@ -342,6 +403,81 @@ protected:
   uint8_t getExtraAckTransmitCount() const override;
   bool filterRecvFloodPacket(mesh::Packet* packet) override;
   bool allowPacketForward(const mesh::Packet* packet) override;
+  bool allowGroupPacketOnRadio(mesh::Packet* packet) override;
+  int searchChannelsForPacket(const mesh::Packet* packet, const uint8_t* hash,
+                             mesh::GroupChannel channels[], int max_matches) override;
+  void onGroupDataRecv(mesh::Packet* packet, uint8_t type,
+                       const mesh::GroupChannel& channel, uint8_t* data, size_t len) override;
+  bool isAliasRadio2Defined() const;
+  bool resolveChannelAlias(ChannelDetails& channel) const;
+#if MESH_ENABLE_ETHERNET_TUNNEL
+  mesh::ethernet::Settings _ethernet_settings;
+  mesh::ethernet::KissServer _ethernet_kiss;
+  bool _ethernet_settings_valid = true, _ethernet_active = false, _ethernet_owned = false;
+  uint32_t _ethernet_generation = 0;
+  uint32_t _ethernet_intent_generation = 0, _ethernet_channel_generation = 0;
+  uint32_t _ethernet_checked_channels = UINT32_MAX;
+  bool _ethernet_channels_conflict = false;
+  uint32_t _ethernet_received = 0, _ethernet_sent = 0, _ethernet_failed = 0;
+  const char* _ethernet_status = "off";
+  void beginEthernetTunnel();
+  bool ethernetChannelConflict();
+  bool ethernetRadioConflict(const mesh::ethernet::Settings& settings);
+  void releaseEthernetProfile();
+  bool saveEthernetSettings(const mesh::ethernet::Settings& settings);
+  bool eraseEthernetSettings();
+  bool handleEthernetTunnelCommand(const char* command, char* reply, size_t capacity);
+  void loopEthernetTunnel();
+  bool onEthernetFrame(const uint8_t* bytes, size_t length, uint8_t profile, uint32_t generation);
+#endif
+#if MESH_ENABLE_FOREIGN_RADIO
+#if MESH_ENABLE_MESHTEXT_CHAT || MESH_ENABLE_ETHERNET_TUNNEL
+  bool onForeignRadioFrame(const uint8_t* bytes, size_t length, uint8_t profile,
+                          uint32_t generation, float snr, float rssi) override;
+  void onForeignRadioSendComplete(bool success) override;
+#endif
+  // Direct-only OTA inherits the Dispatcher's drop/no-op foreign callbacks.
+  bool allowForeignRadioTransmit() const override {
+    return _radio_available && _scheduled_reboot_at == 0 && (
+#if MESH_ENABLE_MESHTEXT_CHAT
+        _mt_active ||
+#endif
+#if MESH_ENABLE_ETHERNET_TUNNEL
+        _ethernet_active ||
+#endif
+        false);
+  }
+#endif
+#if MESH_ENABLE_MESHTEXT_CHAT
+  void beginMeshtext();
+  void refreshMeshtextIdentity();
+  void refreshMeshtextProfile();
+  bool isMeshtextChannel(const ChannelDetails& channel) const;
+  bool validateMeshtextChannelChange(int index, const ChannelDetails& channel);
+  bool handleMeshtextCommand(const char* command, char* reply, size_t capacity);
+  bool saveMeshtextSettings(mesh::mt::Region region, uint32_t slot, uint8_t hops = UINT8_MAX,
+                             const char* short_name = nullptr, uint32_t node_override = UINT32_MAX,
+                             uint8_t rebroadcast = UINT8_MAX);
+  bool eraseMeshtextSettings();
+  bool sendMeshtextText(const ChannelDetails& channel, const char* text, size_t length);
+  bool sendMeshtextNodeInfo(const ChannelDetails& channel);
+  bool queueMeshtextDelivery(const ChannelDetails& channel, const uint8_t* bytes,
+                            size_t length, bool nodeinfo);
+  void maybeRebroadcastMeshtext(const ChannelDetails& channel, const uint8_t* bytes, size_t length);
+  bool preemptMeshtextRelay();
+  int meshtextChannelIndex(const ChannelDetails& channel, uint8_t fingerprint[8]);
+  bool meshtextDeliveryCurrent(const mesh::mt::PendingFrame& pending);
+  uint8_t meshtextRetryLimit(const mesh::mt::PendingFrame& pending) const;
+  uint32_t meshtextRetryDelay(const mesh::mt::PendingFrame& pending);
+  void loopMeshtextDelivery();
+  mesh::mt::Region meshtextRegion() const;
+#endif
+  bool queueChannelText(uint8_t index, const uint8_t secret[32], float snr,
+                        uint8_t path_len, uint32_t timestamp, const char* text,
+                        bool is_emergency_channel, bool notify = true);
+  void seedEmergencyChannelNotice(uint8_t index, const ChannelDetails& previous);
+  void servicePendingChannelNotices();
+  int findChannelIdxForPacket(const mesh::GroupChannel& channel, const mesh::Packet* packet);
   bool allowFloodRetry(const mesh::Packet* packet) const override;
   uint8_t getFloodRetryMaxPathLength(const mesh::Packet* packet) const override;
   uint8_t getFloodRetryMaxAttempts(const mesh::Packet* packet) const override;
@@ -355,6 +491,14 @@ protected:
   bool sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis);
   bool sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t delay_millis=0) override;
   bool sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis=0) override;
+#if MESH_ENABLE_FLEET_CONTROL
+  bool sendFleetCommandData(mesh::GroupChannel& channel, const uint8_t* envelope, size_t length);
+#endif
+  void onRadioProfileCopyQueued(mesh::Packet* packet, const mesh::Packet* original, uint8_t priority) override;
+  void onSendComplete(mesh::Packet* packet) override;
+  void onSendFail(mesh::Packet* packet) override;
+  bool allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash,
+                        uint8_t next_hop_hash_len) const override;
 
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
 #if MESH_PACKET_LOGGING && !MESH_PACKET_LOGGING_COMPACT
@@ -386,7 +530,7 @@ protected:
   bool onAddressedTextPacket(mesh::Packet* packet, uint8_t src_hash,
                              const uint8_t* mac_and_data, size_t len) override;
 #endif
-  void queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt, uint32_t sender_timestamp,
+  bool queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt, uint32_t sender_timestamp,
                     const uint8_t *extra, int extra_len, const char *text,
                     bool terminal_command_reply=false,
                     uint32_t terminal_command_elapsed_millis=0);
@@ -397,7 +541,9 @@ protected:
                          const char *text) override;
   void onCLICommandRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                          const char *text, char* reply) override;
-  void onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
+  void onCLIReplyPrepared(const ContactInfo& from, mesh::Packet* reply) override;
+  void onCLIReplyQueued(const ContactInfo& from, mesh::Packet* reply, bool queued) override;
+  bool onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                            const uint8_t *sender_prefix, const char *text) override;
   void onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint32_t timestamp,
                             const char *text) override;
@@ -423,13 +569,19 @@ protected:
   bool getContactForSave(uint32_t idx, ContactInfo& contact) override { return getContactByIdx(idx, contact); }
   ContactInfo* getContactForStore(uint32_t idx) override { return getContactPtrByIdx(idx); }
   void onContactCacheFlushed() override;
-  bool onChannelLoaded(uint8_t channel_idx, const ChannelDetails& ch) override { return setChannel(channel_idx, ch); }
-  bool getChannelForSave(uint8_t channel_idx, ChannelDetails& ch) override { return getChannel(channel_idx, ch); }
+  bool resetContactsForRecovery() override;
+  // A legacy malformed alias must not quarantine every other saved channel.
+  // The raw slot remains visible to the app so it can be renamed or deleted.
+  bool onChannelLoaded(uint8_t channel_idx, const ChannelDetails& ch) override { return BaseChatMesh::setChannel(channel_idx, ch); }
+  bool getChannelForSave(uint8_t channel_idx, ChannelDetails& ch) override { return BaseChatMesh::getChannel(channel_idx, ch); }
 
   void clearPendingReqs();
   bool hasPendingReqs() const;
 
 public:
+  // Runtime copies use the wire PSK; storage/app keep the original alias PSK.
+  bool getChannel(int channel_idx, ChannelDetails& channel);
+  bool setChannel(int channel_idx, const ChannelDetails& channel);
   bool savePrefs() {
     const uint8_t previous_usb_debug = _prefs.usb_debug_enabled;
     _prefs.usb_debug_enabled = _prefs.usb_debug_enabled == 1 ? 1 : 0;
@@ -449,6 +601,10 @@ public:
   bool loadReaderBookmark(mesh::bible::Position& pos) { return _store->loadReaderBookmark(pos); }
   bool saveReaderBookmark(mesh::bible::Position pos) { return _store->saveReaderBookmark(pos); }
 #endif
+#if UI_POCKET_GUI
+  bool loadPocketGuiSettings(mesh::ui::pocket::Settings& settings) { return _store->loadPocketGuiSettings(settings); }
+  bool savePocketGuiSettings(const mesh::ui::pocket::Settings& settings) { return _store->savePocketGuiSettings(settings); }
+#endif
 
 #if ENV_INCLUDE_GPS == 1
   bool setGpsEnabled(bool enabled);
@@ -462,10 +618,16 @@ public:
 #endif
 
   // To check if there is pending work
+  mesh::powerdiag::Mask pendingWorkReason() const;
   bool hasPendingWork() const;
   bool canRecoverUsbLogging() const;
 
 private:
+#if MESH_ENABLE_FLEET_CONTROL
+  // Exact ownership of the optional radio copy during two-part admission.
+  mesh::Packet* _fleet_admission_original = nullptr;
+  mesh::Packet* _fleet_admission_copy = nullptr;
+#endif
   // Only snapshot the changed value: CompanionNodePrefs owns self-referencing
   // runtime adapters and must not be copied as a transaction snapshot.
   template <typename T> bool savePreference(T& preference, T value) {
@@ -487,7 +649,10 @@ private:
   void stopContactsIterator();
   bool updateContactFromFrame(ContactInfo &contact, uint32_t& last_mod, const uint8_t *frame, int len);
   bool addToOfflineQueue(const uint8_t frame[], int len);
+  int peekOfflineQueue(uint8_t frame[]);
+  void popOfflineQueue();
   int getFromOfflineQueue(uint8_t frame[]);
+  void syncNextOfflineMessage();
   int getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_buf[]) override { 
     return _store->getBlobByKey(key, key_len, dest_buf);
   }
@@ -529,6 +694,8 @@ private:
   void formatEspNowChannel(char* reply, size_t reply_size) const;
 #endif
   bool applyAndSavePowerSaving(const char* value, char* reply);
+  bool handleRxPowerSavingGetCommand(const char* command, char* reply,
+                                      size_t reply_size) const;
   bool applyAndSaveRxPowerSaving(const char* value, char* reply);
   void appendRxPowerSavingAdjustmentNote(char* reply, size_t reply_size,
                                          uint8_t sf, float bw) const;
@@ -564,6 +731,7 @@ private:
   void clearTerminalTrace(uint32_t now);
   void serviceTerminalTrace();
   void serviceTerminalTrace(uint32_t now);
+  void serviceMorseTerminal();
   void sendTerminalTraceRoute(const uint8_t* route, uint8_t hash_size,
                               uint8_t hop_count, const char* target);
   void sendTerminalTrace(ContactInfo& recipient);
@@ -626,8 +794,42 @@ private:
 
   DataStore* _store;
   mesh::RadioProfileCLI _radio_profiles;
+#if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+  mesh::cli::SdCardCLIState _sdcard_cli;
+#endif
+  mesh::MorseReplyHandoff _morse_reply;
+  bool _morse_reply_admission = false;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  mesh::mt::Region _mt_region = mesh::mt::Region::Unset;
+  uint32_t _mt_slot = 0, _mt_node = 0, _mt_packet_id = 0;
+  uint32_t _mt_default_node = 0, _mt_node_override = 0;
+  char _mt_short_name[17] = {};
+  uint8_t _mt_hop_limit = 7;
+  bool _mt_rebroadcast = false;
+  uint32_t _mt_sent = 0, _mt_failed = 0, _mt_received = 0;
+  mesh::mt::SeenPackets _mt_seen;
+  mesh::mt::PendingFrame _mt_delivery[mesh::mt::DeliverySlots];
+  int8_t _mt_tx_slot = -1;
+  uint8_t _mt_nodeinfo_fingerprint[MAX_GROUP_CHANNELS][8] = {};
+  bool _mt_nodeinfo_announced[MAX_GROUP_CHANNELS] = {};
+  bool _mt_nodeinfo_pending[MAX_GROUP_CHANNELS] = {};
+  uint32_t _mt_nodeinfo_generation = 0;
+  uint32_t _mt_last_tx_completed_at = 0;
+  bool _mt_delivery_config_dirty = false;
+  uint32_t _mt_retried = 0, _mt_heard = 0, _mt_exhausted = 0;
+  bool _mt_settings_valid = true, _mt_active = false;
+  bool _mt_profile_dirty = true, _mt_last_radio_ready = false;
+  bool _mt_last_secondary_ready = false;
+  uint32_t _mt_primary_generation = 0, _mt_secondary_generation = 0, _mt_intent_generation = 0;
+  float _mt_primary_frequency = 0;
+  const char* _mt_status = "no Meshtext channels";
+#endif
   uint16_t _temp_radio_preamble = 0;
   CompanionNodePrefs _prefs;
+#if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
+  char _management_password[16] = {};
+  bool _management_password_ready = false;
+#endif
   #if COMPANION_FEATURE_NOTIFICATIONS
   mesh::notify::Controller _notifications{*this, *this};
   bool _notification_button_down = false;
@@ -675,6 +877,8 @@ private:
 #if COMPANION_FEATURE_TEXT_TERMINAL
   bool _terminal_mode;
   bool _terminal_usb_silent = false;
+  bool _terminal_input_editing = false;
+  bool _terminal_morse_atomic = false;
   Stream* _terminal_output;
   mesh::TerminalDisplayFilter _terminal_display;
   bool _terminal_recipient_set;
@@ -694,6 +898,12 @@ private:
   unsigned long _terminal_trace_sent_at;
   unsigned long _terminal_trace_expires_at;
   char _terminal_trace_target[32];
+  Stream* _morse_terminal_owner = nullptr;
+  uint32_t _morse_terminal_generation = 0;
+  uint32_t _morse_terminal_next_at = 0;
+  uint16_t _morse_terminal_offset = 0;
+  uint8_t _morse_terminal_pending_chars = 0;
+  bool _morse_terminal_was_receiving = false;
 #endif
   bool saved_radio_apply_pending;
   bool _radio_available;
@@ -723,6 +933,7 @@ private:
 #endif
   bool send_unscoped;   // force un-scoped flood (instead of using send_scope)
   char cli_command[80];
+  bool _cli_line_overflow = false;
   char reply_buf[166];
   uint8_t app_target_ver;
   uint8_t *sign_data;
@@ -755,12 +966,43 @@ private:
   void initializeOfflineQueue();
   int offline_queue_len;
   int offline_queue_head;
+  // Local onboarding only: RAM-backed like the receive queue, not RF traffic.
+  uint8_t pending_emergency_notices[(MAX_GROUP_CHANNELS + 7) / 8] = {};
 #if defined(OTA_SHARED_COMPANION_QUEUE)
-  static_assert(OFFLINE_QUEUE_SIZE == 256, "Shared mOTA queue requires 256 normal slots");
-  mesh::BorrowableFrameBuffer<Frame, OFFLINE_QUEUE_SIZE, 128, mesh::ota::OtaContext> offline_queue;
+  static constexpr unsigned OTA_RETAINED_OFFLINE_FRAMES = 128;
+  static_assert(OFFLINE_QUEUE_SIZE > OTA_RETAINED_OFFLINE_FRAMES,
+                "Shared mOTA queue must retain 128 frames and provide workspace storage");
+  // The buffer also asserts that the complete context fits in the remaining
+  // frames. Constrained ESP32 recipes keep 224 normal slots; nRF52 and Paper keep 256.
+  mesh::BorrowableFrameBuffer<Frame, OFFLINE_QUEUE_SIZE,
+                             OTA_RETAINED_OFFLINE_FRAMES, mesh::ota::OtaContext> offline_queue;
   static mesh::ota::OtaContext* acquireOfflineQueueForOta(void* owner);
   static uint16_t drainOfflineQueueForOta(void* owner);
   static void releaseOfflineQueueFromOta(void* owner);
+#elif COMPANION_RTC_FAST_OFFLINE_FRAMES || COMPANION_RTC_SLOW_OFFLINE_FRAMES
+  // Concrete definitions in MyMesh.cpp keep GCC from moving template-local
+  // statics back into ordinary .bss despite the requested RTC attribute.
+#if COMPANION_RTC_FAST_OFFLINE_FRAMES
+  static Frame rtc_fast_offline_frames[COMPANION_RTC_FAST_OFFLINE_FRAMES];
+#endif
+#if COMPANION_RTC_SLOW_OFFLINE_FRAMES
+  static Frame rtc_slow_offline_frames[COMPANION_RTC_SLOW_OFFLINE_FRAMES];
+#endif
+  static Frame* rtcFastQueueBank() {
+#if COMPANION_RTC_FAST_OFFLINE_FRAMES
+    return rtc_fast_offline_frames;
+#else
+    return nullptr;
+#endif
+  }
+  static Frame* rtcSlowQueueBank() {
+#if COMPANION_RTC_SLOW_OFFLINE_FRAMES
+    return rtc_slow_offline_frames;
+#else
+    return nullptr;
+#endif
+  }
+  mesh::CompanionRtcQueue<Frame, OFFLINE_QUEUE_SIZE> offline_queue;
 #elif defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
   enum {
     OFFLINE_QUEUE_PSRAM_FALLBACK_SIZE =
@@ -789,6 +1031,14 @@ private:
   };
   #define EXPECTED_ACK_TABLE_SIZE 8
   AckTableEntry expected_ack_table[EXPECTED_ACK_TABLE_SIZE]; // circular table
+#if MESH_ENABLE_LOST_REPLY
+  mesh::companion::LostReplyLimiter lost_reply_limiter;
+  void maybeReplyToLostQuestion(const ContactInfo& from, uint32_t sender_timestamp,
+                               const char* text);
+  uint8_t handleTrackerStatusRequest(const ContactInfo& from, uint32_t tag,
+                                    const uint8_t* data, uint8_t len,
+                                    uint8_t* reply);
+#endif
 #if MESH_ENABLE_ONE_KEY_DM
   // A recent ACK proves that peer can decrypt our normal text packets. Retry
   // attempts still send the introduction in case its contact was later erased.
@@ -814,11 +1064,23 @@ private:
   uint8_t verified_pending_count = 0;
   struct HeldOneKeyDM {
     uint8_t sender_key[PUB_KEY_SIZE];
+#if ONE_KEY_DM_COMPACT_HELD
+    uint32_t timestamp;
+    uint8_t ack_hash[4];
+    uint8_t path_len;
+    int8_t snr;
+    char text[MAX_TEXT_LEN + 1];
+#else
     uint8_t id[ONE_KEY_DM_ID_SIZE];
 #if !ONE_KEY_DM_SHARED_OFFLINE_QUEUE
     mesh::Packet packet;
 #endif
+#endif
   };
+#if ONE_KEY_DM_COMPACT_HELD
+  static_assert(sizeof(HeldOneKeyDM) <= PUB_KEY_SIZE + MAX_TEXT_LEN + 12,
+                "Compact held DMs must not retain a complete packet or duplicate ID");
+#endif
   HeldOneKeyDM held_dms[MAX_HELD_ONE_KEY_DMS];
   uint8_t held_dm_count = 0;
   struct DeliveredOneKeyDM {
@@ -872,6 +1134,20 @@ private:
 
   void checkControlDataForPendingDiscovery(uint8_t payload[], size_t p_len);
 #endif
+#if MESH_ENABLE_TX_BEACONS
+  mesh::BeaconManager* _beacons = nullptr;
+  void beginBeacons();
+  void loopBeacons();
+  void suspendBeacons();
+  bool handleBeaconCommand(const char* command, char* reply, size_t capacity);
+#endif
 };
 
+#include <helpers/CompanionPsramMesh.h>
+#if COMPANION_MESH_PSRAM_STORAGE
+MyMesh& companionMeshInstance();
+// Keep the shared UI/CLI lvalue interface; the accessor never allocates.
+#define the_mesh companionMeshInstance()
+#else
 extern MyMesh the_mesh;
+#endif

@@ -26,8 +26,13 @@ public:
 #endif
 
 #if defined(P_LORA_TX_LED)
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
     #if defined(LED_BLUE)
        // turn off that annoying blue LED before transmitting
        digitalWrite(LED_BLUE, LOW);
@@ -43,6 +48,8 @@ public:
 #endif
 
   #define BATTERY_SAMPLES 8
+
+  bool supportsBatteryCalibration() const override { return true; }
 
   uint16_t getBattMilliVolts() override {
     MESH_DEBUG_PRINTLN("R1Neo: Sampling battery");

@@ -24,8 +24,10 @@ class Stations:
         self.overrides = {}
         self.seeding = False
         self.normal = ota.RadioSettings(910.525, 62.5, 7, 5, False)
+        self.actual_radio = self.normal
 
     def command(self, name, command, **options):
+        name = {"a" * 64: "relay0", "b" * 64: "remote"}.get(name, name)
         self.calls.append((name, command, options))
         if name in self.fail_reads and command == "ota config":
             raise ota.TransmissionError("lost config read")
@@ -57,6 +59,7 @@ class Stations:
         return self.normal
 
     def set_radio(self, _radio, _label):
+        self.actual_radio = _radio
         self.events.append("controller-restore")
 
     def close(self):
@@ -327,6 +330,8 @@ class OtaHopLifecycleTests(unittest.TestCase):
         def phase(name):
             def action(*_args, **_kwargs):
                 stations.events.append(name)
+                if name == "switch":
+                    stations.actual_radio = ota.RadioSettings(909.5, 500, 5, 5, False)
                 if failure == name:
                     if name == "interrupt":
                         raise KeyboardInterrupt
@@ -348,15 +353,24 @@ class OtaHopLifecycleTests(unittest.TestCase):
                 raise ota.OtaError("synthetic install failure")
             return True
 
-        argv = ["release.mota", "remote", "--controller-serial", "/dev/controller",
+        argv = ["release.mota", "b" * 64, "--controller-serial", "/dev/controller",
                 "--source-serial", "/dev/source", "--password", "secret",
-                "--relay", "relay0=relay-secret", "--work-dir", str(Path(directory) / "work"),
+                "--relay", "a" * 64 + "=relay-secret", "--work-dir", str(Path(directory) / "work"),
                 "--yes"]
         if no_install:
             argv.append("--no-install")
         if leave:
             argv.append("--leave-controller-radio")
         with contextlib.ExitStack() as stack:
+            # This fixture isolates hop lifecycle using bound fixture keys.
+            # Exact full-key/TempRadio proof has separate transport regressions.
+            stack.enter_context(mock.patch.object(
+                ota.RemoteTempCleanup, "prove_normal", autospec=True,
+                side_effect=lambda cleanup, *_: (
+                    self.assertTrue(stations.normal.matches(stations.actual_radio)),
+                    stations.events.append("normal-proof:" + cleanup.role),
+                    cleanup.report.update(cleanup_required=False, normal_return_verified=True)),
+            ))
             for name in ("preflight_inputs", "preflight_source_cli", "bind_contact_selectors",
                          "verify_shared_source_identity", "ensure_controller_clock_safe",
                          "restore_relay_timings", "shorten_relay_temp_windows",
@@ -377,7 +391,7 @@ class OtaHopLifecycleTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(ota, "arm_relay_temp_radio_once", return_value=True))
             stack.enter_context(mock.patch.object(ota, "arm_source_temp_radio_once", return_value=True))
             stack.enter_context(mock.patch.object(ota, "switch_controller_to_temp_radio", side_effect=phase("switch")))
-            stack.enter_context(mock.patch.object(ota, "read_relay_timing", return_value=ota.RelayTimingSettings("relay0", "relay-secret", 0, 0.3)))
+            stack.enter_context(mock.patch.object(ota, "read_relay_timing", return_value=ota.RelayTimingSettings("a" * 64, "relay-secret", 0, 0.3)))
             stack.enter_context(mock.patch.object(ota, "read_remote_public_key_bounded", return_value="a" * 64))
             stack.enter_context(mock.patch.object(ota, "shorten_source_temp_window", return_value=True))
             stack.enter_context(mock.patch.object(ota, "SeederProcess", return_value=seeder))
@@ -410,6 +424,15 @@ class OtaHopLifecycleTests(unittest.TestCase):
                 self.assertLess(events.index("rehearse"), events.index("set:source:1"))
                 self.assertLess(events.index("set:remote:1"), events.index("arm-target"))
                 self.assertLess(events.index("seeder-stop"), events.index("set:source:0"))
+
+    def test_install_leave_controller_proves_every_participant_while_actually_normal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result,stations=self.run_main(directory,leave=True,no_install=False)
+            self.assertEqual(result,0)
+            self.assertIn("normal-proof:destination",stations.events)
+            self.assertIn("normal-proof:relay",stations.events)
+            self.assertFalse(stations.normal.matches(stations.actual_radio))
+            self.assertGreater(stations.events.index("normal-proof:relay"),stations.events.index("install"))
 
     def test_rehearsal_and_confirmation_failures_never_write_hop_settings(self):
         for failure in ("confirm", "rehearse"):

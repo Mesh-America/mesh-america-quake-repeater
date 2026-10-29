@@ -7,6 +7,10 @@
 #include <stdio.h>
 
 #if MESH_ESP32_HWCDC_SESSION_GUARD
+  #include "esp_log.h"
+  #include <stdarg.h>
+  #include "freertos/FreeRTOS.h"
+  #include "freertos/task.h"
   #include "esp_idf_version.h"
   #include "hal/usb_serial_jtag_ll.h"
   #include "esp_arduino_version.h"
@@ -34,6 +38,9 @@
 #endif
 #if defined(NRF52_PLATFORM) && defined(USE_TINYUSB)
   #include <Adafruit_TinyUSB.h>
+#endif
+#if defined(NRF52_PLATFORM)
+  extern "C" void meshRegulatorCleanReset() __attribute__((weak));
 #endif
 #if MESH_ESP32_HWCDC_SESSION_GUARD
   #include "UsbAsciiBinarySwitch.h"
@@ -528,6 +535,163 @@ static AtomicWholeRecordNonBlockingStream<11>
 static AtomicWholeRecordNonBlockingStream<640> guarded_esp32_hwcdc_logging_port(
     guarded_esp32_hwcdc_port);
 
+// ESP-IDF logs use vprintf/stdout, independently of Arduino's putc2 hook.
+// In the pinned SDK stdout also writes to USB-Serial/JTAG, so disabling
+// Serial.setDebugOutput() alone cannot protect a Binary Companion stream.
+// SDK tasks only offer one bounded record. The USB owner emits or drops it
+// before dispatching more protocol input, through the existing writer gate.
+// This is best effort ASCII diagnostics: competing fragmented lines or a full
+// slot can be discarded through the next newline. Never fall back to the
+// unguarded SDK console or retain a transport retry for another host.
+#if MESH_USB_LOGGING_AVAILABLE
+struct Esp32SdkLogRecord {
+  char data[640];
+  size_t size = 0;
+  uint32_t session = 0;
+  uint32_t epoch = 0;
+  TaskHandle_t producer = nullptr;
+  bool ready = false;
+  bool discarding = false;
+};
+static Esp32SdkLogRecord esp32_sdk_log_record;
+static std::atomic_flag esp32_sdk_log_busy = ATOMIC_FLAG_INIT;
+static std::atomic<bool> esp32_sdk_log_lost_chunk{false};
+static std::atomic<uint32_t> esp32_sdk_log_epoch{0};
+static TaskHandle_t esp32_sdk_log_owner = nullptr;
+
+static bool canWriteEsp32SdkLog(const Esp32SdkLogRecord& record) {
+  return isUsbDebugLoggingEnabled() && canAccessEsp32Hwcdc(nullptr)
+      && record.session == esp32_hwcdc_access_generation.load(std::memory_order_acquire)
+      && record.epoch == esp32_sdk_log_epoch.load(std::memory_order_acquire);
+}
+
+static void clearEsp32SdkLogRecord(bool discard_incomplete) {
+  auto& record = esp32_sdk_log_record;
+  record.discarding = discard_incomplete &&
+      (record.discarding || (record.size != 0 && !record.ready));
+  record.size = 0;
+  record.ready = false;
+  record.producer = nullptr;
+}
+#endif
+
+static void invalidateEsp32SdkLogging() {
+#if MESH_USB_LOGGING_AVAILABLE
+  // An off/on pair before the next loop must not revive an older record.
+  esp32_sdk_log_epoch.fetch_add(1, std::memory_order_acq_rel);
+  if (!esp32_sdk_log_busy.test_and_set(std::memory_order_acquire)) {
+    clearEsp32SdkLogRecord(true);
+    esp32_sdk_log_busy.clear(std::memory_order_release);
+  }
+#endif
+}
+
+#if MESH_USB_LOGGING_AVAILABLE
+static void writeEsp32SdkLogRecord(void* context) {
+  const auto& record = *static_cast<const Esp32SdkLogRecord*>(context);
+  if (!canWriteEsp32SdkLog(record)) return;
+  const int available = esp32_hwcdc_session_stream.availableForWrite();
+  if (available < 0 || static_cast<size_t>(available) < record.size) return;
+  if (!canWriteEsp32SdkLog(record)) return;
+  // The gate excludes every other application writer, and the ISR can only
+  // free TX capacity. Once admitted, this whole record finishes before this
+  // same USB owner can handle an ASCII/Binary protocol change.
+  (void)esp32_hwcdc_session_stream.write(
+      reinterpret_cast<const uint8_t*>(record.data), record.size);
+}
+#endif
+
+static int writeEsp32SdkLog(const char* format, va_list args) {
+#if MESH_USB_LOGGING_AVAILABLE
+  if (format == nullptr || xPortInIsrContext()
+      || !isUsbDebugLoggingEnabled()) return 0;
+  // No wait, heap allocation or USB write from an SDK task. Formatting under
+  // this try gate also rejects recursion and concurrent diagnostic producers.
+  if (esp32_sdk_log_busy.test_and_set(std::memory_order_acquire)) {
+    esp32_sdk_log_lost_chunk.store(true, std::memory_order_release);
+    return 0;
+  }
+  auto& record = esp32_sdk_log_record;
+  if (esp32_sdk_log_lost_chunk.exchange(false, std::memory_order_acq_rel)) {
+    clearEsp32SdkLogRecord(false);
+    record.discarding = true;
+  }
+  if ((record.size != 0 || record.discarding) && !canWriteEsp32SdkLog(record))
+    clearEsp32SdkLogRecord(true);
+  const TaskHandle_t producer = xTaskGetCurrentTaskHandle();
+  if (record.ready || (record.producer != nullptr && record.producer != producer)) {
+    esp32_sdk_log_lost_chunk.store(true, std::memory_order_release);
+    esp32_sdk_log_busy.clear(std::memory_order_release);
+    return 0;
+  }
+  if (record.size == 0) {
+    record.session = esp32_hwcdc_access_generation.load(std::memory_order_acquire);
+    record.epoch = esp32_sdk_log_epoch.load(std::memory_order_acquire);
+    record.producer = producer;
+  }
+  // WiFi emits prefix, body and newline in separate SDK calls. Assemble them
+  // without exposing an incomplete line or mixing a different task's line.
+  const size_t offset = record.discarding ? 0 : record.size;
+  const int length = vsnprintf(record.data + offset,
+                               sizeof(record.data) - offset, format, args);
+  const bool fits = length >= 0
+      && static_cast<size_t>(length) < sizeof(record.data) - offset;
+  const bool newline = fits && length > 0 && record.data[offset + length - 1] == '\n';
+  if (!canWriteEsp32SdkLog(record) || record.discarding || !fits) {
+    record.size = 0;
+    record.ready = false;
+    // An oversized/in-flight old line is consumed through its next newline,
+    // including its separately formatted suffix, before accepting a new one.
+    record.discarding = !newline;
+    if (!record.discarding) record.producer = nullptr;
+  } else {
+    record.size += static_cast<size_t>(length);
+    record.ready = newline;
+    if (record.size == 0) record.producer = nullptr;
+  }
+  esp32_sdk_log_busy.clear(std::memory_order_release);
+  return length > 0 ? length : 0;
+#else
+  // Near-budget roles which compile diagnostics out need neither a buffer nor
+  // a formatter. The SDK's secondary console still must not leak raw bytes.
+  (void)format;
+  (void)args;
+  return 0;
+#endif
+}
+
+static void serviceEsp32SdkLogging() {
+#if MESH_USB_LOGGING_AVAILABLE
+  if (xPortInIsrContext() || xTaskGetCurrentTaskHandle() != esp32_sdk_log_owner
+      || esp32_sdk_log_busy.test_and_set(std::memory_order_acquire)) return;
+  auto& record = esp32_sdk_log_record;
+  if (esp32_sdk_log_lost_chunk.exchange(false, std::memory_order_acq_rel)) {
+    clearEsp32SdkLogRecord(false);
+    record.discarding = true;
+  }
+  if ((record.size != 0 || record.discarding) && !canWriteEsp32SdkLog(record))
+    clearEsp32SdkLogRecord(true);
+  if (record.ready) {
+    (void)guarded_esp32_hwcdc_port.tryRunExclusive(
+        writeEsp32SdkLogRecord, &record);
+    // One owner-loop attempt only. Congestion/session changes drop a record;
+    // no suffix or retry can cross a later host or protocol boundary.
+    clearEsp32SdkLogRecord(false);
+  }
+  esp32_sdk_log_busy.clear(std::memory_order_release);
+#endif
+}
+
+static void installEsp32SdkLogging() {
+  static bool installed = false; // Called only by the setup/USB owner.
+  if (installed) return;
+#if MESH_USB_LOGGING_AVAILABLE
+  esp32_sdk_log_owner = xTaskGetCurrentTaskHandle();
+#endif
+  esp_log_set_vprintf(writeEsp32SdkLog);
+  installed = true;
+}
+
 static void serviceEsp32HwcdcTxKickExclusive(void*) {
   if (!esp32_hwcdc_tx_kick_pending.load(std::memory_order_acquire)
       || !canAccessEsp32Hwcdc(nullptr)) {
@@ -545,6 +709,11 @@ static void serviceEsp32HwcdcTxKickExclusive(void*) {
 #endif
       ) {
     esp32_hwcdc_tx_kick_pending.store(false, std::memory_order_release);
+#if MESH_HWCDC_PINNED_TX_BACKPORT
+    // The final FIFO ACK posts no TX event unless another payload is staged.
+    // Its empty proof must also finish a lone write or a dropped TX event.
+    noteUsbLoggingTxComplete();
+#endif
     return;
   }
   if (!Serial.isPlugged()) return;
@@ -736,7 +905,27 @@ static size_t writeTinyUsbCdcOnce(void* context, const uint8_t* data,
   return tud_cdc_n_write(instance, data, attempt);
 }
 
-static SingleAttemptNonBlockingStream nonblocking_primary_usb_companion_port(
+#if defined(ENABLE_USB_INTERFACE) || defined(USE_TINYUSB)
+// Adafruit's empty CDC available() calls yield(), which sets the Cortex-M
+// event register through FreeRTOS. Polling an idle console must not recreate
+// that scheduler event after the loop has prepared its sleep decision.
+// Only CDC0 is the primary protocol/console; CDC1 keeps its logging owner.
+class Nrf52PrimaryUsbStream : public SingleAttemptNonBlockingStream {
+ public:
+  using SingleAttemptNonBlockingStream::SingleAttemptNonBlockingStream;
+
+  int available() override {
+    if (!canAccessPrimaryUsbSession(nullptr)) return 0;
+    const int count = static_cast<int>(tud_cdc_n_available(0));
+    // A USB owner callback may have closed the epoch during the FIFO query.
+    return canAccessPrimaryUsbSession(nullptr) ? count : 0;
+  }
+};
+#else
+using Nrf52PrimaryUsbStream = SingleAttemptNonBlockingStream;
+#endif
+
+static Nrf52PrimaryUsbStream nonblocking_primary_usb_companion_port(
     Serial, writeTinyUsbCdcOnce, reinterpret_cast<void*>(uintptr_t{0})
 #if defined(ENABLE_USB_INTERFACE) || defined(USE_TINYUSB)
     , canAccessPrimaryUsbSession
@@ -1066,11 +1255,17 @@ bool isUsbDebugEnabled() {
 
 void setUsbDebugEnabled(bool enabled) {
   usb_debug_enabled.store(enabled, std::memory_order_relaxed);
+#if MESH_ESP32_HWCDC_SESSION_GUARD
+  if (!enabled) invalidateEsp32SdkLogging();
+#endif
   setPlatformDebugOutputEnabled(isUsbDebugLoggingEnabled());
 }
 
 void setUsbLoggingEnabled(bool enabled) {
   usb_logging_enabled.store(enabled, std::memory_order_relaxed);
+#if MESH_ESP32_HWCDC_SESSION_GUARD
+  if (!enabled) invalidateEsp32SdkLogging();
+#endif
   if (!enabled) {
     clearUsbLoggingClientActivity();
     usb_logging_tx_waiting.store(false, std::memory_order_release);
@@ -1107,6 +1302,9 @@ void setUsbCompanionTxBufferCapacity(size_t capacity) {
 
 void prepareUsbLoggingPort() {
 #if MESH_ESP32_HWCDC_SESSION_GUARD
+  // Install before board/wireless startup, including any asynchronous WiFi
+  // diagnostics which arrive after a later WiFi shutdown has completed.
+  installEsp32SdkLogging();
   // The SDK's 256-byte default can lose the CR of an oversized ASCII setter
   // before the Companion's line-length check can reject it. Retain an
   // oversized command and exceed the terminal's 542-byte line buffer so
@@ -1199,6 +1397,7 @@ void serviceUsbLoggingPort() {
 #if MESH_ESP32_TINYUSB_NONBLOCKING
   serviceEsp32TinyUsbPorts();
 #elif MESH_ESP32_HWCDC_SESSION_GUARD
+  serviceEsp32SdkLogging();
   serviceEsp32HwcdcTxKick();
 #endif
 #if defined(MESH_DUAL_CDC_LOGGING)
@@ -1309,6 +1508,41 @@ static void purgeEsp32HwcdcQueues(void* opaque) {
 
   while (Serial.read() >= 0) {}
 }
+
+static bool beginEsp32HwcdcSessionReset() {
+  if (esp32_hwcdc_cleanup_pending) return false;
+  // HWCDC owns RTOS queues, a TX mutex, an ISR, and an event task. Calling
+  // end()/begin() here can delete those objects while a WiFi/MQTT/diagnostic
+  // producer is writing. Close the independent transport gate first. Runtime
+  // logging changes remain preferences while the low-level debug route is
+  // forced off by that gate.
+  portENTER_CRITICAL(&esp32_hwcdc_session_mux);
+  esp32_hwcdc_cleanup_generation =
+      esp32_hwcdc_access_generation.fetch_add(
+          1, std::memory_order_acq_rel) + 1U;
+  esp32_hwcdc_tx_kick_pending.store(false, std::memory_order_release);
+  esp32_hwcdc_tx_primed.store(false, std::memory_order_release);
+#if MESH_HWCDC_PINNED_TX_BACKPORT
+  meshEsp32HwcdcSetTxAllowed(false);
+#else
+  usb_serial_jtag_ll_disable_intr_mask(
+      USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+#endif
+  portEXIT_CRITICAL(&esp32_hwcdc_session_mux);
+  setPlatformDebugOutputEnabled(false);
+
+  esp32_hwcdc_restore_pad_enabled = detachEsp32HwcdcPads();
+  esp32_hwcdc_cleanup_pending = true;
+  // Always hold a real host-visible detach interval. The SOF tracker may
+  // already be false when a physical-loss edge reaches the main loop.
+  delay(10);
+  const uint32_t detached_at = millis();
+  while (Serial.isPlugged()
+         && (uint32_t)(millis() - detached_at) < 50U) {
+    delay(1);
+  }
+  return true;
+}
 #endif
 
 bool resetUsbCompanionTransport() {
@@ -1318,39 +1552,7 @@ bool resetUsbCompanionTransport() {
   return esp32_tinyusb_clean_generation.load(std::memory_order_acquire)
       == esp32_tinyusb_reset_generation.load(std::memory_order_acquire);
 #elif MESH_ESP32_HWCDC_SESSION_GUARD
-  // HWCDC owns RTOS queues, a TX mutex, an ISR, and an event task. Calling
-  // end()/begin() here can delete those objects while a WiFi/MQTT/diagnostic
-  // producer is writing. Close the independent transport gate first. Runtime
-  // logging changes remain preferences while the low-level debug route is
-  // forced off by that gate.
-  if (!esp32_hwcdc_cleanup_pending) {
-    portENTER_CRITICAL(&esp32_hwcdc_session_mux);
-    esp32_hwcdc_cleanup_generation =
-        esp32_hwcdc_access_generation.fetch_add(
-            1, std::memory_order_acq_rel) + 1U;
-    esp32_hwcdc_tx_kick_pending.store(false, std::memory_order_release);
-    esp32_hwcdc_tx_primed.store(false, std::memory_order_release);
-#if MESH_HWCDC_PINNED_TX_BACKPORT
-    meshEsp32HwcdcSetTxAllowed(false);
-#else
-    usb_serial_jtag_ll_disable_intr_mask(
-        USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
-#endif
-    portEXIT_CRITICAL(&esp32_hwcdc_session_mux);
-    setPlatformDebugOutputEnabled(false);
-
-    esp32_hwcdc_restore_pad_enabled = detachEsp32HwcdcPads();
-    esp32_hwcdc_cleanup_pending = true;
-    // Always hold a real host-visible detach interval. The SOF tracker may
-    // already be false when a physical-loss edge reaches the main loop.
-    delay(10);
-    const uint32_t detached_at = millis();
-    while (Serial.isPlugged()
-           && (uint32_t)(millis() - detached_at) < 50U) {
-      delay(1);
-    }
-  }
-
+  (void)beginEsp32HwcdcSessionReset();
   // tryRunExclusive() shares the same writer guard as all primary Stream
   // facades. Retry briefly if a producer entered Serial.write() just before
   // the access gate closed; HWCDC writes are capped at five milliseconds.
@@ -1390,6 +1592,8 @@ bool resetUsbCompanionTransport() {
   // A concurrent runtime preference change is authoritative; never restore a
   // stale snapshot taken before the purge.
   setPlatformDebugOutputEnabled(isUsbDebugLoggingEnabled());
+  return esp32_hwcdc_allowed_generation.load(std::memory_order_acquire)
+      == esp32_hwcdc_access_generation.load(std::memory_order_acquire);
 #endif
   return true;
 }
@@ -1679,8 +1883,33 @@ UsbLoggingObservation observeUsbLoggingTransport() {
 #elif MESH_ESP32_HWCDC_SESSION_GUARD
   result.supported = true;
   if (xPortInIsrContext()) return result;
-  result.host_connected = Serial.isPlugged();
-  result.reader_connected = result.host_connected && bool(Serial);
+  // The SDK's five-millisecond SOF sample can briefly go low on a healthy
+  // connection. Do not let one such sample revoke a fifteen-minute stats
+  // lease and provoke USB recovery five minutes later. Match the primary
+  // session's 100 ms host-loss edge; actual BUS_RESET still revokes the lease
+  // immediately in handleEsp32HwcdcEvent(). Only the application loop/CLI
+  // samples this state, after the ISR guard above.
+  static bool host_seen = false, loss_pending = false;
+  static uint32_t loss_at = 0;
+  const uint32_t now = millis();
+  if (Serial.isPlugged()) {
+    host_seen = true;
+    loss_pending = false;
+  } else if (host_seen) {
+    if (!loss_pending) {
+      loss_pending = true;
+      loss_at = now;
+    } else if (uint32_t(now - loss_at) >= 100) {
+      host_seen = false;
+      loss_pending = false;
+    }
+  }
+  result.host_connected = host_seen;
+  // HWCDC has no DTR/open-reader signal. Its bool operator is an RX/TX
+  // heuristic which can remain false after a transient SOF gap. Physical
+  // presence, real TX completion/stalls and the separate stats lease are the
+  // available evidence; this does not claim that a host process is reading.
+  result.reader_connected = result.host_connected;
   const size_t capacity = esp32_hwcdc_tx_buffer_capacity.load(std::memory_order_acquire);
   result.pending = usb_logging_tx_waiting.load(std::memory_order_acquire)
       || (capacity != 0 && Serial.availableForWrite() < int(capacity))
@@ -1752,8 +1981,13 @@ UsbLoggingRecoveryResult recoverUsbLoggingTransport(uint8_t stage) {
     // stage, and the bounded existing helper retains the driver/descriptors.
     serviceEsp32HwcdcTxKick();
     probeUsbLoggingTransport();
-  } else if (!resetUsbCompanionTransport()) {
-    return UsbLoggingRecoveryResult::Deferred;
+  } else {
+    // Publish a boundary even when every queue is already empty. The protocol
+    // owner must clear its old parser/routes before finishing this same reset;
+    // reopening here could hide the detach from its host-loss debounce.
+    if (beginEsp32HwcdcSessionReset()) {
+      esp32_hwcdc_bus_reset_generation.fetch_add(1, std::memory_order_acq_rel);
+    }
   }
   return UsbLoggingRecoveryResult::Attempted;
 #elif defined(NRF52_PLATFORM) && defined(USE_TINYUSB)
@@ -1793,13 +2027,30 @@ bool isUsbLoggingTransportRecoveryPending() {
   const auto state = esp32_tinyusb_reenumeration_state.load(std::memory_order_acquire);
   return usb_logging_watchdog_detached || state == 1 || state == 3;
 #elif MESH_ESP32_HWCDC_SESSION_GUARD
-  return esp32_hwcdc_cleanup_pending;
+  return esp32_hwcdc_cleanup_pending
+      || esp32_hwcdc_allowed_generation.load(std::memory_order_acquire)
+          != esp32_hwcdc_access_generation.load(std::memory_order_acquire);
 #else
   return false;
 #endif
 }
 
 }  // namespace mesh
+
+#if defined(NRF52_PLATFORM)
+// The framework's LOG_LV1/PRINTF path otherwise writes straight to Serial,
+// bypassing both the saved debug setting and Full Companion's separate CDC1.
+// The private core retarget calls this only for its default USB logger.
+extern "C" size_t meshNrf52FrameworkDebugWrite(const void* data, size_t size) {
+  if (data == nullptr || size == 0) return 0;
+  // Diagnostics are best effort. Consume disabled/backpressured records so
+  // libc never retries them later in a different protocol/host session.
+  if (!isInISR()) {
+    (void)mesh::usbDebugPort().write(static_cast<const uint8_t*>(data), size);
+  }
+  return size;
+}
+#endif
 
 #if MESH_ESP32_HWCDC_SESSION_GUARD
 // Capture startup at the actual hardware reset, not when the finite framework
@@ -1875,6 +2126,7 @@ extern "C" void meshTinyUsbCdcLineStateChanged(uint8_t instance, bool dtr,
     cdc_line_coding_t coding;
     tud_cdc_get_line_coding(&coding);
     if (coding.bit_rate == 1200) {
+      if (meshRegulatorCleanReset) meshRegulatorCleanReset();
       TinyUSB_Port_EnterDFU();
     }
   } else if (instance == 0) {

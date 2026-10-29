@@ -2,43 +2,40 @@
 """Execute production CAD, receive re-arm, calibration and mode-watchdog methods."""
 from pathlib import Path
 import os
+import re
 import subprocess
+import sys
 import tempfile
 import unittest
+
+from cpp_source import body
 
 ROOT = Path(__file__).resolve().parents[1]
 
 def method(text, signature):
-    start = text.index(signature)
-    end = text.index('{', start) + 1
-    depth = 1
-    while depth:
-        depth += (text[end] == '{') - (text[end] == '}')
-        end += 1
-    return text[start:end]
+    """Keep the shared legacy API without double-counting C++ alternatives."""
+    return body(text, signature)
 
 HARNESS = r'''
 #include <cassert>
+#include <cstdio>
 #include <cstdint>
 #include <initializer_list>
 #include <RadioProfiles.h>
+#include <helpers/radiolib/RadioInterruptEvents.h>
 #include <helpers/radiolib/NoiseFloorEstimator.h>
+#include <helpers/radiolib/RXPowerSaving.h>
+#include <helpers/TelemetryHistoryConfig.h>
 #define STATE_IDLE 0
 #define STATE_RX 1
 #define STATE_TX_WAIT 3
-#define STATE_INT_READY 16
 #define RADIOLIB_ERR_NONE 0
 #define RADIOLIB_CHANNEL_FREE -15
 #define RADIOLIB_ERR_UNKNOWN -16
 #define RADIOLIB_ERR_RX_TIMEOUT -6
 #define MAX_TRANS_UNIT 255
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
-#define NF_CALIB_INTERVAL_MS 2000UL
-#define NF_CALIB_TIMEOUT_MS NoiseFloorEstimator::WINDOW_TIMEOUT_MS
-#define NF_CONTINUOUS_TIMEOUT_MS NoiseFloorEstimator::WINDOW_TIMEOUT_MS
-#define NF_CALIB_SETTLE_MS 7UL
-#define NF_FAST_PROFILE_REFRESH_INTERVAL_MS (15UL * 60UL * 1000UL)
-static volatile uint8_t state = STATE_RX;
+@NF_CONSTANTS@
 static uint32_t now_ms = 0;
 uint32_t millis() { return now_ms; }
 uint32_t micros() { return now_ms * 1000UL; }
@@ -54,33 +51,50 @@ struct Board {
   void serviceWatchdog() { ++services; }
 };
 struct Radio {
+  RadioInterruptEvents* events;
   int scan_result = RADIOLIB_CHANNEL_FREE, start_result = 0;
   unsigned scans = 0;
   int startChannelScan() { ++scans; return start_result; }
   int getChannelScanResult() {
-    if (scan_result != RADIOLIB_ERR_UNKNOWN) state |= STATE_INT_READY;
+    if (scan_result != RADIOLIB_ERR_UNKNOWN) events->record();
     return scan_result;
   }
 };
 struct RadioLibWrapper {
+  @SETTLE_CONSTANT@
+  uint8_t state = STATE_RX;
+  RadioInterruptEvents events;
+  bool hasPendingRadioInterrupt() const { return events.pending(); }
+  bool claimRadioInterrupt() { return events.claim(); }
   bool _cw_active = false;
+  bool _profile_repair_required = false;
   bool serviceCarrierWave() { return false; } // dedicated CW harness owns this path
   mesh::RadioProfiles _profiles;
   uint32_t _profile_visit_stamp = 0;
   uint32_t _profile_scan_generation[2] = {};
   uint8_t _active_profile = 0;
-  bool _profile_rxps_suspended = false;
+  bool _profile_rxps_suspended = false, _profile_saved_rxps = false;
   void serviceProfileScan() {} // separate profile-scan harness exercises tuning
   Board board; Board* _board = &board;
-  Radio radio; Radio* _radio = &radio;
+  Radio radio{&events}; Radio* _radio = &radio;
   bool _rx_ps_enabled = false, _rx_ps_armed = false, _rx_ps_continuous_fallback = false;
+  bool _rx_hold_continuous = false;
   bool _nf_calib_active = false, _nf_refresh_requested = true, _noise_floor_valid = true,
       _noise_floor_secondary_valid = true;
+  bool _nf_window_armed = false, _nf_lazy_refresh = false, _nf_refresh_attempted = false;
+  uint32_t _nf_published_at[2] = {}, _nf_published_generation[2] = {};
+  uint8_t _nf_published_valid = 0;
   bool _cad_enabled = true, packet = false, busy = false, inject_arm_irq = false;
-  bool _rx_boosted_gain_valid = false, _cur_rx_boosted_gain = false;
+  bool _rx_boosted_gain_valid = false, _cur_rx_boosted_gain = false, gain_apply_success = true;
   bool _wd_last_busy = false;
   uint8_t _startrx_fails = 0, _rx_mode_failures = 0;
+  uint32_t _rx_retry_at = 0;
+  uint16_t _rx_retry_delay_ms = 0;
+  bool _rx_retry_pending = false;
   uint32_t _rx_mode_checked_at = 0, _rx_ps_rx_us = 50000, _rx_ps_sleep_us = 50000;
+  uint32_t _rx_ps_eff_rx_us = 50000, _rx_ps_eff_sleep_us = 50000;
+  int16_t _rx_ps_last_error = RADIOLIB_ERR_NONE;
+  RxPowerSavingArmRetryState _rx_ps_arm_retry;
   unsigned long _nf_last_calib = 0, _nf_calib_deadline = 0, _nf_sample_from = 0;
   unsigned long _wd_last_transition = 0, _wd_stuck_thresh = 0, _wd_observe_ms = 0;
   int16_t _threshold = 0, _noise_floor = -105;
@@ -88,6 +102,8 @@ struct RadioLibWrapper {
   int arm_result = 0, chip_mode = 1;
   float rssi = -100;
   unsigned arms = 0, stops = 0, soft = 0, hard = 0, reads = 0, mode_reads = 0;
+  uint32_t n_wd_soft = 0, n_wd_hard = 0;
+  unsigned calibration_arms = 0, gain_changes = 0, agc_resets = 0;
   bool inject_mode_irq = false;
   NoiseFloorEstimator _floor_estimator;
   NoiseFloorEstimator _secondary_floor_estimator;
@@ -101,25 +117,36 @@ struct RadioLibWrapper {
   float getCurrentRSSI() { ++reads; return rssi; }
   int8_t readReceiveMode() {
     ++mode_reads;
-    if (inject_mode_irq) state |= STATE_INT_READY;
+    if (inject_mode_irq) events.record();
     return chip_mode;
   }
   bool recoverRadio(bool use_hard) { use_hard ? ++hard : ++soft; return true; }
   void rxPsWatchdogCheck() {}
   unsigned long getEstAirtimeFor(int) { return 10; }
   void stopReceiveDutyCycle() { ++stops; _rx_ps_armed = false; }
-  void doResetAGC() {}
-  bool applyRxBoostedGainMode(bool) { return true; }
+  void doResetAGC() { ++agc_resets; }
+  bool applyRxBoostedGainMode(bool) { ++gain_changes; return gain_apply_success; }
+  uint8_t beginReconfigure() { return 0; } // counted SPI/RX boundaries are separate
+  void endReconfigure(bool) {}
+  bool supportsRxPowerSaving() const { return true; }
   int startReceiveMode() {
     ++arms;
-    if (!arm_result) _rx_ps_armed = _rx_ps_enabled && !_nf_calib_active;
-    if (inject_arm_irq) state |= STATE_INT_READY;
+    if (_nf_calib_active) ++calibration_arms;
+    if (!arm_result) _rx_ps_armed = _rx_ps_enabled && !_rx_ps_continuous_fallback && !_nf_calib_active;
+    if (_rx_ps_armed) {
+      _rx_ps_eff_rx_us = _rx_ps_rx_us;
+      _rx_ps_eff_sleep_us = _rx_ps_sleep_us;
+    }
+    if (inject_arm_irq) events.record();
     return arm_result;
   }
   int16_t performChannelScan() { return performChannelScanWithTimeout(2500); }
   int16_t performChannelScanWithTimeout(unsigned long);
   bool isPacketPendingOrReceiving();
   bool isChannelActive();
+  bool isReceivingPassive(int);
+  bool setRxPowerSaving(bool, uint32_t, uint32_t);
+  bool setRxBoostedGainMode(bool);
   void startRecv();
   void checkReceiveMode(uint32_t);
   void loop();
@@ -128,18 +155,315 @@ struct RadioLibWrapper {
   void noiseFloorCalibCheck(unsigned long);
   void endNoiseFloorCalib(unsigned long);
   void requestNoiseFloorRefresh();
+  void requestPeriodicNoiseFloorRefresh();
   void recalibrateNoiseFloor();
+  bool resetAGCIfIdle(bool refresh_floor = true);
+  bool tryResetAGC();
+  bool getNoiseFloorWakeDelay(uint32_t, uint32_t&) const;
   void resetAGC();
+  @RECOVERY_GETTER@
 };
 @METHODS@
 
+struct LegacyRadio {
+  unsigned resets = 0;
+  virtual void resetAGC() { ++resets; }
+  @LEGACY_TRY_RESET@
+  @LEGACY_RECOVERY_GETTER@
+};
+
+// Public Dispatcher/passive callers share the same bounded routine policy.
+static void routineRequest(RadioLibWrapper& w, unsigned path, int margin = 7) {
+  if (path == 0) w.triggerNoiseFloorCalibrate(margin);
+  else if (path == 1) {
+    const bool active = w.isReceivingPassive(margin);
+    assert(active == (!w._noise_floor_valid || (margin > 0 && w.rssi - w._noise_floor >= margin)));
+  } else w.requestPeriodicNoiseFloorRefresh();
+}
+
+static void selectMode(RadioLibWrapper& w, unsigned mode) {
+  const uint32_t period = mode == 2 ? RX_POWERSAVING_CONTINUOUS_FALLBACK_US : 50000U;
+  assert(w.setRxPowerSaving(mode != 0, period, period));
+  assert(w._rx_ps_enabled == (mode != 0));
+  assert(w._rx_ps_continuous_fallback == (mode == 2));
+}
+
+static void periodicRefreshContracts() {
+  static_assert(NF_RXPS_REFRESH_INTERVAL_MS == 60000UL, "Routine RXPS refresh must rest one minute");
+  static_assert(NF_CALIB_INTERVAL_MS == 60000UL, "Failed routine refresh must rest one minute");
+  static_assert(NF_LAZY_REFRESH_INTERVAL_MS == 300000UL, "Successful floor refresh becomes lazy");
+  unsigned cases = 0;
+  for (unsigned path : {0U, 1U, 2U}) for (unsigned mode : {0U, 1U, 2U})
+  for (uint32_t last : {10000U, 0xfffffff0U}) for (bool valid : {false, true})
+  for (uint32_t age : {0U, 1U, 1999U, 2000U, 59999U, 60000U}) {
+    RadioLibWrapper w; selectMode(w, mode);
+    w._nf_refresh_requested = false; w._noise_floor_valid = valid;
+    w._nf_last_calib = last; w._threshold = 42;
+    now_ms = last + age;
+    routineRequest(w, path);
+    const uint32_t interval = mode == 1 ? NF_RXPS_REFRESH_INTERVAL_MS : NF_CALIB_INTERVAL_MS;
+    const bool expected = age >= interval;
+    assert(w._nf_refresh_requested == expected);
+    assert(w._threshold == (path == 0 ? 7 : 42)); // threshold changes never wait
+    assert(w.arms == 0 && w.stops == 0 && w.radio.scans == 0);
+    ++cases;
+  }
+  // Invalid startup bypasses the cooldown. A failed, timestamped attempt does
+  // not: it remains conservatively busy without immediately reopening RX.
+  for (unsigned path : {0U, 1U, 2U}) {
+    RadioLibWrapper w; selectMode(w, 1);
+    w._noise_floor_valid = false; w._nf_last_calib = 0; w._nf_refresh_requested = false;
+    now_ms = 1; routineRequest(w, path); assert(w._nf_refresh_requested);
+    w._noise_floor_valid = true; w._nf_refresh_requested = false;
+    now_ms = NF_RXPS_REFRESH_INTERVAL_MS - 1; routineRequest(w, path);
+    assert(!w._nf_refresh_requested); // zero timestamp alone is not startup
+    ++now_ms; routineRequest(w, path); assert(w._nf_refresh_requested);
+    ++cases;
+  }
+  // Select the current receive mode, not the mode of the last completed batch.
+  for (unsigned path : {0U, 1U, 2U}) for (unsigned from : {0U, 1U, 2U})
+  for (unsigned to : {0U, 1U, 2U}) {
+    RadioLibWrapper w; selectMode(w, from);
+    w._nf_last_calib = 10000; w._nf_refresh_requested = false;
+    now_ms = 20000; selectMode(w, to); routineRequest(w, path);
+    assert(!w._nf_refresh_requested);
+    now_ms = 10000 + NF_RXPS_REFRESH_INTERVAL_MS - 1; routineRequest(w, path);
+    assert(!w._nf_refresh_requested);
+    ++now_ms; routineRequest(w, path); assert(w._nf_refresh_requested);
+    ++cases;
+  }
+  // A periodic request may join, but must not reset or extend, a partial block.
+  for (unsigned path : {0U, 1U, 2U}) {
+    RadioLibWrapper w; selectMode(w, 1); w._rx_ps_armed = true;
+    w._nf_last_calib = 100; w._nf_refresh_requested = false;
+    now_ms = 100 + NF_RXPS_REFRESH_INTERVAL_MS;
+    routineRequest(w, path); w.loop(); w.startRecv();
+    now_ms += NF_CALIB_SETTLE_MS; w.loop();
+    assert(w._nf_calib_active && w._floor_estimator.count() == 1);
+    assert(w._secondary_floor_estimator.add(-90, now_ms));
+    const auto deadline = w._nf_calib_deadline;
+    for (unsigned repeat = 0; repeat < 5; ++repeat) {
+      routineRequest(w, path, 9);
+      assert(w._nf_refresh_requested && w._floor_estimator.count() == 1);
+      assert(w._secondary_floor_estimator.count() == 1 && w._nf_calib_deadline == deadline);
+    }
+    ++cases;
+  }
+  // Passive busy/packet/CW ownership still avoids SPI reads, CAD and refresh.
+  for (unsigned owned : {0U, 1U, 2U, 3U}) {
+    RadioLibWrapper w; selectMode(w, 1); w._nf_refresh_requested = false;
+    w._noise_floor_valid = false; now_ms = 100000;
+    if (owned == 0) w._cw_active = true;
+    if (owned == 1) w.busy = true;
+    if (owned == 2) w.packet = true;
+    if (owned == 3) w.events.record();
+    assert(w.isReceivingPassive(7) && !w._nf_refresh_requested);
+    assert(w.reads == 0 && w.arms == 0 && w.radio.scans == 0);
+    ++cases;
+  }
+  {
+    RadioLibWrapper w; selectMode(w, 1); w._nf_refresh_requested = false;
+    w._nf_last_calib = now_ms;
+    assert(w.isReceivingPassive(3)); // published floor still gates interference
+    assert(!w.isReceivingPassive(6) && !w._nf_refresh_requested);
+    ++cases;
+  }
+  {
+    RadioLibWrapper w;
+    mesh::RadioProfileConfig second;
+    second.params.freq = 910.5; second.params.bw = 62.5; second.params.sf = 7; second.params.cr = 5;
+    second.mode = mesh::RadioProfileMode::Rx;
+    w._profiles.primary = second.params; w._profiles.setSecondary(second, false);
+    w._noise_floor_valid = w._noise_floor_secondary_valid = false;
+    w._nf_last_calib = now_ms; w._nf_refresh_requested = false;
+    assert(!w.isReceivingPassive(7) && !w._nf_refresh_requested && w.reads == 0);
+    w.triggerNoiseFloorCalibrate(9); // dual initialization still bypasses the single-profile cooldown
+    assert(w._nf_refresh_requested && w._threshold == 9);
+    ++cases;
+  }
+  // Forced gain/tuning and AGC remain prompt, independent of routine cooldown.
+  for (unsigned forced : {0U, 1U, 2U}) {
+    RadioLibWrapper w; selectMode(w, 1); w._rx_ps_armed = true;
+    now_ms = 100000; w._nf_last_calib = now_ms; w._nf_refresh_requested = false;
+    assert(w._floor_estimator.add(-30, now_ms));
+    assert(w._secondary_floor_estimator.add(-30, now_ms));
+    ++now_ms;
+    if (forced == 0) w.recalibrateNoiseFloor();
+    if (forced == 1) assert(w.setRxBoostedGainMode(true));
+    if (forced == 2) w.resetAGC();
+    assert(w._nf_refresh_requested && w._nf_last_calib == 0);
+    assert(w._floor_estimator.count() == 0 && w._secondary_floor_estimator.count() == 0);
+    assert(w._noise_floor_valid == (forced == 2));
+    assert(w._noise_floor_centi_dbm == -10500);
+    assert(w.gain_changes == (forced == 1 ? 1U : 0U));
+    assert(w.agc_resets == (forced == 2 ? 1U : 0U));
+    // AGC already schedules the normal receive re-arm; calibration follows it.
+    if (w.state == STATE_IDLE) w.startRecv();
+    w.loop(); assert(w._nf_calib_active);
+    ++cases;
+  }
+  // A failed initial block rests one minute; an accepted baseline rests five.
+  // Quiet and busy windows are exercised through the actual loop/re-arm path.
+  for (bool busy : {false, true}) for (unsigned path : {0U, 1U}) {
+    RadioLibWrapper w; selectMode(w, 1); w._rx_ps_armed = true;
+    w._noise_floor_valid = false; w._nf_refresh_requested = false; w.busy = busy;
+    const uint32_t start = now_ms;
+    // The passive busy guard correctly returns without a new request. Seed
+    // the initial startup demand via the actual Dispatcher method instead.
+    w.triggerNoiseFloorCalibrate(7);
+    for (; w._nf_last_calib == 0; ++now_ms) {
+      assert(uint32_t(now_ms - start) <= NF_CALIB_TIMEOUT_MS + 1);
+      if (uint32_t(now_ms - start) % NF_CALIB_INTERVAL_MS == 0) {
+        if (path == 0) w.triggerNoiseFloorCalibrate(7);
+        else routineRequest(w, path);
+      }
+      w.loop(); if (w.state == STATE_IDLE) w.startRecv();
+    }
+    const uint32_t finished = w._nf_last_calib;
+    assert(w.calibration_arms == 1 && w._rx_ps_armed && !w._nf_refresh_requested);
+    assert(w._noise_floor_valid == !busy);
+    if (busy) assert(w.reads == 0 && w._noise_floor_centi_dbm == -10500);
+    // A quiet passive caller reads RSSI, but those reads do not open windows.
+    const uint32_t interval = busy ? NF_RXPS_REFRESH_INTERVAL_MS : NF_LAZY_REFRESH_INTERVAL_MS;
+    for (; uint32_t(now_ms - finished) < interval; ++now_ms) {
+      if (uint32_t(now_ms - finished) % NF_CALIB_INTERVAL_MS == 0) {
+        if (path == 0) w.triggerNoiseFloorCalibrate(7);
+        else routineRequest(w, path);
+      }
+      w.loop(); if (w.state == STATE_IDLE) w.startRecv();
+      assert(w.calibration_arms == 1 && !w._nf_calib_active && !w._nf_refresh_requested);
+    }
+    // A timestamped failed attempt is not the invalid-startup exception.
+    w.busy = false; routineRequest(w, path); w.loop();
+    if (w.state == STATE_IDLE) w.startRecv();
+    assert(w._nf_calib_active && w.calibration_arms == 2);
+    ++cases;
+  }
+  std::printf("PASS: routine noise-floor cooldown (%u cases)\n", cases);
+}
+
+static void agcAdmissionContracts() {
+  unsigned cases = 0;
+  for (unsigned mode : {0U, 1U, 2U}) for (unsigned owned : {0U, 1U, 2U, 3U, 4U}) {
+    if (mode == 1 && owned == 1) continue; // known RXPS sleep has an explicit wake path
+    RadioLibWrapper w; selectMode(w, mode);
+    w._rx_ps_armed = mode == 1;
+    w._rx_boosted_gain_valid = w._cur_rx_boosted_gain = true;
+    w._nf_last_calib = now_ms;
+    w._nf_calib_deadline = now_ms + 800;
+    w._nf_sample_from = now_ms + NF_CALIB_SETTLE_MS;
+    assert(w._floor_estimator.add(-30, now_ms));
+    assert(w._secondary_floor_estimator.add(-30, now_ms));
+    if (owned == 0) w._cw_active = true;
+    if (owned == 1) w.busy = true; // unknown/continuous BUSY must defer
+    if (owned == 2) w.events.record();
+    if (owned == 3) w.packet = true;
+    if (owned == 4) w.state = STATE_TX_WAIT;
+    const auto state = w.state, armed = uint8_t(w._rx_ps_armed);
+    const auto deadline = w._nf_calib_deadline, sample_from = w._nf_sample_from;
+    unsigned admitted = 0;
+    for (unsigned retry = 0; retry < 3; ++retry) {
+      if (w.tryResetAGC()) ++admitted;
+      // Legacy AGC deliberately retains its historical ability to reset while
+      // BUSY. The adaptive try API defers outside known RXPS sleep.
+      if (owned != 1) w.resetAGC();
+      assert(admitted == 0 && w.agc_resets == 0 && w.gain_changes == 0);
+      assert(w.state == state && w._rx_ps_armed == bool(armed));
+      assert(w._nf_last_calib == now_ms && w._nf_refresh_requested);
+      assert(w._nf_calib_deadline == deadline && w._nf_sample_from == sample_from);
+      assert(w._floor_estimator.count() == 1 && w._secondary_floor_estimator.count() == 1);
+      assert(w._noise_floor_valid && w._noise_floor_secondary_valid);
+      assert(w._noise_floor_centi_dbm == -10500 && w._noise_floor_secondary_centi_dbm == -10600);
+      if (owned == 2) assert(w.hasPendingRadioInterrupt()); // never consume another owner's IRQ
+    }
+    w._cw_active = w.busy = w.packet = false;
+    w.claimRadioInterrupt(); w.state = STATE_RX;
+    assert(w.tryResetAGC()); ++admitted;
+    assert(admitted == 1 && w.agc_resets == 1 && w.gain_changes == 1);
+    assert(w.state == STATE_IDLE && w._nf_refresh_requested && w._nf_last_calib == 0);
+    assert(w._floor_estimator.count() == 0 && w._secondary_floor_estimator.count() == 0);
+    ++cases;
+  }
+  {
+    RadioLibWrapper w; selectMode(w, 1);
+    w._rx_ps_armed = true; w.busy = true;
+    bool admitted = false;
+    // A valid 1 ms listen / 49 ms sleep cycle can remain BUSY at every
+    // phase-25 poll. Known RXPS must use the legacy explicit wake sequence.
+    for (unsigned retry = 0; retry < 10000 && !admitted; ++retry) {
+      now_ms = 25 + retry * 50;
+      admitted = w.tryResetAGC();
+    }
+    assert(admitted && w.agc_resets == 1 && w.state == STATE_IDLE);
+    assert(w._nf_refresh_requested && w._noise_floor_valid);
+    assert(w.reads == 0 && w.radio.scans == 0);
+    ++cases;
+  }
+  for (unsigned mode : {0U, 1U, 2U}) {
+    RadioLibWrapper w; selectMode(w, mode);
+    w.busy = true; w._nf_refresh_requested = false; w._nf_last_calib = now_ms;
+    assert(!w.tryResetAGC() && w.agc_resets == 0 && !w._nf_refresh_requested);
+    w.resetAGC();
+    assert(w.agc_resets == 1 && w.state == STATE_IDLE);
+    assert(w._nf_refresh_requested && w._nf_last_calib == 0);
+    ++cases;
+  }
+  // Admission reports that the sequence ran, not that the hardware is healthy.
+  // Both public APIs preserve independent published floors/validity and the
+  // active window's bound while invalidating samples from the old AGC path.
+  for (unsigned mode : {0U, 1U, 2U}) for (bool primary : {false, true})
+  for (bool secondary : {false, true}) for (bool active_window : {false, true})
+  for (bool legacy : {false, true}) {
+    RadioLibWrapper w; selectMode(w, mode);
+    w._rx_ps_armed = mode == 1 && !active_window;
+    w._rx_boosted_gain_valid = w._cur_rx_boosted_gain = true;
+    w._noise_floor_valid = primary; w._noise_floor_secondary_valid = secondary;
+    w._nf_calib_active = active_window; w._nf_last_calib = now_ms;
+    w._nf_calib_deadline = now_ms + 800;
+    w.n_wd_soft = 2; w.n_wd_hard = 3;
+    assert(w.getRecoveryCount() == 5);
+    assert(w._floor_estimator.add(-30, now_ms));
+    assert(w._secondary_floor_estimator.add(-30, now_ms));
+    ++now_ms;
+    if (legacy) w.resetAGC();
+    else assert(w.tryResetAGC());
+    assert(w.agc_resets == 1 && w.gain_changes == 1 && w.arms == 0);
+    assert(w.state == STATE_IDLE && w._nf_refresh_requested && w._nf_last_calib == 0);
+    assert(w._noise_floor_valid == primary && w._noise_floor_secondary_valid == secondary);
+    assert(w._noise_floor == -105 && w._noise_floor_centi_dbm == -10500);
+    assert(w._noise_floor_secondary_centi_dbm == -10600);
+    assert(w._floor_estimator.count() == 0 && w._secondary_floor_estimator.count() == 0);
+    assert(w._nf_sample_from == now_ms + (w._rx_ps_armed ? 0 : NF_CALIB_SETTLE_MS));
+    assert(w._nf_calib_active == active_window);
+    assert(w._nf_calib_deadline == (active_window ? now_ms + NF_CALIB_TIMEOUT_MS : 0));
+    assert(w.getRecoveryCount() == 5); // AGC attempts do not inflate watchdog recovery counters
+    ++cases;
+  }
+  {
+    RadioLibWrapper w;
+    assert(w.getRecoveryCount() == 0);
+    w.n_wd_soft = 1; assert(w.getRecoveryCount() == 1);
+    w.n_wd_hard = 2; assert(w.getRecoveryCount() == 3);
+    ++cases;
+  }
+  {
+    LegacyRadio radio;
+    assert(radio.tryResetAGC() && radio.resets == 1);
+    assert(radio.getRecoveryCount() == 0);
+    ++cases;
+  }
+  std::printf("PASS: AGC admission (%u cases)\n", cases);
+}
+
 int main() {
+  periodicRefreshContracts();
+  agcAdmissionContracts();
   // A completed packet, current frame, or TX owns the radio; CAD cannot erase it.
   for (int owned : {1, 2, 3}) {
     RadioLibWrapper w;
-    if (owned == 1) state |= STATE_INT_READY;
+    if (owned == 1) w.events.record();
     if (owned == 2) w.packet = true;
-    if (owned == 3) state = STATE_TX_WAIT;
+    if (owned == 3) w.state = STATE_TX_WAIT;
     assert(w.isChannelActive());
     assert(w.radio.scans == 0 && w.arms == 0);
   }
@@ -151,7 +475,7 @@ int main() {
       const bool active = w.isChannelActive();
       assert(active == (result != RADIOLIB_CHANNEL_FREE));
       assert(w.stops == unsigned(ps));
-      assert(w.arms == 1 && state == STATE_RX);
+      assert(w.arms == 1 && w.state == STATE_RX);
       assert(w._rx_ps_armed == ps);
       if (result == RADIOLIB_ERR_UNKNOWN) {
         assert(now_ms == 2600 && w.board.services == 2);
@@ -162,19 +486,19 @@ int main() {
     RadioLibWrapper w;
     w.radio.start_result = -5;
     assert(w.isChannelActive());
-    assert(w.arms == 1 && state == STATE_RX);
+    assert(w.arms == 1 && w.state == STATE_RX);
   }
   {
     RadioLibWrapper w;
     w.arm_result = -5;
     assert(w.isChannelActive()); // a free CAD with failed RX restoration is not success
-    assert(state == STATE_IDLE);
+    assert(w.state == STATE_IDLE);
   }
   {
     RadioLibWrapper w;
     w.inject_arm_irq = true;
     assert(w.isChannelActive());
-    assert(state == (STATE_RX | STATE_INT_READY)); // preserves the new packet
+    assert(w.state == STATE_RX && w.hasPendingRadioInterrupt()); // preserves the new packet
   }
   // A quiet bounded window completes in ~3.2 s and powersaving resumes.
   for (bool ps : {false, true}) {
@@ -184,7 +508,7 @@ int main() {
     w._nf_last_calib = 0;
     for (; now_ms < 4000; ++now_ms) {
       w.loop();
-      if (state == STATE_IDLE) w.startRecv();
+      if (w.state == STATE_IDLE) w.startRecv();
     }
     assert(!w._nf_refresh_requested && !w._nf_calib_active);
     assert(w._noise_floor_valid && w._noise_floor_centi_dbm == -10000);
@@ -345,7 +669,7 @@ int main() {
     if (skip == 1) w.busy = true;
     if (skip == 2) w._rx_ps_armed = true;
     if (skip == 3) w.packet = true;
-    if (skip == 4) state |= STATE_INT_READY;
+    if (skip == 4) w.events.record();
     for (uint32_t t : {10000U,20000U,30000U}) w.checkReceiveMode(t);
     assert(w.soft == 0 && w.hard == 0);
   }
@@ -367,6 +691,38 @@ int main() {
   }
 }
 '''
+
+def transition_harness(source=None):
+    """Build the shared actual-method harness, including its counted I/O adapters."""
+    if source is None:
+        source = (ROOT / 'src/helpers/radiolib/RadioLibWrappers.cpp').read_text()
+    header = (ROOT / 'src/helpers/radiolib/RadioLibWrappers.h').read_text()
+    dispatcher = (ROOT / 'src/Dispatcher.h').read_text()
+    rxps = (ROOT / 'src/helpers/radiolib/RXPowerSaving.h').read_text()
+    names = [('int16_t', 'performChannelScanWithTimeout'), ('bool', 'isPacketPendingOrReceiving'),
+             ('bool', 'isChannelActive'), ('bool', 'isReceivingPassive'),
+             ('bool', 'setRxPowerSaving'), ('bool', 'setRxBoostedGainMode'),
+             ('void', 'startRecv'), ('void', 'checkReceiveMode'),
+             ('void', 'loop'), ('void', 'triggerNoiseFloorCalibrate'),
+             ('void', 'requestRestartRecv'), ('void', 'noiseFloorCalibCheck'),
+             ('void', 'endNoiseFloorCalib'), ('void', 'requestNoiseFloorRefresh'),
+             ('void', 'requestPeriodicNoiseFloorRefresh'), ('void', 'recalibrateNoiseFloor'),
+             ('bool', 'resetAGCIfIdle'), ('bool', 'tryResetAGC'), ('void', 'resetAGC'),
+             ('bool', 'getNoiseFloorWakeDelay')]
+    methods = '\n'.join(method(source, f'{kind} RadioLibWrapper::{name}(')
+                         for kind, name in names)
+    constants = '\n'.join(re.findall(r'^#define NF_\w+\s+[^\n]+', source, re.MULTILINE))
+    constants += '\n' + re.search(
+        r'^#define RX_POWERSAVING_CONTINUOUS_FALLBACK_US\s+[^\n]+', rxps,
+        re.MULTILINE).group(0)
+    settle_start = header.index('#if defined(USE_SX1262) || defined(USE_SX1268) || defined(USE_LLCC68)')
+    settle = header[settle_start:header.index('#endif', settle_start) + len('#endif')]
+    return (HARNESS.replace('@METHODS@', methods).replace('@NF_CONSTANTS@', constants)
+            .replace('@SETTLE_CONSTANT@', settle)
+            .replace('@RECOVERY_GETTER@', method(header, 'uint32_t getRecoveryCount() const').replace('override', ''))
+            .replace('@LEGACY_TRY_RESET@', method(dispatcher, 'virtual bool tryResetAGC('))
+            .replace('@LEGACY_RECOVERY_GETTER@', method(dispatcher, 'virtual uint32_t getRecoveryCount(')))
+
 
 class RadioReceiveContractTest(unittest.TestCase):
     def test_preamble_margin_and_receive_deadlines(self):
@@ -590,24 +946,58 @@ int main() {
             result = subprocess.run([str(binary)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_production_transitions(self):
-        source = (ROOT / 'src/helpers/radiolib/RadioLibWrappers.cpp').read_text()
-        names = [('int16_t','performChannelScanWithTimeout'), ('bool','isPacketPendingOrReceiving'),
-                 ('bool','isChannelActive'), ('void','startRecv'), ('void','checkReceiveMode'),
-                 ('void','loop'), ('void','triggerNoiseFloorCalibrate'), ('void','requestRestartRecv'), ('void','noiseFloorCalibCheck'),
-                 ('void','endNoiseFloorCalib'), ('void','requestNoiseFloorRefresh'),
-                 ('void','recalibrateNoiseFloor'), ('void','resetAGC')]
-        methods = '\n'.join(method(source, f'{kind} RadioLibWrapper::{name}(') for kind,name in names)
+    def run_production_transitions(self, source=None, expect_failure=False, phase_failure=False):
+        harness = transition_harness(source)
         with tempfile.TemporaryDirectory(prefix='meshcore-radio-transitions-') as tmp:
             cpp = Path(tmp) / 'test.cpp'
             binary = Path(tmp) / 'test'
-            cpp.write_text(HARNESS.replace('@METHODS@', methods))
+            # An inherited production comment uses an em dash. Keep generated
+            # test files ASCII without changing any executable source token.
+            cpp.write_text(harness.replace('\u2014', '-'), encoding='ascii')
             result = subprocess.run([os.environ.get('CXX','c++'), '-std=c++17', '-O1',
-                '-Wall', '-Wextra', '-I', str(ROOT / 'src'), str(cpp), '-o', str(binary)],
-                capture_output=True, text=True)
+                '-Wall', '-Wextra', '-DUSE_SX1262=1',
+                *(['-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                   '-fno-pie', '-no-pie'] if sys.platform.startswith('linux') else []),
+                '-I', str(ROOT / 'src'), str(cpp), '-o', str(binary)],
+                capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
-            result = subprocess.run([str(binary)], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=20)
+            if expect_failure:
+                self.assertNotEqual(result.returncode, 0, 'unthrottled negative control escaped the regression')
+                if phase_failure:
+                    self.assertIn('agcAdmissionContracts', result.stderr)
+                    self.assertIn('admitted && w.agc_resets == 1', result.stderr)
+                else:
+                    self.assertIn('periodicRefreshContracts', result.stderr)
+                    self.assertIn('w._nf_refresh_requested == expected', result.stderr)
+            else:
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('PASS: routine noise-floor cooldown (262 cases)', result.stdout)
+                self.assertIn('PASS: AGC admission (68 cases)', result.stdout)
+
+    def test_production_transitions(self):
+        self.run_production_transitions()
+
+    def test_busy_rxps_sleep_phase_lock_negative_control(self):
+        source = (ROOT / 'src/helpers/radiolib/RadioLibWrappers.cpp').read_text()
+        body = method(source, 'bool RadioLibWrapper::tryResetAGC(')
+        self.assertEqual(body.count('_rx_ps_armed || '), 1)
+        unguarded = body.replace('_rx_ps_armed || ', '')
+        self.run_production_transitions(source.replace(body, unguarded),
+                                        expect_failure=True, phase_failure=True)
+
+    def test_unthrottled_periodic_callers_and_helper_negative_controls(self):
+        source = (ROOT / 'src/helpers/radiolib/RadioLibWrappers.cpp').read_text()
+        for caller in ('triggerNoiseFloorCalibrate', 'isReceivingPassive', 'requestPeriodicNoiseFloorRefresh'):
+            with self.subTest(caller=caller):
+                kind = 'bool' if caller == 'isReceivingPassive' else 'void'
+                body = method(source, f'{kind} RadioLibWrapper::{caller}(')
+                if caller == 'requestPeriodicNoiseFloorRefresh':
+                    unthrottled = body[:body.index('{') + 1] + '\n  requestNoiseFloorRefresh();\n}'
+                else:
+                    self.assertEqual(body.count('requestPeriodicNoiseFloorRefresh();'), 1)
+                    unthrottled = body.replace('requestPeriodicNoiseFloorRefresh();', 'requestNoiseFloorRefresh();')
+                self.run_production_transitions(source.replace(body, unthrottled), expect_failure=True)
 
 if __name__ == '__main__':
     unittest.main()

@@ -44,16 +44,24 @@
 #endif
 
 class MicroNMEALocationProvider : public LocationProvider {
-    char _nmeaBuffer[100];
+public:
+    // Keep MicroNMEA's accepted sentence size unchanged. Its fixed-width
+    // coordinate skips can look past a malformed sentence's final NUL.
+    static constexpr uint8_t NMEA_BUFFER_LEN = 100;
+    static constexpr size_t NMEA_BUFFER_GUARD = 16;
+
+private:
+    char _nmeaBuffer[NMEA_BUFFER_LEN + NMEA_BUFFER_GUARD] = {};
     MicroNMEA nmea;
     mesh::RTCClock* _clock;
     Stream* _gps_serial;
     RefCountedDigitalPin* _peripher_power;
     int8_t _claims = 0;
+    bool _started = false;
+    uint8_t time_valid = 0;
     int _pin_reset;
     int _pin_en;
     unsigned long next_check = 0;
-    long time_valid = 0;
     unsigned long _last_time_sync = 0;
 
 #ifdef GPS_L76K
@@ -79,6 +87,78 @@ class MicroNMEALocationProvider : public LocationProvider {
     bool _uart_seen = false;
     bool _nmea_seen = false;
     bool _fix_seen = false;
+    bool _fresh_clock_sample = false;
+    uint32_t _clock_sample_epoch = 0;
+    uint32_t _clock_sample_at = 0;
+    uint32_t _clock_run_epoch = 0;
+    uint32_t _clock_run_at = 0;
+    // Permit one validation period plus scheduling jitter, not retained fixes
+    // across receiver sleep or a paused foreground loop.
+    static constexpr uint32_t ClockSampleMaxAgeMillis = 2000;
+
+    static bool isDigits(const char* text, size_t length) {
+        for (size_t i = 0; i < length; ++i) {
+            if (text[i] < '0' || text[i] > '9') return false;
+        }
+        return true;
+    }
+
+    static uint8_t twoDigits(const char* text) {
+        return uint8_t((text[0] - '0') * 10 + text[1] - '0');
+    }
+
+    static uint32_t rmcEpoch(const char* sentence) {
+        // Read only this checksum-covered RMC's text, never a mixture of
+        // MicroNMEA's retained date/time or position fields.
+        const char* star = strchr(sentence, '*');
+        const char* time = strchr(sentence, ',');
+        if (star == NULL || time == NULL || time >= star
+            || time != sentence + 6 || strncmp(sentence + 3, "RMC", 3)) return 0;
+        ++time;
+        const char* end = strchr(time, ',');
+        if (end == NULL || end >= star || end - time < 6
+            || !isDigits(time, 6)) return 0;
+        if (end - time > 6) {
+            if (time[6] != '.' || end - time == 7
+                || !isDigits(time + 7, size_t(end - time - 7))) return 0;
+        }
+        const char* status = end + 1;
+        if (star - status < 2 || status[0] != 'A' || status[1] != ',') return 0;
+        const char* date = status + 2;
+        for (unsigned field = 3; field <= 8; ++field) {
+            date = strchr(date, ',');
+            if (date == NULL || date >= star) return 0;
+            ++date;
+        }
+        if (star - date < 6 || !isDigits(date, 6)
+            || (date[6] != ',' && date[6] != '*')) return 0;
+        const uint16_t year = 2000 + twoDigits(date + 4);
+        const uint8_t month = twoDigits(date + 2), day = twoDigits(date);
+        const uint8_t hour = twoDigits(time), minute = twoDigits(time + 2),
+                      second = twoDigits(time + 4);
+        if (!mesh::gps::isValidNmeaDateTime(year, month, day, hour, minute, second)) return 0;
+        return DateTime(year, month, day, hour, minute, second).unixtime();
+    }
+
+    bool noteClockSample(uint32_t epoch, uint32_t observed_at) {
+        if (time_valid != 0) {
+            const int32_t gps_seconds = int32_t(epoch) - int32_t(_clock_run_epoch);
+            // Repeats do not count and must not refresh the sample's age.
+            if (gps_seconds == 0) return false;
+            const int32_t wall_seconds = int32_t((observed_at - _clock_run_at) / 1000);
+            const int32_t drift = gps_seconds - wall_seconds;
+            if (gps_seconds > 0 && drift >= -2 && drift <= 2) {
+                if (time_valid < 3) ++time_valid;
+            } else {
+                time_valid = 1;
+            }
+        } else {
+            time_valid = 1;
+        }
+        _clock_run_epoch = epoch;
+        _clock_run_at = observed_at;
+        return true;
+    }
 
     static uint32_t ageMs(unsigned long timestamp) {
         return (uint32_t)(millis() - timestamp);
@@ -94,7 +174,7 @@ class MicroNMEALocationProvider : public LocationProvider {
 
 public :
     MicroNMEALocationProvider(Stream& ser, mesh::RTCClock* clock = NULL, int pin_reset = GPS_RESET, int pin_en = GPS_EN,RefCountedDigitalPin* peripher_power=NULL) :
-    nmea(_nmeaBuffer, sizeof(_nmeaBuffer)), _clock(clock), _gps_serial(&ser), _peripher_power(peripher_power), _pin_reset(pin_reset), _pin_en(pin_en) {
+    nmea(_nmeaBuffer, NMEA_BUFFER_LEN), _clock(clock), _gps_serial(&ser), _peripher_power(peripher_power), _pin_reset(pin_reset), _pin_en(pin_en) {
         if (_pin_reset != -1) {
             pinMode(_pin_reset, OUTPUT);
             digitalWrite(_pin_reset, GPS_RESET_ACTIVE);
@@ -118,6 +198,8 @@ public :
 
     void begin() override {
         _begin_calls++;
+        if (_started) return;
+        _started = true;
         claim();
         if (_pin_en != -1) {
             digitalWrite(_pin_en, GPS_EN_ACTIVE);
@@ -142,12 +224,16 @@ public :
 
     void stop() override {
         _stop_calls++;
+        // RAK discovery and board code can power GPS without begin(). Always
+        // force the control pins off; only release a claim acquired here.
         if (_pin_en != -1) {
             digitalWrite(_pin_en, !GPS_EN_ACTIVE);
         }
         if (_pin_reset != -1) {
             digitalWrite(_pin_reset, GPS_RESET_ACTIVE);
         }
+        if (!_started) return;
+        _started = false;
         release();
     }
 
@@ -169,7 +255,18 @@ public :
         return _pin_en;
     }
 
-    void syncTime() override { nmea.clear(); LocationProvider::syncTime(); }
+    void syncTime() override {
+        nmea.clear();
+        time_valid = 0;
+        _fresh_clock_sample = false;
+        LocationProvider::syncTime();
+    }
+    void beginFreshTimeSync() override {
+        time_valid = 0;
+        _fresh_clock_sample = false;
+        next_check = millis();
+        LocationProvider::beginFreshTimeSync();
+    }
     mesh::RTCClock* getRTCClock() override { return _clock; }
     long getLatitude() override { return nmea.getLatitude(); }
     long getLongitude() override { return nmea.getLongitude(); }
@@ -179,7 +276,25 @@ public :
         return alt;
     }
     long satellitesCount() override { return nmea.getNumSatellites(); }
-    bool isValid() override { return nmea.isValid(); }
+    bool isValid() override {
+        if (!nmea.isValid()) return false;
+        const long latitude = nmea.getLatitude(), longitude = nmea.getLongitude();
+        return latitude >= -90000000L && latitude <= 90000000L
+            && longitude >= -180000000L && longitude <= 180000000L;
+    }
+    bool clearPositionFix() override {
+        nmea.clear();
+        time_valid = 0;
+        _fresh_clock_sample = false;
+        // Discard only bytes already queued before the acquisition begins.
+        // Snapshot the count so a noisy live UART cannot make this unbounded.
+        int buffered = _gps_serial->available();
+        if (buffered < 0 || buffered > 1024) return false;
+        while (buffered-- > 0) {
+            if (_gps_serial->read() < 0) return false;
+        }
+        return true;
+    }
 
     long getTimestamp() override {
         const uint16_t year = nmea.getYear();
@@ -257,31 +372,54 @@ public :
                         _last_fix_ms = millis();
                         _fix_seen = true;
                     }
+                    // GGA supplies only time-of-day. Never combine it with a
+                    // retained RMC date for a new clock write, especially at
+                    // midnight. Keep the complete UTC sample with its age.
+                    if (parsed && strcmp(message_id, "RMC") == 0) {
+                        const uint32_t epoch = rmcEpoch(nmea.getSentence());
+                        _fresh_clock_sample = epoch > 0;
+                        if (_fresh_clock_sample) {
+                            _clock_sample_epoch = epoch;
+                            _clock_sample_at = millis();
+                        } else {
+                            time_valid = 0;
+                        }
+                    }
                 } else {
                     _nmea_checksum_bad++;
                 }
             }
         }
 
-        if (!isValid()) time_valid = 0;
+        // Keep each loop's byte budget, but validate only after its queued
+        // batch is drained so a partial later sentence cannot hide a newer
+        // clock sample behind an earlier one in the same UART backlog.
+        if (_gps_serial->available()) return;
 
-        if ((long)(millis() - next_check) > 0) {
-            next_check = millis() + 1000;
-            // Re-enable time sync periodically when GPS has valid fix
+        const uint32_t now = millis();
+        if (static_cast<int32_t>(now - static_cast<uint32_t>(next_check)) > 0) {
+            next_check = now + 1000UL;
+            // Re-enable periodically; writes still need fresh agreeing UTC.
             if (!_time_sync_needed && _clock != NULL
                 && static_cast<uint32_t>(millis() - _last_time_sync)
                     >= periodicTimeSyncIntervalMillis()) {
                 _time_sync_needed = true;
             }
-            const long timestamp = getTimestamp();
-            if (isValid() && satellitesCount() >= 5 && timestamp > 0) {
-                time_valid++;
-            } else {
+            const bool fresh_clock = _fresh_clock_sample
+                && static_cast<uint32_t>(now - _clock_sample_at) <= ClockSampleMaxAgeMillis;
+            const bool advancing_clock = fresh_clock
+                && noteClockSample(_clock_sample_epoch, _clock_sample_at);
+            if (!advancing_clock && _fresh_time_sync_required) {
+                // Tracker acquisitions retain their consecutive-sample rule.
+                // Normal receivers can report more slowly than this 1s poll.
                 time_valid = 0;
             }
-            if (_time_sync_needed && time_valid > 2) {
+            _fresh_clock_sample = false;
+            // Consume even while no sync is requested. An expired observation
+            // must never become fresh again after a full millis() rollover.
+            if (_time_sync_needed && time_valid >= 3 && advancing_clock) {
                 if (_clock != NULL) {
-                    _clock->setCurrentTime(timestamp);
+                    _clock->setCurrentTime(_clock_sample_epoch);
                     markTimeSyncApplied();
                     _time_sync_needed = false;
                     _last_time_sync = millis();

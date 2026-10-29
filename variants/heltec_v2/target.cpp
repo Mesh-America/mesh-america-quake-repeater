@@ -1,13 +1,16 @@
 #include <Arduino.h>
 #include "target.h"
+#include <helpers/radiolib/TunableRadioHal.h>
 
 HeltecV2Board board;
 
 #if defined(P_LORA_SCLK)
   static SPIClass spi;
-  RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_0, P_LORA_RESET, P_LORA_DIO_1, spi);
+  static TunableRadioHal radio_hal(spi, 2000000);
+  RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_0, P_LORA_RESET, P_LORA_DIO_1);
 #else
-  RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_0, P_LORA_RESET, P_LORA_DIO_1);
+  static TunableRadioHal radio_hal(SPI, 2000000, true);
+  RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_0, P_LORA_RESET, P_LORA_DIO_1);
 #endif
 
 WRAPPER_CLASS radio_driver(radio, board);

@@ -21,9 +21,11 @@ RECIPE_ENVIRONMENT = (
     "MESHCORE_COMPANION_RADIO_FULL", "MESHCORE_ESP32_FULL_PARTITION_TABLE",
     "MESHCORE_NRF52_INTERNAL_BOOTLOADER_UPDATE", "MESHCORE_FORCE_LORA_OTA",
     "MESHCORE_NRF52_LEGACY_FLASH_OTA", "MESHCORE_REDUCED_TLS",
+    "MESHCORE_NRF52_EMBED_BOOTLOADER", "MESHCORE_NRF52_LEGACY_BOOTLOADER",
 )
 PACKAGE_SUFFIXES = (".bin", "-merged.bin", ".uf2", ".zip", ".hex",
-                    ".capabilities.json", ".memory.json", ".font-license.txt")
+                    ".capabilities.json", ".memory.json", ".font-license.txt",
+                    ".meshtext-license.txt", ".pocket-gui-license.txt")
 
 
 def canonical_digest(value):
@@ -183,6 +185,10 @@ def recipe_digest(args, options):
                                       if name.startswith(("PLATFORMIO_", "MESHCORE_"))}
     names.discard("MESHCORE_RECIPE_ORIGINAL_FLAGS")
     environment = {name: os.environ.get(name) for name in names}
+    # A legacy bridge binds the supplied bytes, not just their external path.
+    legacy = os.environ.get("MESHCORE_NRF52_LEGACY_BOOTLOADER")
+    if legacy:
+        environment["MESHCORE_NRF52_LEGACY_BOOTLOADER_SHA256"] = file_digest(Path(legacy))
     return canonical_digest({
         "schema_version": SCHEMA,
         "source": source_digest(args.root, args.output, expected_commit=args.source_commit),

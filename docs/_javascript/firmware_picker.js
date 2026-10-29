@@ -23,6 +23,11 @@
   ]);
 
   const FACET_FIELDS = Object.freeze(FILTER_FIELDS.concat(["install"]));
+  // Versioned picker selections stay self-contained as release catalogs change.
+  const SHORT_SELECTION_FIELDS = Object.freeze({
+    c: "chipFamily", g: "hardwareFamily", h: "hardware", r: "role",
+    l: "logging", o: "ota", m: "mode", f: "feature", v: "variant", i: "install",
+  });
   const PROFILE_FIELDS = Object.freeze(["ota", "feature", "variant"]);
   const CHOICE_FIELDS = Object.freeze([
     "chipFamily", "hardwareFamily", "hardware", "role", "logging",
@@ -66,6 +71,7 @@
   const MODE_LABELS = Object.freeze({
     standard: "Standard / no separate bridge",
     full: "Full Companion transports",
+    combined: "USB + Bluetooth LE + Wi-Fi",
     ble: "Bluetooth LE",
     usb: "USB",
     "usb-ble": "USB + Bluetooth LE",
@@ -214,6 +220,17 @@
     "ikoka_handheld_nrf_e22_30dbm_096_rotated_companion_radio_full",
   ]);
 
+  const QSPI_REPEATER_ALIAS_HARDWARE = Object.freeze([
+    "lilygo_t-echo", "sensecap_solar", "thinknode_m1", "thinknode_m6", "wiotrackerl1",
+  ]);
+
+  const QSPI_ROOM_HARDWARE = Object.freeze([
+    "xiao_nrf52", "ikoka_handheld_nrf_e22_30dbm",
+    "ikoka_nano_nrf_22dbm", "ikoka_nano_nrf_30dbm", "ikoka_nano_nrf_33dbm",
+    "ikoka_stick_nrf_22dbm", "ikoka_stick_nrf_30dbm", "ikoka_stick_nrf_33dbm",
+    "solarxiao_30s", "solarxiao_33s", "lilygo_t-echo-lite",
+  ].concat(QSPI_REPEATER_ALIAS_HARDWARE));
+
   let pickerInstanceCount = 0;
   let runtimeGroupCount = 0;
 
@@ -236,7 +253,27 @@
     return release.published_at || release.created_at || "";
   }
 
-  function selectReleaseSet(releases) {
+  function isT114PreviewTag(tag) {
+    return /^heltec-t114-v\d+(?:\.\d+){2,3}\.preview[1-9]\d*$/.test(tag || "");
+  }
+
+  function controlsForRelease(controlData, tag) {
+    if (!controlData) return null;
+    if ((controlData.releaseTag || controlData.familyTag) === tag) return controlData;
+    return (Array.isArray(controlData.supplementalReleases) ? controlData.supplementalReleases : [])
+      .find(function (entry) { return entry && entry.releaseTag === tag; }) || null;
+  }
+
+  function t114PreviewControls(controlData, tag) {
+    const entry = controlsForRelease(controlData, tag);
+    if (!isT114PreviewTag(tag) || !entry || !/^[0-9a-f]{40}$/.test(entry.source || "")) return null;
+    const family = tag.slice("heltec-t114-".length);
+    const hash = String(entry.familyTag || "").slice(family.length + 1);
+    return entry.familyTag === family + "-" + hash && /^[0-9a-f]{8,40}$/.test(hash) &&
+      entry.source.startsWith(hash) && entry.profiles ? entry : null;
+  }
+
+  function selectReleaseSet(releases, controlData) {
     const publicReleases = (Array.isArray(releases) ? releases : []).filter(
       function (release) {
         return release && !release.draft && typeof release.tag_name === "string";
@@ -247,10 +284,14 @@
     }).sort(function (a, b) {
       return releaseDate(b).localeCompare(releaseDate(a));
     });
-    const main = mainReleases[0];
+    const supplements = publicReleases.filter(function (release) {
+      return Boolean(t114PreviewControls(controlData, release.tag_name));
+    }).sort(function (a, b) { return releaseDate(b).localeCompare(releaseDate(a)); });
+    const main = mainReleases[0] || supplements[0];
     if (!main) return null;
 
-    const familyTag = main.tag_name;
+    const mainSupplement = t114PreviewControls(controlData, main.tag_name);
+    const familyTag = mainSupplement ? mainSupplement.familyTag : main.tag_name;
     const acceptedTags = new Set(RELEASE_PAGE_PREFIXES.map(function (prefix) {
       return prefix + familyTag;
     }));
@@ -260,7 +301,7 @@
     const chunkTag = new RegExp("^(?:" + chunkGroups.map(escapeRegExp).join("|") +
       ")-(?:[2-9]|[1-9][0-9]+)-" + escapeRegExp(familyTag) + "$");
     const familyReleases = publicReleases.filter(function (release) {
-      return acceptedTags.has(release.tag_name) || chunkTag.test(release.tag_name);
+      return acceptedTags.has(release.tag_name) || chunkTag.test(release.tag_name) || supplements.includes(release);
     }).sort(function (a, b) {
       return releaseDate(b).localeCompare(releaseDate(a));
     });
@@ -271,6 +312,10 @@
       url: isSafeGithubUrl(main.html_url) ? main.html_url : "",
       prerelease: Boolean(main.prerelease),
       releases: familyReleases,
+      supplementalReleases: supplements.map(function (release) {
+        const entry = t114PreviewControls(controlData, release.tag_name);
+        return { releaseTag: release.tag_name, familyTag: entry.familyTag, source: entry.source };
+      }),
     };
   }
 
@@ -293,6 +338,12 @@
               ? release.html_url
               : "",
             publishedAt: releaseDate(release),
+            familyTag: ((releaseSet.supplementalReleases || []).find(function (entry) {
+              return entry.releaseTag === release.tag_name;
+            }) || {}).familyTag || releaseSet.familyTag,
+            t114Preview: (releaseSet.supplementalReleases || []).some(function (entry) {
+              return entry.releaseTag === release.tag_name;
+            }),
           });
         }
       );
@@ -482,6 +533,11 @@
     if (/^RAK_(?:3401|4631)_repeater_unified_lora_ota(?:-(?:full|reduced)(?:-ota)?)?$/i.test(target)) {
       variant = "default";
     }
+    if (/^RAK_4631_repeater_ethernet(?:-(?:full|reduced)(?:-ota)?)?$/i.test(target)) {
+      // The RAK13800 Ethernet image is a real hardware choice, separate from
+      // adaptive storage. Label it consistently for both sensor policies.
+      variant = "ethernet";
+    }
     if (sourceHardware === "Station_G2_logging") {
       variant = variant === "default"
         ? "rx-boosted"
@@ -512,6 +568,11 @@
     const lowerTarget = target.toLowerCase();
     return HIDDEN_PROFILE_HARDWARE.includes(profile.sourceHardware) ||
       HIDDEN_PROFILE_TARGETS.includes(target) ||
+      // SolarXiao room installations use their onboard external-QSPI recipe.
+      // Retain internal-only downloads for exact compatibility searches,
+      // including when a release has no matching QSPI image.
+      /^solarxiao_(?:30|33)s_room_server(?:_lora_ota_no_external_sensors)?(?:-(?:full|reduced)(?:-ota)?)?$/
+        .test(lowerTarget) ||
       (lowerTarget.includes("companion_radio_") &&
         /(?:^|[_-])(?:ps|femoff)(?=$|[_-])/.test(lowerTarget));
   }
@@ -571,11 +632,13 @@
       heltec_t096_repeater_bridge_rs232_lora_ota_no_external_sensors:
         "heltec_t096_repeater_lora_ota_no_external_sensors",
       rak_4631_repeater_bridge_rs232_serial1_lora_ota_no_external_sensors:
-        "rak_4631_repeater_lora_ota_no_external_sensors",
+        ["rak_4631_repeater_unified_lora_ota", "rak_4631_repeater_lora_ota_no_external_sensors"],
       rak_4631_repeater_bridge_rs232_serial2_lora_ota_no_external_sensors:
-        "rak_4631_repeater_lora_ota_no_external_sensors",
-      rak_4631_repeater_bridge_rs232_serial1: "rak_4631_repeater",
-      rak_4631_repeater_bridge_rs232_serial2: "rak_4631_repeater",
+        ["rak_4631_repeater_unified_lora_ota", "rak_4631_repeater_lora_ota_no_external_sensors"],
+      rak_4631_repeater_bridge_rs232_serial1:
+        ["rak_4631_repeater_unified_lora_ota", "rak_4631_repeater"],
+      rak_4631_repeater_bridge_rs232_serial2:
+        ["rak_4631_repeater_unified_lora_ota", "rak_4631_repeater"],
       promicro_repeater_bridge_rs232_serial1: "promicro_repeater",
       heltec_t114_without_display_repeater_bridge_rs232:
         "heltec_t114_without_display_repeater",
@@ -603,11 +666,19 @@
         combinedUsbBleKeys.has(key);
       const replacedTerminal = profile.role === "terminal" &&
         terminalReplacementKeys.has(key);
-      const rs232Replacement = mergedRs232Targets[
-        String(profile.target || "").toLowerCase()
-      ];
+      const target = String(profile.target || "").toLowerCase();
+      const sensorSuffix = (target.match(/-(?:full|reduced)$/) || [""])[0];
+      const baseTarget = sensorSuffix ? target.slice(0, -sensorSuffix.length) : target;
+      const rs232Replacement = mergedRs232Targets[baseTarget];
+      // Recommendations prefer the combined UART2 image on RAK4631. Exact
+      // Serial1 files remain in raw rows for existing GPS-free installations;
+      // this preference does not migrate their wiring or OTA identity.
+      // Preserve the exact sensor policy: a Full image does not replace a
+      // missing Reduced image, or an older unsuffixed compatibility image.
       const replacedRs232 = Boolean(rs232Replacement &&
-        targets.has(rs232Replacement));
+        [].concat(rs232Replacement).some(function (replacement) {
+          return targets.has(replacement + sensorSuffix);
+        }));
       return !(replacedAttachedTransport && fullKeys.has(key)) &&
         !replacedByUsbBle && !replacedTerminal && !replacedRs232;
     });
@@ -638,14 +709,237 @@
     });
   }
 
+  function stationG3SharedSlotProfile(profile) {
+    const controls = profile && profile.controls;
+    return Boolean(controls && controls.platform === "ESP32_PLATFORM" &&
+      controls.radioSlotAuto === true && controls.radioSlotFamily === "sx1262" &&
+      /^[0-9a-f]{40}$/.test(controls.radioSlotSource || "") &&
+      Array.isArray(profile.files) && profile.files.length > 0 &&
+      profile.files.every(function (file) {
+        const hash = String(file.name || "").match(/-([0-9a-f]{8,40})(?:-merged)?\.(?:bin|hex|uf2|zip)$/i);
+        return hash && controls.radioSlotSource.startsWith(hash[1].toLowerCase());
+      }));
+  }
+
+  function t114AutoDisplayProfile(profile) {
+    const controls = profile && profile.controls;
+    return Boolean(controls && controls.platform === "NRF52_PLATFORM" &&
+      controls.display === true && controls.displayAuto === true && controls.displayController === "st7789" &&
+      /^[0-9a-f]{40}$/.test(controls.displaySource || "") &&
+      /^heltec_t114_/i.test(profile.target || "") &&
+      Array.isArray(profile.files) && profile.files.length > 0 && profile.files.every(function (file) {
+        const hash = String(file.name || "").match(/-([0-9a-f]{8,40})\.(?:hex|uf2|zip)$/i);
+        return hash && controls.displaySource.startsWith(hash[1].toLowerCase());
+      }));
+  }
+
+  function t114HeadlessModemProfile(profile) {
+    return Boolean(profile && profile.role === "kiss" && profile.controls &&
+      profile.controls.platform === "NRF52_PLATFORM" && profile.controls.display === false &&
+      /^[0-9a-f]{40}$/.test(profile.controlsSource || "") && profile.files.length > 0 &&
+      profile.files.every(function (file) {
+        const hash = file.name.match(/-([0-9a-f]{8,40})\.(?:hex|uf2|zip)$/i);
+        return hash && profile.controlsSource.startsWith(hash[1].toLowerCase());
+      }));
+  }
+
+  function releaseBoundControl(profile, key) {
+    const controls = profile && profile.controls;
+    const source = controls && controls[key + "Source"];
+    return Boolean(controls && controls[key] === true && /^[0-9a-f]{40}$/.test(source || "") &&
+      Array.isArray(profile.files) && profile.files.length && profile.files.every(function (file) {
+        const hash = file.name.match(/-([0-9a-f]{8,40})(?:-merged)?\.(?:bin|hex|uf2|zip)$/i);
+        return hash && source.startsWith(hash[1].toLowerCase());
+      }));
+  }
+
+  function combinedPicoCompanion(profile) {
+    return Boolean(profile && profile.target === "PicoW_companion_radio" &&
+      profile.controls && profile.controls.platform === "RP2040_PLATFORM" &&
+      releaseBoundControl(profile, "combinedCompanion"));
+  }
+
+  function consolidationSuccessor(profile, candidate) {
+    if (!profile || !candidate || profile.role !== candidate.role) return false;
+    if (/^PicoW_companion_radio_(usb|ble|wifi)$/.test(profile.target)) {
+      return combinedPicoCompanion(candidate);
+    }
+    const muzi = /^muzi_base_(uno|duo)_superIO$/i.exec(profile.hardware);
+    if (muzi) {
+      return candidate.hardware.toLowerCase() === "muzi_base_" + muzi[1].toLowerCase() &&
+        isFullCompanion(candidate) && optionalAutoDisplayProfile(candidate);
+    }
+    if (profile.hardware === "LilyGo_T-Echo-Lite_non_shell") {
+      return candidate.hardware === "LilyGo_T-Echo-Lite" && isFullCompanion(candidate) && optionalAutoDisplayProfile(candidate);
+    }
+    if (profile.hardware === "heltec_rc32_without_display") {
+      return candidate.hardware === "heltec_rc32" && optionalAutoDisplayProfile(candidate) &&
+        (!profile.sensorProfile || profile.sensorProfile === candidate.sensorProfile);
+    }
+    if (profile.hardware === "heltec_v4_expansionkit" && ["repeater", "room"].includes(profile.role)) {
+      return candidate.hardware === "heltec_v4" && candidate.feature === profile.feature &&
+        candidate.controls && candidate.controls.platform === "ESP32_PLATFORM" &&
+        releaseBoundControl(candidate, "oledExpansionCompatible");
+    }
+    if (["heltec_v4_expansionkit_tft", "heltec_v4_3_expansionkit_tft"].includes(profile.hardware) && profile.role === "companion") {
+      return candidate.target === "heltec_v4_tft_companion_radio_full_femon" &&
+        isFullCompanion(candidate) && candidate.controls && candidate.controls.platform === "ESP32_PLATFORM" &&
+        releaseBoundControl(candidate, "tftExpansionCompatible");
+    }
+    if (profile.hardware === "heltec_v4_r8_tft_portrait" && ["repeater", "room"].includes(profile.role)) {
+      return candidate.hardware === "heltec_v4_r8_tft" && candidate.feature === profile.feature &&
+        candidate.controls && candidate.controls.platform === "ESP32_PLATFORM" &&
+        releaseBoundControl(candidate, "displayRotation");
+    }
+    return false;
+  }
+
+  function omitConsolidatedProfiles(profiles) {
+    return (profiles || []).filter(function (profile) {
+      return !profiles.some(function (candidate) { return consolidationSuccessor(profile, candidate); });
+    });
+  }
+
+  function optionalAutoDisplayProfile(profile) {
+    const controls = profile && profile.controls;
+    const target = String(profile && profile.target || "").toLowerCase();
+    const controller = /^heltec_rc32_(?!without_display_)/.test(target) ? "nv3001b"
+      : /^heltec_(?:wireless_tracker|tracker_v1_1)_/.test(target) ? "st7735"
+      : /^heltec_v4_r8_tft_/.test(target) ? "st7789"
+      : /^muzi_base_(?:uno|duo)_(?:superio_)?companion_radio_/.test(target) ? "sh1107"
+      : /^lilygo_t-echo-lite_(?:non_shell_)?(?:companion_radio_|repeater|room_server)/.test(target) ? "ssd1681" : "";
+    const platform = controller === "sh1107" || controller === "ssd1681" ? "NRF52_PLATFORM" : "ESP32_PLATFORM";
+    return Boolean(controller && controls && controls.platform === platform &&
+      controls.display === true && controls.displayAuto === true && controls.displayController === controller &&
+      /^[0-9a-f]{40}$/.test(controls.displaySource || "") &&
+      (!profile.controlsSource || controls.displaySource === profile.controlsSource) &&
+      Array.isArray(profile.files) && profile.files.length > 0 && profile.files.every(function (file) {
+        const hash = String(file.name || "").match(/-([0-9a-f]{8,40})(?:-merged)?\.(?:bin|hex|uf2|zip)$/i);
+        return hash && controls.displaySource.startsWith(hash[1].toLowerCase());
+      }));
+  }
+
+  function omitT114DisplayDuplicates(profiles) {
+    const families = new Map();
+    function role(profile) { return profile.role || parseTargetProfile(profile.target).role; }
+    function family(profile) { return profile.releaseFamily || profile.files[0].familyTag || ""; }
+    function qualified(profile) {
+      return /^heltec_t114_/i.test(profile.target || "") && !/_without_display_/i.test(profile.target) &&
+        (t114AutoDisplayProfile(profile) || t114HeadlessModemProfile(profile));
+    }
+    (profiles || []).forEach(function (profile) {
+      if (!qualified(profile)) return;
+      const key = role(profile);
+      const previous = families.get(key);
+      const date = String(profile.files[0].publishedAt || "");
+      const previousDate = previous && String(previous.files[0].publishedAt || "");
+      if (!previous || date > previousDate ||
+          (date === previousDate && profile.t114Preview && !previous.t114Preview)) {
+        families.set(key, profile);
+      }
+    });
+    return (profiles || []).filter(function (profile) {
+      if (!/^heltec_t114_/i.test(profile.target || "")) return true;
+      const replacement = families.get(role(profile));
+      // Recommend the newest qualified family for this role, including its
+      // real sensor/OTA choices. Historical screen-assumed and headless
+      // policies stay in raw rows, never renamed into a new OTA identity.
+      return !replacement || qualified(profile) && family(profile) === family(replacement);
+    });
+  }
+
+  function hardwareChoiceLabel(field, value, profiles, family) {
+    const matches = (profiles || []).filter(function (profile) {
+      return profile[field] === value;
+    });
+    if (value === "Station_G3_ESP32" && matches.length > 0 &&
+        matches.every(function (profile) {
+          return profile.hardware === "Station_G3_ESP32" && stationG3SharedSlotProfile(profile);
+        })) {
+      return "Station G3 ESP32 (automatic slot detection)";
+    }
+    if (String(value).toLowerCase() === "heltec_t114" && matches.length > 0 &&
+        matches.every(t114AutoDisplayProfile)) return "Heltec T114 (automatic screen detection)";
+    if (field === "hardware" && matches.length > 0 && matches.every(optionalAutoDisplayProfile)) {
+      return (family ? humanizeHardwareVariant(value, family) : humanizeHardware(value)) + " (automatic screen detection)";
+    }
+    return field === "hardware" && family
+      ? humanizeHardwareVariant(value, family) : humanizeHardware(value);
+  }
+
+  function omitStationG3SlotDuplicates(profiles) {
+    const successors = new Set((profiles || []).filter(stationG3SharedSlotProfile)
+      .map(function (profile) { return profile.target; }));
+    return (profiles || []).filter(function (profile) {
+      const target = String(profile.target || "");
+      const match = /^Station_G3_ESP32_r2_(repeater(?:_observer_mqtt)?|room_server(?:_observer_mqtt)?|sensor)((?:-(?:full|reduced|usb|wifi|logging|ota))*)$/.exec(target);
+      return !match || !successors.has("Station_G3_ESP32_" + match[1] + match[2]);
+    });
+  }
+
   function omitRakStorageProfilesWhenUnified(profiles) {
     const targets = new Set((profiles || []).map(function (profile) {
       return String(profile && profile.target || "").toLowerCase();
     }));
     return (profiles || []).filter(function (profile) {
       const target = String(profile && profile.target || "").toLowerCase();
-      const match = /^rak_(3401|4631)_repeater_(?:lora_ota_no_external_sensors|w25q16_lora_ota|rak15001_slot_c_lora_ota|rak13302_w25q16_lora_ota)$/.exec(target);
-      return !match || !targets.has("rak_" + match[1] + "_repeater_unified_lora_ota");
+      const match = /^rak_(3401|4631)_repeater_(?:lora_ota_no_external_sensors|w25q16_lora_ota|rak15001_slot_c_lora_ota|rak13302_w25q16_lora_ota)(-(?:full|reduced))?$/.exec(target);
+      return !match || !targets.has("rak_" + match[1] + "_repeater_unified_lora_ota" + (match[2] || ""));
+    });
+  }
+
+  function omitReplacedQspiProfiles(profiles) {
+    const qspiPairs = new Map();
+    (profiles || []).forEach(function (profile) {
+      const controls = profile.controls;
+      const target = String(profile.target || "").toLowerCase();
+      if (!controls || controls.platform !== "NRF52_PLATFORM" ||
+          profile.ota !== "lora-receiver" || !profile.sensorProfile ||
+          !controls.updateRequirements || !controls.updateRequirements.lora ||
+          controls.updateRequirements.lora.storage !== "external_qspi" ||
+          !target.endsWith("-" + profile.sensorProfile)) return;
+      const base = target.slice(0, -profile.sensorProfile.length - 1);
+      if (!qspiPairs.has(base)) qspiPairs.set(base, new Map());
+      qspiPairs.get(base).set(profile.sensorProfile, profile);
+    });
+    function qualifiedPair(base) {
+      const pair = qspiPairs.get(base);
+      if (!pair || !pair.has("full") || !pair.has("reduced")) return null;
+      return pair.get("full").controls.sensorProfileSource.toLowerCase() ===
+        pair.get("reduced").controls.sensorProfileSource.toLowerCase() ? pair : null;
+    }
+    return (profiles || []).filter(function (profile) {
+      const hardware = String(profile.hardware || "").toLowerCase();
+      const target = String(profile.target || "").toLowerCase();
+      // Keep supported roles in older releases until their exact QSPI pair
+      // is downloadable. A source-only recipe does not replace a download.
+      if (QSPI_ROOM_HARDWARE.includes(hardware) &&
+          /^_room_server(?:_lora_ota_no_external_sensors)?(?:-(?:full|reduced)(?:-ota)?)?$/
+            .test(target.slice(hardware.length)) &&
+          qualifiedPair(hardware + "_room_server_lora_ota")) return false;
+      if (hardware === "lilygo_t-echo-lite" &&
+          /^_repeater(?:_lora_ota_no_external_sensors)?(?:-(?:full|reduced)(?:-ota)?)?$/
+            .test(target.slice(hardware.length)) &&
+          qualifiedPair(hardware + "_repeater_lora_ota")) return false;
+      const pair = qualifiedPair(hardware + "_repeater");
+      if (!pair) return true;
+      if (QSPI_REPEATER_ALIAS_HARDWARE.includes(hardware) &&
+          /^_repeater_lora_ota_no_external_sensors(?:-(?:full|reduced)(?:-ota)?)?$/
+            .test(target.slice(hardware.length))) return false;
+      if (hardware === "xiao_nrf52" &&
+          /^xiao_nrf52_repeater_bridge_rs232(?:_lora_ota_no_external_sensors)?(?:-(?:full|reduced)(?:-ota)?)?$/.test(target)) {
+        // A filename or static UART flag cannot prove the merged image's
+        // runtime bridge control. Each qualified policy needs release-bound
+        // packaged control evidence for the same source as its sensor proof.
+        return !["full", "reduced"].every(function (policy) {
+          const controls = pair.get(policy).controls;
+          return controls.rs232 === true && controls.rs232Merged === true &&
+            typeof controls.rs232Source === "string" &&
+            /^[0-9a-f]{40}$/i.test(controls.rs232Source) &&
+            controls.rs232Source.toLowerCase() === controls.sensorProfileSource.toLowerCase();
+        });
+      }
+      return true;
     });
   }
 
@@ -668,10 +962,7 @@
   function applyMergedRak4631RepeaterCapabilities(profiles) {
     return (profiles || []).map(function (profile) {
       const target = String(profile && profile.target || "").toLowerCase();
-      if (
-        target !== "rak_4631_repeater" &&
-        target !== "rak_4631_repeater_lora_ota_no_external_sensors"
-      ) {
+      if (!/^rak_4631_repeater(?:_lora_ota_no_external_sensors|_unified_lora_ota)?(?:-(?:full|reduced))?$/.test(target)) {
         return profile;
       }
 
@@ -704,6 +995,11 @@
   }
 
   function applyReleaseRuntimeCapabilities(profile, controls) {
+    if (combinedPicoCompanion(profile)) {
+      profile.mode = "combined";
+      profile.variant = "default";
+      profile.connectionModes = ["combined", "usb", "ble", "wifi", "standard"];
+    }
     if (["none", "lora-receiver", "lora-source"].includes(controls.otaRole)) {
       profile.ota = controls.otaRole;
     }
@@ -847,25 +1143,27 @@
   }
 
   function buildCatalog(releases, controlData) {
-    const releaseSet = selectReleaseSet(releases);
+    const releaseSet = selectReleaseSet(releases, controlData);
     if (!releaseSet) {
       return { releaseSet: null, rows: [], profiles: [] };
     }
     const rows = flattenReleaseAssets(releaseSet);
     const firmwareRows = rows.map(function (row) {
-      return parseFirmwareAsset(row, releaseSet.familyTag);
+      return parseFirmwareAsset(row, row.familyTag);
     }).filter(Boolean);
     const grouped = new Map();
 
     firmwareRows.forEach(function (file) {
-      let profile = grouped.get(file.target);
+      const key = file.familyTag + ":" + file.target;
+      let profile = grouped.get(key);
       if (!profile) {
         profile = Object.assign(parseTargetProfile(file.target), {
           files: [],
           otaPackaged: false,
-          releaseFamily: releaseSet.familyTag,
+          releaseFamily: file.familyTag,
+          t114Preview: file.t114Preview,
         });
-        grouped.set(file.target, profile);
+        grouped.set(key, profile);
       }
       profile.files.push(file);
       profile.otaPackaged = profile.otaPackaged || file.otaPackaged;
@@ -880,8 +1178,25 @@
       profile.files.sort(function (a, b) {
         return a.name.localeCompare(b.name);
       });
+      if (profile.t114Preview) {
+        const metadata = controlsForRelease(controlData, profile.files[0].releaseTag);
+        profile.controls = metadata && metadata.profiles[profile.target];
+        profile.controlsSource = metadata && metadata.source;
+        if (profile.controls) applyReleaseRuntimeCapabilities(profile, profile.controls);
+      }
       return profile;
     }).filter(function (profile) {
+      if (profile.t114Preview) {
+        const metadata = controlsForRelease(controlData, profile.files[0].releaseTag);
+        const hashesMatch = metadata && profile.files.every(function (file) {
+          const hash = file.name.match(/-([0-9a-f]{8,40})\.(?:hex|uf2|zip)$/i);
+          return hash && metadata.source.startsWith(hash[1].toLowerCase());
+        });
+        if (!hashesMatch || String(profile.hardware).toLowerCase() !== "heltec_t114" ||
+            !profile.controls || profile.controls.platform !== "NRF52_PLATFORM" ||
+            !(t114AutoDisplayProfile(profile) && profile.controls.displaySource === metadata.source ||
+              profile.role === "kiss" && profile.controls.display === false)) return false;
+      }
       return !isHiddenLegacyProfile(profile);
     });
     const profiles = omitLegacyObserverCompatibilityProfiles(
@@ -905,12 +1220,14 @@
       return profile.hardware;
     })));
     profiles.forEach(function (profile) {
-      if (controlData && controlData.familyTag === releaseSet.familyTag &&
-          controlData.profiles && controlData.profiles[profile.target]) {
-        profile.controls = controlData.profiles[profile.target];
+      const metadata = profile.t114Preview ? controlsForRelease(controlData, profile.files[0].releaseTag) : controlData;
+      if (metadata && metadata.familyTag === profile.releaseFamily &&
+          metadata.profiles && metadata.profiles[profile.target]) {
+        profile.controls = metadata.profiles[profile.target];
+        profile.controlsSource = metadata.source;
         applyReleaseRuntimeCapabilities(profile, profile.controls);
         profile.migrationPackage = migrationPackageForProfile(
-          profile, controlData.partitionMigrations
+          profile, metadata.partitionMigrations
         );
         profile.migrationAsset = migrationAssetForProfile(profile, rows);
         if (isFullCompanion(profile) && profile.controls.mqtt &&
@@ -954,8 +1271,14 @@
 
     return {
       releaseSet: releaseSet,
-      rows: firmwareRows,
-      profiles: profiles,
+      rows: firmwareRows.filter(function (file) {
+        return !file.t114Preview || profiles.some(function (profile) {
+          return profile.t114Preview && profile.files.includes(file);
+        });
+      }),
+      // Recommendation filters retain original files and target identities in
+      // the raw catalog, including when a qualified successor replaces them.
+      profiles: omitConsolidatedProfiles(omitT114DisplayDuplicates(omitReplacedQspiProfiles(omitStationG3SlotDuplicates(profiles)))),
     };
   }
 
@@ -1011,6 +1334,29 @@
     return Array.from(new Set((profiles || []).flatMap(function (profile) {
       return profileFieldValues(profile, field);
     }).filter(Boolean)));
+  }
+
+  function explicitlyReduced(profiles, filters) {
+    return Boolean(filters && (filters.feature === "standard" ||
+      /(?:^|-)no-external-sensors(?:-|$)/.test(filters.variant || "")) &&
+      (profiles || []).some(function (profile) {
+        return profile.sensorProfile === "reduced" && profileMatchesFacets(profile, filters);
+      }));
+  }
+
+  function recommendedProfiles(profiles, filters, includeReduced) {
+    if (includeReduced || explicitlyReduced(profiles, filters)) return profiles || [];
+    const full = new Map((profiles || []).filter(function (profile) {
+      return profile.sensorProfile === "full" && profile.controls &&
+        /^[0-9a-f]{40}$/.test(profile.controls.sensorProfileSource || "");
+    }).map(function (profile) { return [profile.releaseFamily + ":" + profile.target, profile]; }));
+    return (profiles || []).filter(function (profile) {
+      if (profile.sensorProfile !== "reduced") return true;
+      const successor = full.get(profile.releaseFamily + ":" + profile.target.replace(/-reduced$/, "-full"));
+      // A lone Reduced image remains visible. This default never removes
+      // downloads, exact sensor policies or an unmatched compatibility route.
+      return !successor || successor.controls.sensorProfileSource !== profile.controls.sensorProfileSource;
+    });
   }
 
   // Keep the original URL facets, but select the correlated firmware
@@ -1195,6 +1541,7 @@
 
   function selectionUrl(url, filters, automaticChipFamily) {
     const result = new URL(url);
+    result.searchParams.delete("s");
     FACET_FIELDS.forEach(function (field) {
       result.searchParams.delete(field);
       if (filters[field]) result.searchParams.set(field, filters[field]);
@@ -1206,14 +1553,110 @@
     return result.href;
   }
 
+  function shortSelectionUrl(url, filters, automaticChipFamily) {
+    const result = new URL(url);
+    FACET_FIELDS.concat(["chipAuto", "s"]).forEach(function (field) {
+      result.searchParams.delete(field);
+    });
+    const parts = ["1"];
+    Object.keys(SHORT_SELECTION_FIELDS).forEach(function (key) {
+      const field = SHORT_SELECTION_FIELDS[key];
+      const value = filters[field];
+      if (!value || (field === "chipFamily" && automaticChipFamily) ||
+          (field === "hardwareFamily" && value === filters.hardware)) return;
+      // Dots delimit fields; escape them even though encodeURIComponent does not.
+      parts.push(key + encodeURIComponent(value).replace(/\./g, "%2E"));
+    });
+    if ((filters.hardwareFamily || filters.hardware) && !automaticChipFamily) {
+      parts.push("a0");
+    }
+    if (parts.length > 1) result.searchParams.set("s", parts.join("."));
+    return result.href;
+  }
+
+  function shortSelectionParams(params) {
+    const parts = params.get("s").split(".");
+    const result = new URLSearchParams();
+    if (params.getAll("s").length !== 1 || parts.shift() !== "1" || !parts.length) {
+      throw new Error("unsupported or incomplete short picker link");
+    }
+    const seen = new Set();
+    parts.forEach(function (part) {
+      const key = part.charAt(0);
+      if (seen.has(key) || (key !== "a" &&
+          !Object.prototype.hasOwnProperty.call(SHORT_SELECTION_FIELDS, key))) {
+        throw new Error("duplicate or unknown short picker field");
+      }
+      seen.add(key);
+      const value = decodeURIComponent(part.slice(1));
+      if (!value || (key === "a" && value !== "0" && value !== "1")) {
+        throw new Error("invalid short picker field");
+      }
+      result.set(key === "a" ? "chipAuto" : SHORT_SELECTION_FIELDS[key], value);
+    });
+    return result;
+  }
+
   function selectionFromUrl(url, profiles) {
-    const params = new URL(url).searchParams;
+    let params = new URL(url).searchParams;
+    if (params.has("s")) {
+      try {
+        // The versioned selection is authoritative over any legacy fields.
+        params = shortSelectionParams(params);
+      } catch (error) {
+        return { filters: {}, automaticChipFamily: false,
+          unavailable: ["short link: " + error.message] };
+      }
+    }
     const requested = {};
     const filters = {};
     const unavailable = [];
     FACET_FIELDS.forEach(function (field) {
       requested[field] = params.get(field) || "";
     });
+    [
+      ["heltec_rc32_without_display", "heltec_rc32", function (profile) { return optionalAutoDisplayProfile(profile); }],
+      ["heltec_v4_expansionkit", "heltec_v4", function (profile) { return ["repeater", "room"].includes(profile.role) && releaseBoundControl(profile, "oledExpansionCompatible"); }],
+      ["heltec_v4_r8_tft_portrait", "heltec_v4_r8_tft", function (profile) { return ["repeater", "room"].includes(profile.role) && releaseBoundControl(profile, "displayRotation"); }],
+      ["heltec_v4_expansionkit_tft", "heltec_v4_tft", function (profile) { return profile.target === "heltec_v4_tft_companion_radio_full_femon" && releaseBoundControl(profile, "tftExpansionCompatible"); }],
+      ["heltec_v4_3_expansionkit_tft", "heltec_v4_tft", function (profile) { return profile.target === "heltec_v4_tft_companion_radio_full_femon" && releaseBoundControl(profile, "tftExpansionCompatible"); }],
+      ["muzi_base_uno_superIO", "muzi_base_uno", function (profile) { return isFullCompanion(profile) && optionalAutoDisplayProfile(profile); }],
+      ["muzi_base_duo_superIO", "muzi_base_duo", function (profile) { return isFullCompanion(profile) && optionalAutoDisplayProfile(profile); }],
+      ["LilyGo_T-Echo-Lite_non_shell", "LilyGo_T-Echo-Lite", function (profile) { return isFullCompanion(profile) && optionalAutoDisplayProfile(profile); }],
+    ].forEach(function (alias) {
+      if (!profiles.some(function (profile) { return profile.hardware === alias[0] && (!requested.role || profile.role === requested.role); }) &&
+          profiles.some(function (profile) { return profile.hardware === alias[1] && alias[2](profile) && (!requested.role || profile.role === requested.role); })) {
+        ["hardware", "hardwareFamily"].forEach(function (field) {
+          if (requested[field] === alias[0]) requested[field] = alias[1];
+        });
+      }
+    });
+    if (requested.hardware === "PicoW" && requested.variant === "radio" && profiles.some(combinedPicoCompanion)) {
+      requested.variant = "default";
+    }
+    if (!profiles.some(function (profile) {
+      return String(profile.hardware).toLowerCase() === "heltec_t114_without_display" &&
+        (!requested.role || profile.role === requested.role);
+    }) && profiles.some(function (profile) {
+      return String(profile.hardware).toLowerCase() === "heltec_t114" && t114AutoDisplayProfile(profile) &&
+        (!requested.role || profile.role === requested.role);
+    })) {
+      ["hardware", "hardwareFamily"].forEach(function (field) {
+        if (String(requested[field]).toLowerCase() === "heltec_t114_without_display") requested[field] = "Heltec_t114";
+      });
+    }
+    if (!profiles.some(function (profile) {
+          return profile.hardware === "Station_G3_ESP32_r2" &&
+            (!requested.role || profile.role === requested.role);
+        }) &&
+        profiles.some(function (profile) {
+          return profile.hardware === "Station_G3_ESP32" && stationG3SharedSlotProfile(profile) &&
+            (!requested.role || profile.role === requested.role);
+        })) {
+      ["hardware", "hardwareFamily"].forEach(function (field) {
+        if (requested[field] === "Station_G3_ESP32_r2") requested[field] = "Station_G3_ESP32";
+      });
+    }
     // Handwritten links may specify just the exact hardware variant.
     if (requested.hardware && !requested.hardwareFamily) {
       const profile = profiles.find(function (item) {
@@ -1431,6 +1874,90 @@
       : { url: fallback, label: "Check partition-expansion availability" };
   }
 
+  function boardNotes(profile) {
+    if (!profile || typeof profile.target !== "string") return [];
+    const identity = parseTargetProfile(profile.target);
+    // Match the exact result, not its broad hardware-family filter. A TFT,
+    // legacy UART or different role must not inherit another image's claims.
+    if (identity.hardware !== profile.hardware || identity.role !== profile.role) return [];
+    const target = profile.target;
+    const info = profile.controls || {};
+    const notes = [];
+    if (combinedPicoCompanion(profile)) {
+      notes.push("This Companion image includes USB, Bluetooth LE and WiFi together. Separate transport firmware is unnecessary; this image does not add a wireless firmware updater.");
+    }
+    if (releaseBoundControl(profile, "oledExpansionCompatible")) {
+      notes.push("The same OLED firmware supports the base Heltec V4 and its OLED expansion kit. Existing expansion-kit OTA identities still require their exact historical update or a local USB migration.");
+    }
+    if (releaseBoundControl(profile, "tftExpansionCompatible")) {
+      notes.push("This Full Companion supports the matching Heltec V4 TFT base and TFT expansion kit. Keep your saved settings; changing an older expansion-kit target to this canonical target requires local USB installation.");
+    }
+    if (releaseBoundControl(profile, "displayRotation")) {
+      notes.push("Portrait and landscape use the same firmware. Choose display.rotation at runtime; the stock expansion kit has no orientation sensor.");
+    }
+    if (t114AutoDisplayProfile(profile)) {
+      notes.push("One T114 image detects the supported ST7789 screen at startup and also runs without a screen.");
+      notes.push("Switching from an older without_display image requires a local USB update; do not use a different target's LoRa OTA package. Keep your existing identity and settings; no erase is required.");
+    }
+    if (optionalAutoDisplayProfile(profile)) {
+      notes.push("This image detects the manufacturer's optional screen at startup and also runs without that screen. Power the board off before attaching or removing the display.");
+    }
+    if (identity.hardware === "Station_G3_ESP32" && stationG3SharedSlotProfile(profile)) {
+      notes.push("Automatically selects physical radio slot 1 or 2. Use this same image for either slot.");
+    }
+    const rak = /^RAK_(3401|4631)_repeater_unified_lora_ota(?:-(?:full|reduced)(?:-ota)?)?$/i.exec(target);
+    const lora = info.updateRequirements && info.updateRequirements.lora;
+    if (rak && info.platform === "NRF52_PLATFORM" && profile.ota === "lora-receiver" &&
+        ["full", "reduced"].includes(profile.sensorProfile) && lora &&
+        lora.storage === "adaptive_internal_or_external_qspi") {
+      notes.push("This unified repeater chooses supported internal or external OTA storage automatically. Full and Reduced select optional sensor drivers, not a storage module. Exact external-flash wiring and the matching OTAFIX bootloader are still required.");
+      notes.push("Internal flash accepts in-place deltas only; supported external QSPI storage accepts full images and in-place deltas. The update package must match the installed target and storage layout.");
+      if (rak[1] === "4631" && info.rs232 === true && info.gps === true) {
+        notes.push("Use UART2 for new RS-232 installations. UART1 remains reserved for potentially powered GPS hardware, and header-connected W25 flash also occupies its pins. Legacy GPS-free Serial1 images remain exact-filename compatibility downloads for existing wiring; selecting the unified image does not migrate wiring or OTA identity.");
+        notes.push("RAK4631 Ethernet requires its separate exact hardware image; it is not a storage choice in this unified repeater.");
+      }
+    }
+    if (/^RAK_4631_repeater_bridge_rs232_serial1(?:_lora_ota_no_external_sensors)?(?:-(?:full|reduced))?$/i.test(target) &&
+        info.platform === "NRF52_PLATFORM" && info.rs232 === true && info.gps === false) {
+      notes.push("This legacy GPS-free Serial1 bridge uses UART1. Do not connect powered UART GPS or header-connected W25 flash to the same pins. Prefer the unified UART2 image for new wiring, but changing images does not migrate an existing installation's wiring or OTA identity.");
+    }
+    if (/^RAK_4631_repeater_ethernet(?:-(?:full|reduced)(?:-ota)?)?$/i.test(target) &&
+        info.platform === "NRF52_PLATFORM" && profile.mode === "ethernet") {
+      notes.push("This is the separate RAK4631 Ethernet hardware image, not the unified internal/external-storage repeater. Use its exact Ethernet hardware and update target.");
+    }
+    if (/^LilyGo_TLora_V2_1_1_6_repeater(?:_observer_mqtt_?)?-full-(?:usb-wifi|logging)$/i.test(target) &&
+        info.platform === "ESP32_PLATFORM" && profile.feature === "full" && info.espnowBridge === true) {
+      const observer = /_observer_mqtt/i.test(target);
+      if (!observer && info.rs232 === true && info.mqtt === false) {
+        notes.push("T-LoRa V2.1 retains two RAM-safe Full images: UART plus ESP-NOW, or MQTT plus ESP-NOW. This image is the UART/RS-232 choice; it does not include direct Wi-Fi MQTT. Select the separate MQTT observer image if that is needed.");
+      } else if (observer && info.mqtt === true && info.rs232 === false) {
+        notes.push("T-LoRa V2.1 retains two RAM-safe Full images: UART plus ESP-NOW, or MQTT plus ESP-NOW. This image is the MQTT observer choice; it does not include the UART/RS-232 bridge. Select the separate UART image if that is needed.");
+      }
+    }
+    if (/^(?:Heltec_v3|Heltec_WSL3|RAK_3112)_repeater(?:_observer_mqtt_?)?-full-usb-wifi$/i.test(target) &&
+        info.platform === "ESP32_PLATFORM" && profile.feature === "full" &&
+        info.rs232 === true && info.mqtt === true && info.espnowBridge === true) {
+      notes.push("This Full MQTT repeater also retains independent RS-232 and ESP-NOW bridges. Use the separate restore-settings controls for each transport; the UART is not MQTT's historical bridge.enabled alias.");
+    }
+    const v4 = /^heltec_v4(?:_3)?(?:_expansionkit)?(?:_r8)?(?:_tft)?$/i.test(profile.hardware);
+    if (v4 && info.platform === "ESP32_PLATFORM" && info.primaryEspnow === false) {
+      if (isFullCompanion(profile) && /^heltec_v4(?:_[a-z0-9]+)*_companion_radio_full(?:_fem(?:on|off))?$/i.test(target)) {
+        notes.push("This Full Companion is LoRa-primary, not the LoRa/ESP-NOW repeater gateway role. For a gateway, choose this exact board's Full repeater when its ESP-NOW bridge is offered.");
+      } else if (profile.role === "repeater" && profile.feature === "full" && info.espnowBridge === true &&
+          /^heltec_v4(?:_[a-z0-9]+)*_repeater(?:_observer_mqtt_?)?-full-(?:usb-wifi|logging)$/i.test(target)) {
+        notes.push("This Full repeater keeps LoRa as its primary mesh radio and can bridge to ESP-NOW when that runtime bridge is enabled. Use the matching restore-settings controls below; the Full Companion is a different role, not the repeater gateway.");
+      }
+    }
+    if (profile.hardware === "wio-e5" && profile.role === "repeater" &&
+        (!info.platform || info.platform === "STM32_PLATFORM") &&
+        /^wio-e5(?:_|-)repeater(?:_bridge_rs232)?$/i.test(target)) {
+      // These exact historical recipes are intentionally separate; do not
+      // infer the RS-232 capability for an ordinary or Mini Companion image.
+      notes.push("Wio-E5 is a flash-capacity exception with separate ordinary repeater and RS-232 bridge images. For RS-232 wiring, choose the exact bridge image rather than assuming the ordinary repeater includes that bridge.");
+    }
+    return notes;
+  }
+
   function installSteps(profile, kind) {
     const common = [
       "Verify that the hardware name and every displayed variant match the physical board.",
@@ -1618,11 +2145,11 @@
       section("Companion tempradio2: transmit on both", [
         { label: "Transmit on both", commands: ["set radio2.cross on"],
           text: "After setting tempradio2 to rxtx, run this to send new messages on both radio and tempradio2. rxtx enables transmission on the second profile; cross on enables copying between the two profiles." },
-        { label: "Default isolation", commands: ["set radio2.cross auto"],
-          text: "Keep ordinary local messages on radio and local LoRa OTA traffic on tempradio2. With auto, a permanent and a temporary profile remain isolated." },
+        { label: "Default isolation", commands: ["set radio2.cross off"],
+          text: "Keep ordinary local messages on radio and local LoRa OTA traffic on tempradio2. Off disables copying between profiles, including two permanent profiles." },
         { label: "Check", commands: ["get tempradio2", "get radio2.cross", "get radio2.status"],
           text: "Confirm tempradio2 is active in rxtx mode. TX=a,b reports primary and secondary transmit counts." },
-      ], "radio2.cross is saved and stays set after tempradio2 expires or the node reboots. Turning it on also allows OTA traffic to cross profiles. RX-only mode still prevents transmission on the second profile. Use Default isolation to restore auto when needed.");
+      ], "radio2.cross is saved and stays set after tempradio2 expires or the node reboots. Turning it on also allows OTA traffic to cross profiles. RX-only mode still prevents transmission on the second profile. Use Default isolation to restore off when needed.");
     }
     if (full || infrastructure) {
       toggle("Device power saving", "set powersaving", "get powersaving",
@@ -1667,6 +2194,11 @@
     if (profile.role === "repeater") toggle("Repeat mesh traffic", "set repeat", "get repeat");
     if (info.rs232 && infrastructure) {
       const mode = chosen.mode;
+      const uartNote = /^RAK_4631_repeater_unified_lora_ota-(?:full|reduced)$/i.test(profile.target) && profile.sensorProfile
+        ? "Unified RAK4631 uses UART2 for the RS-232 bridge; select it with set bridge.uart 2 while the bridge is stopped. GPS safety guards reserve UART1 even when no GPS was detected. Use UART2 for new installations. Legacy Serial1 downloads remain available by exact filename for existing GPS-free wiring."
+        : /^RAK_4631_repeater_bridge_rs232_serial1(?:_lora_ota_no_external_sensors)?-(?:full|reduced)$/i.test(profile.target)
+          ? "This GPS-free Serial1 image uses UART1. Do not fit a powered UART GPS or header-connected W25 flash on the same UART1 pins. Use the unified UART2 image when those pins are occupied."
+        : "Use the UART and pin map for this exact board. Canonical GPS-enabled RAK4631 uses UART2; select it with set bridge.uart 2 while the bridge is stopped. UART1 needs a compatible GPS-free image.";
       // MQTT images keep the historical bridge.enabled ESP-NOW alias.
       // Their independently saved UART uses the transport-specific controls.
       const uartSetting = info.mqtt ? "rs232.enabled" : "bridge.enabled";
@@ -1677,7 +2209,7 @@
         { label: "Set baud", commands: ["set " + uartSetting + " off", "set bridge.baud 115200", "set " + uartSetting + " on"] },
       ].sort(function (a, b) {
         return mode === "standard" ? Number(b.label === "Off") - Number(a.label === "Off") : 0;
-      }), "Use the UART and pin map for this exact board. Canonical GPS-enabled RAK4631 uses UART2; select it with set bridge.uart 2 while the bridge is stopped. UART1 needs a compatible GPS-free image.");
+      }), uartNote);
     }
     if (info.espnowBridge && infrastructure) {
       // Combined images need the transport-specific switch: bridge.enabled
@@ -1711,7 +2243,7 @@
     if (infrastructure && (info.updateMethods || []).includes("bluetooth")) section("Bluetooth firmware update", [
       { label: "Start DFU", commands: ["start ota"], text: "Use the exact board's application DFU ZIP with the matching Bluetooth-capable bootloader." },
     ]);
-    if (full && info.display) section("Display rotation", [0, 90, 180, 270].map(function (angle) {
+    if ((full || releaseBoundControl(profile, "displayRotation")) && info.display) section("Display rotation", [0, 90, 180, 270].map(function (angle) {
       return { label: angle === 0 ? "Board default" : angle + " degrees", commands: ["set display.rotation " + angle] };
     }), "Use on supported displays; 0 restores the board default. Check with get display.rotation.");
     return sections;
@@ -1838,7 +2370,7 @@
     card.className = "firmware-picker-card";
     card.appendChild(createElement(
       "h3",
-      humanizeHardware(profile.hardware) + " - " +
+      hardwareChoiceLabel("hardware", profile.hardware, [profile]) + " - " +
         (ROLE_LABELS[profile.role] || profile.role)
     ));
 
@@ -1886,6 +2418,17 @@
     }
     card.appendChild(actions);
 
+    const notes = boardNotes(profile);
+    if (notes.length) {
+      const details = createElement("details");
+      details.className = "firmware-picker-board-notes";
+      details.appendChild(createElement("summary", "Board notes"));
+      notes.forEach(function (text) {
+        details.appendChild(createElement("p", text));
+      });
+      card.appendChild(details);
+    }
+
     const steps = createElement("div");
     steps.className = "firmware-picker-steps";
     steps.appendChild(createElement("strong", "What to do"));
@@ -1927,6 +2470,20 @@
     let bootloaderCatalog = null;
     let bootloaderNotice = "Loading the latest bootloader downloads...";
     const filters = {};
+    let showReducedSensors = true;
+    const sensorOptions = createElement("details");
+    sensorOptions.className = "firmware-picker-chip-family firmware-picker-wide";
+    sensorOptions.hidden = true;
+    sensorOptions.appendChild(createElement("summary", "Advanced: sensor compatibility"));
+    const sensorLabel = createElement("label");
+    const sensorToggle = createElement("input");
+    sensorToggle.type = "checkbox";
+    sensorToggle.checked = showReducedSensors;
+    sensorLabel.appendChild(sensorToggle);
+    sensorLabel.appendChild(document.createTextNode(" Show Reduced sensor images"));
+    sensorOptions.appendChild(sensorLabel);
+    sensorOptions.appendChild(createElement("p", "Full sensor support is recommended. Reduced images omit optional drivers and remain available for existing update routes or recovery."));
+    form.insertBefore(sensorOptions, form.querySelector(".firmware-picker-form-actions"));
     let automaticChipFamily = false;
     const groupPrefix = "firmware-picker-" + (++pickerInstanceCount);
     if (resultLink) {
@@ -1935,7 +2492,7 @@
     }
 
     function updateSelectionUrl() {
-      const url = selectionUrl(global.location.href, filters, automaticChipFamily);
+      const url = shortSelectionUrl(global.location.href, filters, automaticChipFamily);
       if (url !== global.location.href) {
         try {
           global.history.replaceState(global.history.state, "", url);
@@ -1945,9 +2502,11 @@
         }
       }
       if (shareLink) {
-        const base = global.location.protocol === "file:"
-          ? root.getAttribute("data-share-url") : url;
-        shareLink.href = selectionUrl(base || url, filters, automaticChipFamily);
+        const base = new URL(global.location.protocol === "file:"
+          ? root.getAttribute("data-share-url") || url : url);
+        base.pathname = base.pathname.replace(/\/firmware_picker\/$/, "/p/");
+        if (global.location.protocol === "file:") base.hash = global.location.hash;
+        shareLink.href = shortSelectionUrl(base.href, filters, automaticChipFamily);
         shareLink.hidden = false;
       }
       if (copyLinkButton) copyLinkButton.disabled = false;
@@ -1970,25 +2529,39 @@
     if (copyLinkButton && shareLink) copyLinkButton.addEventListener("click", function () {
       const copy = global.navigator.clipboard && global.navigator.clipboard.writeText;
       if (!copy) {
-        linkStatus.textContent = "Copy the address bar, or copy the 'Link to these settings' link.";
+        linkStatus.textContent = "Copy the address bar, or copy the 'Short link to these settings' link.";
         return;
       }
       global.navigator.clipboard.writeText(shareLink.href).then(function () {
         linkStatus.textContent = "Link copied.";
       }).catch(function () {
-        linkStatus.textContent = "Copy the address bar, or copy the 'Link to these settings' link.";
+        linkStatus.textContent = "Copy the address bar, or copy the 'Short link to these settings' link.";
       });
     });
     global.addEventListener("popstate", restoreSelectionUrl);
 
     function matchingProfiles(ignoredField) {
-      return catalog.profiles.filter(function (profile) {
+      return selectionProfiles().filter(function (profile) {
         return profileMatchesFacets(profile, filters, ignoredField);
       });
     }
 
+    function selectionProfiles() {
+      return recommendedProfiles(catalog.profiles, filters, showReducedSensors);
+    }
+
+    sensorToggle.addEventListener("change", function () {
+      showReducedSensors = sensorToggle.checked;
+      if (!showReducedSensors && explicitlyReduced(catalog.profiles, filters)) {
+        PROFILE_FIELDS.forEach(function (field) { filters[field] = ""; });
+      }
+      refreshFacets();
+    });
+
     function setSelectOptions(select, field, values, selected) {
       select.replaceChildren();
+      const hardwareProfiles = field === "hardware" || field === "hardwareFamily"
+        ? matchingProfiles(field) : [];
       const placeholders = {
         chipFamily: "Any chip family - skip this filter",
         hardwareFamily: "Any hardware",
@@ -2002,8 +2575,8 @@
       values.slice().sort(function (a, b) {
         return optionSort(field, a, b);
       }).forEach(function (value) {
-        const label = field === "hardware"
-          ? humanizeHardwareVariant(value, filters.hardwareFamily)
+        const label = field === "hardware" || field === "hardwareFamily"
+          ? hardwareChoiceLabel(field, value, hardwareProfiles, filters.hardwareFamily)
           : labelFor(field, value, filters.hardware || filters.hardwareFamily);
         const option = createElement("option", label);
         option.value = value;
@@ -2014,12 +2587,14 @@
     }
 
     function setRadioOptions(container, field, values, selected) {
+      const hardwareProfiles = field === "hardware" || field === "hardwareFamily"
+        ? matchingProfiles(field) : [];
       const options = [{ value: "", label: "Any" }].concat(
         values.slice().sort(function (a, b) {
           return optionSort(field, a, b);
         }).map(function (value) {
-          return { value: value, label: field === "hardware"
-            ? humanizeHardwareVariant(value, filters.hardwareFamily)
+          return { value: value, label: field === "hardware" || field === "hardwareFamily"
+            ? hardwareChoiceLabel(field, value, hardwareProfiles, filters.hardwareFamily)
             : labelFor(field, value, filters.hardware || filters.hardwareFamily) };
         })
       );
@@ -2045,7 +2620,7 @@
         hint.id = groupPrefix + "-" + field + "-hint";
         fieldset.insertBefore(hint, container);
       }
-      const same = choicesUseSameFirmware(catalog.profiles, filters, field, options);
+      const same = choicesUseSameFirmware(selectionProfiles(), filters, field, options);
       badge.hidden = !same;
       hint.hidden = !same;
       hint.textContent = same ? "These choices do not narrow the firmware builds." +
@@ -2074,7 +2649,7 @@
         ignored.push("chipFamily");
       }
       return facetValues(
-        catalog.profiles,
+        selectionProfiles(),
         filters,
         field,
         ignored
@@ -2126,13 +2701,19 @@
       FACET_FIELDS.forEach(function (field) {
         setControlOptions(field, valuesForField(field));
       });
-      const profileChoices = firmwareProfileChoices(catalog.profiles, filters);
+      const selectedProfiles = selectionProfiles();
+      sensorOptions.hidden = !catalog.profiles.some(function (profile) {
+        return profile.sensorProfile === "reduced" && profileMatchesFacets(profile, filters, PROFILE_FIELDS);
+      });
+      sensorToggle.checked = showReducedSensors || explicitlyReduced(catalog.profiles, filters);
+      if (sensorToggle.checked) sensorOptions.open = true;
+      const profileChoices = firmwareProfileChoices(selectedProfiles, filters);
       const profileControl = controls.firmwareProfile;
       renderRadioChoices(profileControl, [{ value: "", label: "Any" }].concat(profileChoices),
         firmwareProfileValue(filters), groupPrefix + "-firmwareProfile", "firmwareProfile");
       profileControl.closest("fieldset").disabled = profileChoices.length === 0;
       setRefinementHint(profileControl, "firmwareProfile", profileChoices);
-      const requirements = selectionRequirements(catalog.profiles, filters);
+      const requirements = selectionRequirements(selectedProfiles, filters);
       ["logging", "firmwareProfile", "mode", "install"].forEach(function (field) {
         const control = controls[field];
         if (control) control.closest("fieldset").hidden = requirements.hiddenFields.includes(field);
@@ -2162,7 +2743,7 @@
       result.hidden = true;
       missing.hidden = true;
       resultList.replaceChildren();
-      const requirements = selectionRequirements(catalog.profiles, filters);
+      const requirements = selectionRequirements(selectionProfiles(), filters);
       const missingFields = requirements.missingFields;
       const cardOptions = {
         runtimeFields: requirements.hiddenFields,
@@ -2175,7 +2756,7 @@
       };
       const matches = matchingProfiles();
       if (feedback) {
-        const progress = selectionProgress(catalog.profiles,
+        const progress = selectionProgress(selectionProfiles(),
           Object.assign({}, filters, { install: requirements.installKind }));
         feedback.hidden = false;
         feedback.dataset.state = progress.state;
@@ -2280,7 +2861,7 @@
           actions.appendChild(link);
         });
         content.appendChild(actions);
-        content.appendChild(createElement("p", "UF2 updates an existing compatible bootloader. The DFU ZIP includes SoftDevice and bootloader; HEX is for SWD installation or recovery. Application firmware files do not install a bootloader. Follow the release's migration instructions if your installed identity needs a recovery bridge."));
+        content.appendChild(createElement("p", "UF2 updates an existing compatible bootloader. The DFU ZIP includes SoftDevice and bootloader; HEX is for SWD installation or recovery. Ordinary application firmware preserves the installed bootloader. Separate with-bootloader firmware checks its embedded exact-board update after startup. Follow the release's migration instructions if your installed identity needs a recovery bridge."));
       } else if (bootloaderCatalog) {
         const unavailable = unavailableBootloaderForHardware(bootloaderCatalog, hardware, chip);
         content.appendChild(createElement("p", unavailable ?
@@ -2361,6 +2942,8 @@
       event.preventDefault();
       if (!catalog.profiles.length) return;
       automaticChipFamily = false;
+      showReducedSensors = true;
+      sensorOptions.open = false;
       if (linkStatus) linkStatus.textContent = "";
       FACET_FIELDS.forEach(function (field) {
         filters[field] = "";
@@ -2476,6 +3059,14 @@
     omitTransportsReplacedByFull: omitTransportsReplacedByFull,
     omitLegacyObserverCompatibilityProfiles:
       omitLegacyObserverCompatibilityProfiles,
+    omitStationG3SlotDuplicates: omitStationG3SlotDuplicates,
+    t114AutoDisplayProfile: t114AutoDisplayProfile,
+    combinedPicoCompanion: combinedPicoCompanion,
+    releaseBoundControl: releaseBoundControl,
+    omitConsolidatedProfiles: omitConsolidatedProfiles,
+    recommendedProfiles: recommendedProfiles,
+    optionalAutoDisplayProfile: optionalAutoDisplayProfile,
+    omitT114DisplayDuplicates: omitT114DisplayDuplicates,
     omitTransportsReplacedByDualCdcFull:
       omitTransportsReplacedByFull,
     omitNrf52TransportsReplacedByFull:
@@ -2496,6 +3087,7 @@
     choicesUseSameFirmware: choicesUseSameFirmware,
     selectionRequirements: selectionRequirements,
     selectionUrl: selectionUrl,
+    shortSelectionUrl: shortSelectionUrl,
     selectionFromUrl: selectionFromUrl,
     canonicalAsset: canonicalAsset,
     resolveProfileAssets: resolveProfileAssets,
@@ -2503,12 +3095,15 @@
     runtimeDirections: runtimeDirections,
     runtimePanelDirections: runtimePanelDirections,
     renderRuntimeDirections: renderRuntimeDirections,
+    renderProfileCard: renderProfileCard,
+    boardNotes: boardNotes,
     installSteps: installSteps,
     migrationReleaseUrl: migrationReleaseUrl,
     migrationPackageForProfile: migrationPackageForProfile,
     migrationAssetForProfile: migrationAssetForProfile,
     migrationLink: migrationLink,
     humanizeHardware: humanizeHardware,
+    hardwareChoiceLabel: hardwareChoiceLabel,
     humanizeVariant: humanizeVariant,
     labelFor: labelFor,
     formatBytes: formatBytes,

@@ -1,15 +1,54 @@
 #include "MyMesh.h"
+
+#if FLOOD_ADVERT_RTC_FAST_SLOTS
+alignas(4) RTC_FAST_ATTR static mesh::FloodAdvertLimiter::Entry
+    repeater_rtc_advert_fast[FLOOD_ADVERT_RTC_FAST_SLOTS];
+#endif
+#if FLOOD_ADVERT_RTC_SLOW_SLOTS
+alignas(4) RTC_SLOW_ATTR static mesh::FloodAdvertLimiter::Entry
+    repeater_rtc_advert_slow[FLOOD_ADVERT_RTC_SLOW_SLOTS];
+#endif
+#if FLOOD_ADVERT_RTC_FAST_SLOTS || FLOOD_ADVERT_RTC_SLOW_SLOTS
+mesh::FloodAdvertLimiter::Entry* repeaterRtcAdvertFastBank() {
+#if FLOOD_ADVERT_RTC_FAST_SLOTS
+  return repeater_rtc_advert_fast;
+#else
+  return nullptr;
+#endif
+}
+mesh::FloodAdvertLimiter::Entry* repeaterRtcAdvertSlowBank() {
+#if FLOOD_ADVERT_RTC_SLOW_SLOTS
+  return repeater_rtc_advert_slow;
+#else
+  return nullptr;
+#endif
+}
+#endif
+#include <helpers/DefaultPasswordWarning.h>
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) \
+    && HELTEC_TFT_RUNTIME_ROTATION == 1
+#include <helpers/ui/DisplayRotationSettings.h>
+#endif
 #if defined(ESP32_PLATFORM)
 #include <helpers/esp32/BootFileSystem.h>
-#if defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+#include <helpers/WiFiNetworkPowerPolicy.h>
+#if defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_UDP_BRIDGE) \
     || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))
 #include <WiFi.h>
 #include <esp_wifi.h>
 #endif
 #endif
+#if defined(WITH_UDP_BRIDGE)
+#include <helpers/esp32/WiFiCredentials.h>
+#include <helpers/esp32/WiFiStationPolicy.h>
+#endif
 #include <helpers/UsbLogging.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <helpers/HilStartupTrace.h>
 #include <helpers/FileRead.h>
+#if MESH_ENABLE_FLEET_CONTROL
+#include <helpers/FleetLocation.h>
+#endif
 #if MESH_ENABLE_TELEMETRY_HISTORY
 #include <helpers/FilePresence.h>
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
@@ -24,10 +63,12 @@
 #include <new>       // std::nothrow (heap-allocated flood rule table)
 #include <stdlib.h>  // for qsort()
 #include <helpers/CLICommandUtils.h>
+#include <helpers/FloodCommandAliases.h>
 #if defined(NRF52_POWER_MANAGEMENT)
 #include <helpers/NRF52VoltagePolicy.h>
 #endif
 #include <helpers/ClientACLCLI.h>
+#include <helpers/GuestCLI.h>
 #include <helpers/ClientACLResponse.h>
 #include <helpers/ClockSyncUtils.h>
 #include <helpers/ClientLoginPersistence.h>
@@ -37,6 +78,7 @@
 #include <helpers/FloodFilterPolicy.h>
 #include <helpers/FloodRuleCLI.h>
 #include <helpers/LazyPersistence.h>
+#include <helpers/PowerManagementUtils.h>
 #include <helpers/RegionNameUtils.h>
 #if MESH_PACKET_LOGGING
 #include <helpers/SerialPacketLog.h>
@@ -182,6 +224,8 @@ static_assert(mesh::HostCliBridge::REMOTE_REPLY_MAX
 #define FLOOD_CHANNEL_SCOPE_REQUIRE_FILE "/flood_ch_req"
 #define FLOOD_CHANNEL_SCOPE_REQUIRE_TEMP_FILE "/flood_ch_req.tmp"
 #define FLOOD_GROUP_MODERATION_FILE   "/flood_grp_mod"
+#define FLOOD_GROUP_MODERATION_TEMP_FILE "/flood_grp_mod.tmp"
+#define FLOOD_GROUP_MODERATION_BACKUP_FILE "/flood_grp_mod.bak"
 #define CLOCK_SYNC_PREFS_FILE         "/clock_sync"
 #define DEFAULT_WARDRIVING_CHANNEL       "#wardriving"
 static const char FLOOD_PACKET_FILTER_USAGE[] =
@@ -221,12 +265,15 @@ static const char FLOOD_CHANNEL_SCOPE_USAGE[] =
 #define TELEMETRY_HISTORY_TX_PREFS_FILE "/telemetry_tx"
 static const uint64_t TELEMETRY_HISTORY_TX_RETRY_MILLIS =
     30ULL * 60ULL * 1000ULL;
-static const uint64_t TELEMETRY_HISTORY_TX_PACKET_SPACING_MILLIS = 2000ULL;
+static const uint64_t TELEMETRY_HISTORY_TX_PACKET_SPACING_MILLIS = 90000ULL;
 static const uint8_t TELEMETRY_HISTORY_TX_DEFAULT_DAYS = 2U;
 static const uint8_t TELEMETRY_HISTORY_TX_MAX_DAYS = 30U;
 static const uint8_t TELEMETRY_HISTORY_TX_TEMPERATURE = 1U;
 static const uint8_t TELEMETRY_HISTORY_TX_VOLTAGE = 2U;
 static const uint8_t TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE = 4U;
+static const uint8_t TELEMETRY_HISTORY_TX_NOISE = 8U;
+static const uint8_t TELEMETRY_HISTORY_TX_NOISE2 = 16U;
+static const uint8_t TELEMETRY_HISTORY_TX_ALL_TYPES = 31U;
 #endif
 
 #define CLOCK_SYNC_VALID_YEARS 10
@@ -476,21 +523,6 @@ static bool verifyFloodSettingsWrite(FILESYSTEM* fs, const char* filename,
   return hash == expected_hash;
 }
 
-static uint8_t batteryPercentFromMilliVolts(uint16_t batt_mv) {
-#if defined(NRF52_POWER_MANAGEMENT)
-  return mesh::power::configuredBatteryPercent(batt_mv);
-#else
-  const int min_mv = BATT_MIN_MILLIVOLTS;
-  const int max_mv = BATT_MAX_MILLIVOLTS;
-  if (max_mv <= min_mv) return 100;
-
-  int pct = (((int)batt_mv - min_mv) * 100) / (max_mv - min_mv);
-  if (pct < 0) return 0;
-  if (pct > 100) return 100;
-  return (uint8_t)pct;
-#endif
-}
-
 static bool parseBatteryAlertPercent(const char* value, uint8_t min_value, uint8_t max_value, uint8_t& result) {
   if (value == NULL || *value == 0) {
     return false;
@@ -557,11 +589,17 @@ void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float sn
 }
 
 uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood) {
+  using LoginResult = mesh::LoginHistory::Result;
+  const uint32_t attempt_time = getRTCClock()->getCurrentTime();
   ClientInfo* existing_client =
       acl.getClient(sender.pub_key, PUB_KEY_SIZE);
   const bool admin_password =
-      strcmp((char *)data, _prefs.password) == 0;
-  ClientInfo* client = admin_password ? NULL : existing_client;
+      _prefs.password[0] != 0 && strcmp((char *)data, _prefs.password) == 0;
+  // Only explicitly authorized roles may reconnect without a password.
+  // A cached guest identity must still pass the current guest-login policy.
+  ClientInfo* client = !admin_password && existing_client != NULL
+          && (existing_client->permissions & PERM_ACL_ROLE_MASK) != PERM_ACL_GUEST
+      ? existing_client : NULL;
   uint8_t perms;
   if (client != NULL) {
     // A preauthorized ACL identity is authenticated by the anonymous packet's
@@ -575,12 +613,15 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
     }
     if (admin_password) { // valid admin password bypasses ACL (allows upgrade)
       perms = PERM_ACL_ADMIN;
-    } else if (strcmp((char *)data, _prefs.guest_password) == 0) { // check guest password
+    } else if (guest_login.enabled()
+        && strcmp((char *)data, _prefs.guest_password) == 0) {
       perms = PERM_ACL_GUEST;
     } else {
 #if MESH_DEBUG
-      MESH_DEBUG_PRINTLN("Invalid password: %s", data);
+      MESH_DEBUG_PRINTLN("Login rejected: credentials or guest policy");
 #endif
+      login_history.record(sender.pub_key, attempt_time, guest_login.enabled()
+          ? LoginResult::WrongPassword : LoginResult::GuestsDisabled);
       return 0;
     }
   }
@@ -592,6 +633,7 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
           sender.pub_key, sender_timestamp, previous_timestamp, perms)) {
     MESH_DEBUG_PRINTLN(
         "Login rejected: replayed timestamp or replay state unavailable");
+    login_history.record(sender.pub_key, attempt_time, LoginResult::ReplayOrStateRejected);
     return 0;
   }
 
@@ -599,11 +641,13 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
     client = acl.putClient(sender, 0);  // add to contacts (if not already known)
     if (client == NULL) {
       MESH_DEBUG_PRINTLN("Login rejected: ACL is full of protected contacts");
+      login_history.record(sender.pub_key, attempt_time, LoginResult::ACLUnavailable);
       return 0;
     }
   }
 
   MESH_DEBUG_PRINTLN("Login success!");
+  login_history.record(sender.pub_key, attempt_time, LoginResult::Accepted);
   const uint8_t previous_permissions = client->permissions;
   const bool reset_out_path = is_flood
       && client->out_path_len != OUT_PATH_FORCE_FLOOD;
@@ -640,6 +684,29 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
   return 13;  // reply length
 }
 
+void MyMesh::sendDefaultPasswordWarning(ClientInfo* client,
+                                        uint32_t sender_timestamp,
+                                        uint8_t path_hash_size) {
+  if (client == NULL || !client->isAdmin()
+      || !mesh::defaultAdminPasswordUnchanged(
+          _prefs.password, ADMIN_PASSWORD, sizeof(_prefs.password))) return;
+  uint8_t data[5 + sizeof(mesh::DEFAULT_PASSWORD_LOGIN_WARNING) - 1];
+  uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+  if (timestamp == sender_timestamp) timestamp++;
+  memcpy(data, &timestamp, 4);
+  data[4] = TXT_TYPE_CLI_DATA << 2;
+  memcpy(data + 5, mesh::DEFAULT_PASSWORD_LOGIN_WARNING, sizeof(data) - 5);
+  mesh::Packet* warning = createDatagram(PAYLOAD_TYPE_TXT_MSG, client->id,
+                                        client->shared_secret, data, sizeof(data));
+  if (warning == NULL) return;
+  warning->radio_reply = true;
+  if (mesh::Packet::isValidPathLen(client->out_path_len)) {
+    sendClientReply(client, warning, SERVER_RESPONSE_DELAY + 2000UL, path_hash_size);
+  } else {
+    sendFloodReply(warning, SERVER_RESPONSE_DELAY + 2000UL, path_hash_size);
+  }
+}
+
 // Comparison functions for qsort() - defined at file scope to avoid heap allocations
 static int cmp_neighbours_newest_to_oldest(const void* a, const void* b) {
   const NeighbourInfo* na = *(const NeighbourInfo**)a;
@@ -673,12 +740,18 @@ static int cmp_neighbours_weakest_to_strongest(const void* a, const void* b) {
   return 0;
 }
 
-uint8_t MyMesh::handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data) {
+static bool hasCompleteAnonReplyPath(const uint8_t* data, size_t data_len) {
+  if (data == nullptr || data_len == 0 || !mesh::Packet::isValidPathLen(data[0])) return false;
+  const size_t path_bytes = (data[0] & 63U) * ((data[0] >> 6) + 1U);
+  return path_bytes <= data_len - 1;
+}
+
+uint8_t MyMesh::handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp,
+                                    const uint8_t* data, size_t data_len) {
+  if (!hasCompleteAnonReplyPath(data, data_len)) return 0;
   if (anon_limiter.allow(rtc_clock.getCurrentTime())) {
     // request data has: {reply-path-len}{reply-path}
     reply_path_len = *data++;
-    if (!mesh::Packet::isValidPathLen(reply_path_len)) return 0;  // reject - bad encoding
-
     mesh::Packet::writePath(reply_path, data, reply_path_len);
     // data += (uint8_t)reply_path_len * reply_path_hash_size;
 
@@ -693,12 +766,12 @@ uint8_t MyMesh::handleAnonRegionsReq(const mesh::Identity& sender, uint32_t send
   return 0;
 }
 
-uint8_t MyMesh::handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data) {
+uint8_t MyMesh::handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender_timestamp,
+                                  const uint8_t* data, size_t data_len) {
+  if (!hasCompleteAnonReplyPath(data, data_len)) return 0;
   if (anon_limiter.allow(rtc_clock.getCurrentTime())) {
     // request data has: {reply-path-len}{reply-path}
     reply_path_len = *data++;
-    if (!mesh::Packet::isValidPathLen(reply_path_len)) return 0;  // reject - bad encoding
-
     mesh::Packet::writePath(reply_path, data, reply_path_len);
     // data += (uint8_t)reply_path_len * reply_path_hash_size;
 
@@ -712,12 +785,12 @@ uint8_t MyMesh::handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender
   return 0;
 }
 
-uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data) {
+uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender_timestamp,
+                                  const uint8_t* data, size_t data_len) {
+  if (!hasCompleteAnonReplyPath(data, data_len)) return 0;
   if (anon_limiter.allow(rtc_clock.getCurrentTime())) {
     // request data has: {reply-path-len}{reply-path}
     reply_path_len = *data++;
-    if (!mesh::Packet::isValidPathLen(reply_path_len)) return 0;  // reject - bad encoding
-
     mesh::Packet::writePath(reply_path, data, reply_path_len);
     // data += (uint8_t)reply_path_len * reply_path_hash_size;
 
@@ -731,7 +804,7 @@ uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender
     if (isEspNowBridgeRunning()) reply_data[8] |= 0x03;  // ESP-NOW may run alongside UART
 #endif
 #elif WITH_ESPNOW_BRIDGE
-    if (isBridgeRunning()) reply_data[8] |= 0x03;  // is bridge, type ESP-NOW
+    if (isEspNowBridgeRunning()) reply_data[8] |= 0x03;  // is bridge, type ESP-NOW
 #endif
     if (_prefs.disable_fwd) {   // is this repeater currently disabled
       reply_data[8] |= 0x80;  // is disabled
@@ -745,6 +818,8 @@ uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender
 int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t *payload, size_t payload_len,
                           size_t reply_capacity) {
   if (sender == NULL || payload_len == 0 || reply_capacity < 4) return 0;
+  if (!guest_login.enabled()
+      && (sender->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) return 0;
   if (reply_capacity > mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY) {
     reply_capacity = mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY;
   }
@@ -935,6 +1010,7 @@ mesh::Packet *MyMesh::createSelfAdvert() {
   return createAdvert(self_id, app_data, app_data_len);
 }
 
+#if MESH_ENABLE_PACKET_FILE_LOGGING
 File MyMesh::openAppend(const char *fname) {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   return _fs->open(fname, FILE_O_WRITE);
@@ -944,6 +1020,7 @@ File MyMesh::openAppend(const char *fname) {
   return _fs->open(fname, "a", true);
 #endif
 }
+#endif
 
 static uint8_t max_loop_minimal[] =  { 0, /* 1-byte */  4, /* 2-byte */  2, /* 3-byte */  1 };
 static uint8_t max_loop_moderate[] = { 0, /* 1-byte */  2, /* 2-byte */  1, /* 3-byte */  1 };
@@ -1057,8 +1134,22 @@ bool MyMesh::floodChannelDataHopApplies(const mesh::Packet* packet) const {
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
+  if (!packet) return false;
+  if (!_cli.batteryAllowsForward(packet->isRouteFlood())) return false;
   if (_prefs.disable_fwd && !(_prefs.trace_when_repeat_off == 1 && packet
       && packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_TRACE)) return false;
+#if !defined(PORTABLE_MQTT_OBSERVER) && MESH_ENABLE_FLOOD_RULE_ENGINE
+  uint64_t matches = recv_pkt_filter_match_mask;
+  if (packet->isRouteDirect()) {
+    const bool scoped = packet->getRouteType() == ROUTE_TYPE_TRANSPORT_DIRECT;
+    RegionEntry* incoming_region = scoped
+        ? region_map.findMatch(packet, REGION_DENY_FLOOD) : NULL;
+    const bool incoming_allowed = scoped ? incoming_region != NULL
+        : (region_map.getWildcard().flags & REGION_DENY_FLOOD) == 0;
+    matches = evaluateFloodPacketFilterMatches(packet, incoming_allowed, incoming_region);
+    if (shouldBlockFloodPacketForward(packet, matches)) return false;
+  }
+#endif
   if (packet->isRouteFlood()) {
     if (mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max,
                                       _prefs.flood_max_unscoped,
@@ -1110,7 +1201,11 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
 #if MESH_ENABLE_FLOOD_GROUP_MODERATION
   if (packet->isRouteFlood() && shouldBlockFloodGroupTextForward(packet)) return false;
 #endif
+#if MESH_ENABLE_FLOOD_RULE_ENGINE
+  commitFloodPacketFilterRates(packet, matches);
+#else
   if (packet->isRouteFlood()) commitFloodPacketFilterRates(packet, recv_pkt_filter_match_mask);
+#endif
   // Normal path mode accepts clock evidence only from packets this node would
   // forward. Edge mode observes verified evidence on the receive path instead,
   // so repeat off and other forwarding filters do not hide a single upstream
@@ -1123,6 +1218,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
 }
 
 bool MyMesh::allowPacketTransmit(const mesh::Packet* packet) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return false;
   // Forwarded traces have already appended this node's SNR. A locally
   // originated trace starts with an empty SNR path and is not a relay.
   // Recheck at egress so a queued relay/retry cannot outlive this opt-in.
@@ -1132,6 +1228,8 @@ bool MyMesh::allowPacketTransmit(const mesh::Packet* packet) const {
   return mesh::Mesh::allowPacketTransmit(packet);
 }
 
+#if MESH_DEBUG || MESH_ENABLE_PACKET_FILE_LOGGING \
+    || (MESH_PACKET_LOGGING && !MESH_PACKET_LOGGING_COMPACT)
 const char *MyMesh::getLogDateTime() {
   static char tmp[32];
   uint32_t now = getRTCClock()->getCurrentTime();
@@ -1140,6 +1238,7 @@ const char *MyMesh::getLogDateTime() {
           dt.year());
   return tmp;
 }
+#endif
 
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
 bool MyMesh::allowTransportPacket(const mesh::Packet* packet, uint8_t context) {
@@ -1167,12 +1266,10 @@ bool MyMesh::allowTransportPacket(const mesh::Packet* packet, uint8_t context) {
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #if MESH_PACKET_LOGGING
   if (mesh::isUsbLoggingEnabled()) {
-    mesh::SerialLogLine<> line;
 #if MESH_PACKET_LOGGING_COMPACT
-    line.printf("R");
-    line.hex(raw, len);
-    line.flush(mesh::usbLoggingPort(), false);
+    mesh::serialLogCompactPacket(mesh::usbLoggingPort(), 'R', raw, len);
 #else
+    mesh::SerialLogLine<> line;
     line.printf("%s RAW: ", getLogDateTime());
     line.hex(raw, len);
     line.flush(mesh::usbLoggingPort());
@@ -1189,6 +1286,9 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 }
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
+#ifdef WITH_UDP_BRIDGE
+  if (_prefs.bridge_pkt_src == 1 && isUDPBridgeRunning()) udp_bridge->sendPacket(pkt);
+#endif
 #ifdef DISPLAY_ACTIVITY_DASHBOARD
   // Count valid, parsed RF packets before role-level filtering. The dashboard
   // intentionally reflects radio activity, including packets this role later
@@ -1222,6 +1322,7 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
   }
 #endif
 
+#if MESH_ENABLE_PACKET_FILE_LOGGING
   if (_logging) {
     File f = openAppend(PACKET_LOG_FILE);
     if (f) {
@@ -1239,13 +1340,21 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
       f.close();
     }
   }
+#endif
 }
 
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
+#if MESH_ENABLE_TELEMETRY_HISTORY
+  recordTelemetryHistoryTx(pkt);
+#endif
+#ifdef WITH_UDP_BRIDGE
+  if (_prefs.bridge_pkt_src == 0 && isUDPBridgeRunning()) udp_bridge->sendPacket(pkt);
+#endif
 #if defined(WITH_MQTT_NEIGHBORS)
   if (neighbor_discover_active && pkt == neighbor_discover_request
-      && neighbor_discover_next < neighbor_discover_count) {
-    NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+      && neighbor_discover_next < neighbor_discover_count
+      && (size_t)neighbor_discover_next < NEIGHBOR_SCOPE_RESULTS) {
+    auto& entry = neighbor_discover_metadata[neighbor_discover_next];
     if (entry.status == ND_QUEUED) {
       entry.status = ND_PENDING;
       neighbor_discover_queried_count++;
@@ -1278,6 +1387,7 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
   }
 #endif
 
+#if MESH_ENABLE_PACKET_FILE_LOGGING
   if (_logging) {
     File f = openAppend(PACKET_LOG_FILE);
     if (f) {
@@ -1294,13 +1404,15 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
       f.close();
     }
   }
+#endif
 }
 
 void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
 #if defined(WITH_MQTT_NEIGHBORS)
   if (neighbor_discover_active && pkt == neighbor_discover_request
-      && neighbor_discover_next < neighbor_discover_count) {
-    NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+      && neighbor_discover_next < neighbor_discover_count
+      && (size_t)neighbor_discover_next < NEIGHBOR_SCOPE_RESULTS) {
+    auto& entry = neighbor_discover_metadata[neighbor_discover_next];
     if (entry.status == ND_QUEUED) {
       entry.status = ND_SEND_FAILED;
       neighbor_discover_request = NULL;
@@ -1309,6 +1421,7 @@ void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
   }
 #endif
 
+#if MESH_ENABLE_PACKET_FILE_LOGGING
   if (_logging) {
     File f = openAppend(PACKET_LOG_FILE);
     if (f) {
@@ -1318,6 +1431,7 @@ void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
       f.close();
     }
   }
+#endif
 }
 
 int MyMesh::calcRxDelay(float score, uint32_t air_time) const {
@@ -1401,17 +1515,19 @@ int MyMesh::calcRxDelayForPacket(const mesh::Packet* packet, float score,
 }
 
 uint32_t MyMesh::getRetransmitDelay(const mesh::Packet *packet) {
-  uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.tx_delay_factor);
+  uint32_t t = (_radio->getProfileAirtime(packet->radio_profile,
+      packet->getRawLength(), packet->tx_cr) * _prefs.tx_delay_factor);
   return getRNG()->nextInt(0, 5*t + 1);
 }
 uint32_t MyMesh::getSlowScopeRetransmitDelay(const mesh::Packet* packet) {
   uint32_t airtime =
-      _radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2);
+      _radio->getProfileAirtime(packet->radio_profile, packet->getRawLength(), packet->tx_cr);
   uint32_t max_delay = FloodFilterPolicy::slowScopeMaxDelay(airtime);
   return getRNG()->nextInt(0, max_delay + 1);
 }
 uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
-  uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.direct_tx_delay_factor);
+  uint32_t t = (_radio->getProfileAirtime(packet->radio_profile,
+      packet->getRawLength(), packet->tx_cr) * _prefs.direct_tx_delay_factor);
   return getRNG()->nextInt(0, 5*t + 1);
 }
 
@@ -1519,6 +1635,8 @@ uint32_t MyMesh::getDirectRetryAttemptStepMillis() const {
 }
 
 bool MyMesh::allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash, uint8_t next_hop_hash_len) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return false;
+  if (_cli.morseReply().ownsReply(packet)) return false;
   if (_prefs.disable_fwd && _prefs.trace_when_repeat_off != 1 && packet
       && packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_TRACE
       && packet->path_len > 0) return false;
@@ -1652,11 +1770,11 @@ static uint8_t getRetryLogCodingRate(const mesh::Packet* packet, uint8_t default
 
 void MyMesh::onDirectRetryEvent(const char* event, const mesh::Packet* packet, uint32_t delay_millis, uint8_t retry_attempt,
                                 const uint8_t* target_hash, uint8_t target_hash_len, int16_t payload_type) {
-#if defined(PORTABLE_MQTT_OBSERVER)
+#if defined(PORTABLE_MQTT_OBSERVER) \
+    || (!MESH_DEBUG && !MESH_ENABLE_PACKET_FILE_LOGGING)
   (void)event; (void)packet; (void)delay_millis; (void)retry_attempt;
   (void)target_hash; (void)target_hash_len; (void)payload_type;
-  return;
-#endif
+#else
   char type_label[8];
   char target_label[(MAX_HASH_SIZE * 2) + 1];
   const char* route_label = packet != NULL ? (packet->isRouteDirect() ? "D" : "F") : "D";
@@ -1682,6 +1800,7 @@ void MyMesh::onDirectRetryEvent(const char* event, const mesh::Packet* packet, u
                      (uint32_t)log_cr,
                      (uint32_t)log_preamble_len);
 #endif
+#if MESH_ENABLE_PACKET_FILE_LOGGING
   if (_logging) {
     File f = openAppend(PACKET_LOG_FILE);
     if (f) {
@@ -1698,6 +1817,8 @@ void MyMesh::onDirectRetryEvent(const char* event, const mesh::Packet* packet, u
       f.close();
     }
   }
+#endif
+#endif
 }
 
 void MyMesh::onDirectRetryFailed(const uint8_t* next_hop_hash, uint8_t next_hop_hash_len) {
@@ -2061,6 +2182,8 @@ MyMesh::FloodRetryBridgeState* MyMesh::floodRetryBridgeStateFor(const mesh::Pack
 }
 
 bool MyMesh::allowFloodRetry(const mesh::Packet* packet) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return false;
+  if (_cli.morseReply().ownsReply(packet)) return false;
   if (_prefs.disable_fwd || constrain(_prefs.flood_retry_attempts, 0, 15) == 0) {
     return false;
   }
@@ -2177,6 +2300,16 @@ void MyMesh::formatFloodRetryPath(char* dest, size_t dest_len, const mesh::Packe
   }
 }
 
+bool MyMesh::hasFloodRetryHeard(const mesh::Packet* packet) const {
+  if (packet == NULL || packet->getPathHashCount() == 0) return false;
+  const uint8_t hash_size = packet->getPathHashSize();
+  if (hash_size == 0 || hash_size > MAX_ROUTE_HASH_BYTES) return false;
+  if (!_prefs.flood_retry_bridge_enabled) return true;
+  FloodRetryBridgeState* state = floodRetryBridgeStateFor(packet, false);
+  return state != NULL && (floodRetryBridgeHeardMask(packet, state->source_mask,
+      state->progress_marker) & state->target_mask) != 0;
+}
+
 bool MyMesh::formatFloodRetryHeard(char* dest, size_t dest_len, const mesh::Packet* packet) const {
   if (dest == NULL || dest_len == 0 || packet == NULL || packet->getPathHashCount() == 0) {
     return false;
@@ -2268,6 +2401,7 @@ void MyMesh::onFloodRetryEvent(const char* event, const mesh::Packet* packet, ui
   if (packet == NULL) {
     MESH_DEBUG_PRINTLN("flood retry %s (retry=%u, elapsed_ms=%lu, packet=released)",
                        event, (unsigned int)retry_attempt, (unsigned long)delay_millis);
+#if MESH_ENABLE_PACKET_FILE_LOGGING
     if (_logging) {
       File f = openAppend(PACKET_LOG_FILE);
       if (f) {
@@ -2277,9 +2411,11 @@ void MyMesh::onFloodRetryEvent(const char* event, const mesh::Packet* packet, ui
         f.close();
       }
     }
+#endif
     return;
   }
 
+#if MESH_DEBUG || MESH_ENABLE_PACKET_FILE_LOGGING
   const char* time_label = "time_ms";
   if (strcmp(event, "queued") == 0 || strcmp(event, "dropped_queue_full") == 0) {
     time_label = "wait_ms";
@@ -2316,6 +2452,7 @@ void MyMesh::onFloodRetryEvent(const char* event, const mesh::Packet* packet, ui
                      (uint32_t)log_cr,
                      (uint32_t)log_preamble_len);
 
+#if MESH_ENABLE_PACKET_FILE_LOGGING
   if (_logging) {
     File f = openAppend(PACKET_LOG_FILE);
     if (f) {
@@ -2336,7 +2473,12 @@ void MyMesh::onFloodRetryEvent(const char* event, const mesh::Packet* packet, ui
       f.close();
     }
   }
-
+#endif
+#else
+  // Routing must not depend on formatting a discarded diagnostic string.
+  if (strcmp(event, "good") == 0 && hasFloodRetryHeard(packet))
+    refreshFloodRetryReachability(packet);
+#endif
 }
 
 void MyMesh::onFloodRetrySlotReleased(const uint8_t* retry_key, uint8_t radio_profile) {
@@ -2371,6 +2513,7 @@ uint8_t MyMesh::getFloodRetryMaxPathLength(const mesh::Packet* packet) const {
 }
 
 uint8_t MyMesh::getFloodRetryMaxAttempts(const mesh::Packet* packet) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return 0;
   if (_prefs.disable_fwd) {
     return 0;
   }
@@ -2479,7 +2622,9 @@ void MyMesh::formatRecentRepeatersReply(char *reply, int page,
     if (info == NULL) break;
     char prefix[MAX_ROUTE_HASH_BYTES * 2 + 1];
     char snr[12];
-    mesh::Utils::toHex(prefix, info->prefix, info->prefix_len);
+    alignas(uint32_t) uint8_t recorded_prefix[MAX_ROUTE_HASH_BYTES];
+    SimpleMeshTables::copyRecentRepeaterPrefix(recorded_prefix, *info);
+    mesh::Utils::toHex(prefix, recorded_prefix, info->prefix_len);
     prefix[info->prefix_len * 2] = 0;
     formatLocalSnrX4(snr, sizeof(snr), info->snr_x4);
     if (is_search) {
@@ -2511,7 +2656,9 @@ void MyMesh::printRecentRepeatersSerial() {
           const auto* info = tables ? tables->getRecentRepeaterBySortedIdx(row++) : nullptr;
           if (!info) return 0;
           char prefix[MAX_ROUTE_HASH_BYTES * 2 + 1], snr[12];
-          mesh::Utils::toHex(prefix, info->prefix, info->prefix_len);
+          alignas(uint32_t) uint8_t recorded_prefix[MAX_ROUTE_HASH_BYTES];
+          SimpleMeshTables::copyRecentRepeaterPrefix(recorded_prefix, *info);
+          mesh::Utils::toHex(prefix, recorded_prefix, info->prefix_len);
           formatLocalSnrX4(snr, sizeof(snr), info->snr_x4);
           return snprintf(out, capacity, "%s,%s%s\r\n", prefix, snr[0] == '-' ? "" : " ", snr);
         }, this, "Recent repeaters:\r\n");
@@ -2547,7 +2694,9 @@ void MyMesh::printRecentRepeatersSerial() {
     if (info == NULL) break;
     char prefix[MAX_ROUTE_HASH_BYTES * 2 + 1];
     char snr[12];
-    mesh::Utils::toHex(prefix, info->prefix, info->prefix_len);
+    alignas(uint32_t) uint8_t recorded_prefix[MAX_ROUTE_HASH_BYTES];
+    SimpleMeshTables::copyRecentRepeaterPrefix(recorded_prefix, *info);
+    mesh::Utils::toHex(prefix, recorded_prefix, info->prefix_len);
     prefix[info->prefix_len * 2] = 0;
     formatLocalSnrX4(snr, sizeof(snr), info->snr_x4);
     mesh::usbConsolePort().printf("%s,%s%s\n", prefix, snr[0] == '-' ? "" : " ", snr);
@@ -2675,9 +2824,12 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
 
 void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const mesh::Identity &sender,
                             uint8_t *data, size_t len) {
+  if (packet == nullptr) return;
   if (packet->getPayloadType() == PAYLOAD_TYPE_ANON_REQ) { // received an initial request by a possible admin
                                                            // client (unknown at this stage)
-    if (len < 4) {
+    // A timestamp-only request is a valid empty-password login. The bounded
+    // terminator below supplies data[4]; typed requests still need their path.
+    if (data == nullptr || len < 4 || len >= MAX_PACKET_PAYLOAD) {
       MESH_DEBUG_PRINTLN("Rejected incomplete anonymous request");
       return;
     }
@@ -2685,17 +2837,18 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
     memcpy(&timestamp, data, 4);
 
     data[len] = 0;  // ensure null terminator
+    const bool login_request = data[4] == 0 || data[4] >= ' ';
     uint8_t reply_len;
 
     reply_path_len = 0xFF;
     if (data[4] == 0 || data[4] >= ' ') {   // is password, ie. a login request
       reply_len = handleLoginReq(sender, secret, timestamp, &data[4], packet->isRouteFlood());
     } else if (data[4] == ANON_REQ_TYPE_REGIONS && packet->isRouteDirect()) {
-      reply_len = handleAnonRegionsReq(sender, timestamp, &data[5]);
+      reply_len = handleAnonRegionsReq(sender, timestamp, &data[5], len - 5);
     } else if (data[4] == ANON_REQ_TYPE_OWNER && packet->isRouteDirect()) {
-      reply_len = handleAnonOwnerReq(sender, timestamp, &data[5]);
+      reply_len = handleAnonOwnerReq(sender, timestamp, &data[5], len - 5);
     } else if (data[4] == ANON_REQ_TYPE_BASIC && packet->isRouteDirect()) {
-      reply_len = handleAnonClockReq(sender, timestamp, &data[5]);
+      reply_len = handleAnonClockReq(sender, timestamp, &data[5], len - 5);
     } else {
       reply_len = 0;  // unknown/invalid request type
     }
@@ -2720,6 +2873,8 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
               *client, OUT_PATH_UNKNOWN,
               futureMillis(LOGIN_PATH_OBSERVATION_TIMEOUT_MS));
         }
+        if (login_request && login_path_sent)
+          sendDefaultPasswordWarning(client, timestamp, packet->getPathHashSize());
       }
       return;
     }
@@ -2727,13 +2882,16 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
     mesh::Packet* reply = createDatagram(PAYLOAD_TYPE_RESPONSE, sender, secret, reply_data, reply_len);
     if (reply == NULL) return;
 
+    bool reply_queued;
     if (route == mesh::REPLY_ROUTE_DIRECT_SUPPLIED) {
-      sendDirect(reply, reply_path, reply_path_len, SERVER_RESPONSE_DELAY);
+      reply_queued = sendDirect(reply, reply_path, reply_path_len, SERVER_RESPONSE_DELAY);
     } else if (route == mesh::REPLY_ROUTE_DIRECT_OUT_PATH) {
-      sendDirect(reply, client->out_path, client->out_path_len, SERVER_RESPONSE_DELAY);
+      reply_queued = sendDirect(reply, client->out_path, client->out_path_len, SERVER_RESPONSE_DELAY);
     } else {
-      sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+      reply_queued = sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
     }
+    if (login_request && reply_queued)
+      sendDefaultPasswordWarning(client, timestamp, packet->getPathHashSize());
   }
 }
 
@@ -2748,14 +2906,18 @@ int MyMesh::searchPeersByHash(const uint8_t *hash) {
     for (int i = 0; i < neighbor_discover_count && n < MAX_CLIENTS; i++) {
       auto& entry = neighbor_discover[i];
       if (acl.getClient(entry.id.pub_key, PUB_KEY_SIZE) != nullptr) continue;
-      if (entry.heard_timestamp > 0 && entry.id.isHashMatch(hash)) {
+      // Every counted snapshot key was admitted with a positive heard time.
+      if (entry.id.isHashMatch(hash)) {
         matching_peer_indexes[n++] = NEIGHBOR_DISCOVER_PEER_BASE + i;
       }
     }
   }
 #endif
   for (int i = 0; i < acl.getNumClients() && n < MAX_CLIENTS; i++) {
-    if (acl.getClientByIdx(i)->id.isHashMatch(hash)) {
+    const auto* client = acl.getClientByIdx(i);
+    if (!guest_login.enabled()
+        && (client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) continue;
+    if (client->id.isHashMatch(hash)) {
       matching_peer_indexes[n++] = i; // store the INDEXES of matching contacts (for subsequent 'peer' methods)
     }
   }
@@ -2815,6 +2977,13 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
 }
 
 void MyMesh::onGroupPacketRecv(mesh::Packet* packet) {
+#if MESH_ENABLE_FLEET_CONTROL
+  if (_cli.fleetChannel()) {
+    TransportKey scope;
+    const bool known = mesh::captureFleetReplyScope(region_map, recv_pkt_region, packet, scope);
+    _cli.fleetChannel()->receive(packet, *this, known ? &scope : nullptr);
+  }
+#endif
 #if !defined(PORTABLE_MQTT_OBSERVER) && MESH_ENABLE_CLOCK_SYNC
   // The base Mesh calls this for every unseen, structurally valid group packet
   // before the forwarding decision. Public-channel decryption below also
@@ -2848,6 +3017,8 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
     return;
   }
   ClientInfo* client = acl.getClientByIdx(i);
+  if (!guest_login.enabled()
+      && (client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) return;
 #if defined(WITH_MQTT_NEIGHBORS)
   // A neighbour that IS an ACL client resolves to a normal index above, so a
   // scope-query response from it lands here -- match it against the overlay.
@@ -3032,7 +3203,10 @@ bool MyMesh::sendRemoteCliReply(ClientInfo* client, const uint8_t* secret,
   // Prepare before admission so Dispatcher can register its second copy;
   // the caller arms the barrier only after admission succeeds.
   const bool allow_redundant_copies = queued_packet == NULL;
-  if (!allow_redundant_copies) temp_radio_reply_barrier.prepare(packet);
+  if (!allow_redundant_copies) {
+    if (_cli.morseReply().pending()) _cli.morseReply().prepareReply(packet);
+    else temp_radio_reply_barrier.prepare(packet);
+  }
   const bool queued = sendClientReplyWithFallbackScope(
       client, packet, CLI_REPLY_DELAY_MILLIS, path_hash_size, fallback_scope,
       allow_redundant_copies);
@@ -3245,6 +3419,7 @@ void __attribute__((noinline)) MyMesh::processDeferredCliCommand() {
   }
   const uint32_t primary_mutation_before = primary_radio_mutation_generation;
   const uint32_t secondary_mutation_before = _cli.radioProfiles().replyMutationGeneration();
+  const uint32_t morse_mutation_before = _cli.morseReply().generation();
   // setperm may compact the ACL, including removal of this sender. Keep the
   // authenticated pre-command destination/path as a fallback if it is removed.
   // Command permission checks still use the live ACL entry below.
@@ -3304,10 +3479,12 @@ void __attribute__((noinline)) MyMesh::processDeferredCliCommand() {
   } else {
 #endif
     _cli.radioProfiles().beginReplyCommand();
+    _cli.morseReply().beginCommand(client->id.pub_key);
     handleCommand(deferred_cli_command.sender_timestamp, client,
                   deferred_cli_command.command, reply, client_index,
                   deferred_cli_command.path_hash_size);
     _cli.radioProfiles().endReplyCommand();
+    _cli.morseReply().endCommand();
 #if MESH_ENABLE_HOST_CLI
   }
 #endif
@@ -3319,6 +3496,7 @@ void __attribute__((noinline)) MyMesh::processDeferredCliCommand() {
   const bool arms_primary_radio = primary_radio_mutation_generation != primary_mutation_before;
   const bool arms_secondary_radio = _cli.radioProfiles().replyMutationGeneration() != secondary_mutation_before;
   const bool arms_temp_radio = arms_primary_radio || arms_secondary_radio;
+  const bool arms_morse = _cli.morseReply().generation() != morse_mutation_before;
   const char* parsed_command = deferred_cli_command.command;
   if (strlen(parsed_command) > 3 && parsed_command[2] == '|') parsed_command += 3;
   const bool private_key_backup = strncmp(parsed_command, "backup prv.key ", 15) == 0;
@@ -3327,7 +3505,7 @@ void __attribute__((noinline)) MyMesh::processDeferredCliCommand() {
   if (!private_key_backup) {
     remote_cli_reply_cache.remember(deferred_cli_command.client_pub_key,
                                     deferred_cli_command.request_id,
-                                    command_fingerprint, reply, arms_temp_radio);
+                                    command_fingerprint, reply, arms_temp_radio || arms_morse);
   }
   // Route changes made by this command must apply to its acknowledgement too.
   // Resolve the full authenticated key again: compaction may have moved it or
@@ -3341,7 +3519,8 @@ void __attribute__((noinline)) MyMesh::processDeferredCliCommand() {
       deferred_cli_command.path_hash_size,
       deferred_cli_command.sender_timestamp, reply,
       deferred_cli_reply_scoped ? &deferred_cli_reply_scope : NULL,
-      arms_temp_radio ? &queued_reply : NULL);
+      (arms_temp_radio || arms_morse) ? &queued_reply : NULL);
+  if (arms_morse) _cli.morseReply().armReply(queued_reply, reply_queued);
   if (arms_temp_radio) {
     radio_reply_secondary = arms_secondary_radio;
     if (reply_queued && queued_reply != NULL) {
@@ -3367,6 +3546,8 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t 
   if (i >= 0 && i < acl.getNumClients()) { // get from our known_clients table (sender SHOULD already be known in this context)
     MESH_DEBUG_PRINTLN("PATH to client, path_len=%d", (uint32_t)path_len);
     auto client = acl.getClientByIdx(i);
+    if (!guest_login.enabled()
+        && (client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) return false;
 
     // A flood login's reciprocal PATH is direct and has no embedded payload
     // (decoded as the reserved 0x0F extra type). Retain that one independently
@@ -3403,8 +3584,8 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t 
 void MyMesh::onControlDataRecv(mesh::Packet* packet) {
   uint8_t type = packet->payload[0] & 0xF0;    // just test upper 4 bits
   if (type == CTL_TYPE_NODE_DISCOVER_REQ && packet->payload_len >= 6
-      && discover_limiter.allow(rtc_clock.getCurrentTime())
       && !isHiddenNode()   // this node wishes to NOT be discoverable
+      && discover_limiter.allow(rtc_clock.getCurrentTime())
   ) {
     int i = 1;
     uint8_t  filter = packet->payload[i++];
@@ -3419,13 +3600,34 @@ void MyMesh::onControlDataRecv(mesh::Packet* packet) {
 
     if ((filter & (1 << ADV_TYPE_REPEATER)) != 0 && _prefs.discovery_mod_timestamp >= since) {
       bool prefix_only = packet->payload[0] & 1;
-      uint8_t data[6 + PUB_KEY_SIZE];
+      uint8_t data[6 + PUB_KEY_SIZE + 12];
+      size_t length = 6 + (prefix_only ? 8 : PUB_KEY_SIZE);
       data[0] = CTL_TYPE_NODE_DISCOVER_RESP | ADV_TYPE_REPEATER;   // low 4-bits for node type
       data[1] = packet->_snr;   // let sender know the inbound SNR ( x 4)
       memcpy(&data[2], &tag, 4);     // include tag from request, for client to match to
-      memcpy(&data[6], self_id.pub_key, PUB_KEY_SIZE);
-      auto resp = createControlData(data, prefix_only ? 6 + 8 : 6 + PUB_KEY_SIZE);
+      memcpy(&data[6], self_id.pub_key, length - 6);
+      if (packet->payload[0] & 0x02) {  // optional radio2 profile, version 1
+        data[length++] = 1;
+        data[length++] = 0;
+        const auto* profiles = _radio->profiles();
+        // V1 describes a usable MeshCore profile, not a foreign radio2 owner.
+        if (profiles && (profiles->secondary.mode == mesh::RadioProfileMode::Rx
+                || profiles->secondary.mode == mesh::RadioProfileMode::RxTx)
+            && profiles->secondary.params.protocol == mesh::RadioProfileProtocol::MeshCore) {
+          const auto& secondary = profiles->secondary;
+          data[length - 1] = 1 | (static_cast<uint8_t>(secondary.mode) << 1)
+              | (profiles->secondary_temporary ? 0x08 : 0);
+          const uint32_t frequency = static_cast<uint32_t>(secondary.params.freq * 1000.0f + 0.5f);
+          const uint32_t bandwidth = static_cast<uint32_t>(secondary.params.bw * 1000.0f + 0.5f);
+          for (unsigned shift = 0; shift < 32; shift += 8) data[length++] = frequency >> shift;
+          for (unsigned shift = 0; shift < 32; shift += 8) data[length++] = bandwidth >> shift;
+          data[length++] = secondary.params.sf;
+          data[length++] = secondary.params.cr;
+        }
+      }
+      auto resp = createControlData(data, length);
       if (resp) {
+        resp->tx_radio = mesh::RADIO_TX_PRIMARY;
         sendZeroHop(resp, getRetransmitDelay(resp)*4);  // apply random delay (widened x4), as multiple nodes can respond to this
       }
     }
@@ -3605,8 +3807,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   telemetry_history_tx_manual = false;
   telemetry_history_tx_external_channel = 0;
   telemetry_history_tx_external_chunk = 0;
+  telemetry_history_tx_types = TELEMETRY_HISTORY_TX_ALL_TYPES;
   telemetry_history_next_tx_uptime = 0;
   telemetry_history_tx_resume_uptime = 0;
+  telemetry_history_last_tx_uptime = UINT64_MAX;
 #endif
 
 #if MAX_NEIGHBOURS
@@ -3674,9 +3878,13 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.rx_ps_preamble = DEFAULT_RXPS_PREAMBLE;
   _prefs.rx_ps_rx_us = RX_POWERSAVING_DEFAULT_RX_US;
   _prefs.rx_ps_sleep_us = RX_POWERSAVING_DEFAULT_SLEEP_US;
-  recalcRxPowerSavingFromLevel(_prefs.rx_ps_level, _prefs.sf, _prefs.bw,
-                               _prefs.rx_ps_preamble, &_prefs.rx_ps_rx_us,
-                               &_prefs.rx_ps_sleep_us);
+#ifdef WRAPPER_CLASS
+  if (WRAPPER_CLASS::SupportsRxPowerSaving) {
+    recalcRxPowerSavingFromLevel(_prefs.rx_ps_level, _prefs.sf, _prefs.bw,
+                                 _prefs.rx_ps_preamble, &_prefs.rx_ps_rx_us,
+                                 &_prefs.rx_ps_sleep_us);
+  }
+#endif
 
   // bridge defaults
 #if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
@@ -3759,6 +3967,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 // OTA mesh-integration (receive/begin/loop) is centralized in mesh::Mesh - no per-example wiring.
 
 void MyMesh::begin(FILESYSTEM *fs) {
+#if MESH_ENABLE_FLOOD_RULE_ENGINE
+  flood_filter_probability_seed = getRNG()->nextInt(0, UINT32_MAX);
+#endif
   mesh::hilStartupTrace("mesh_dispatcher_begin");
   mesh::Mesh::begin();   // also starts OTA (ota_ctx().begin) for all roles
   mesh::hilStartupTrace("mesh_dispatcher_ready");
@@ -3769,6 +3980,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   mesh::hilStartupTrace("mesh_prefs_begin");
   _cli.loadPrefs(_fs);
+#ifdef WITH_UDP_BRIDGE
+  udp_bridge_settings.begin(_fs);
+#endif
   mesh::hilStartupTrace("mesh_prefs_ready");
   mesh::hilStartupTrace("mesh_management_begin");
   _cli.beginManagement(*this, _fs);
@@ -3801,6 +4015,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
   mesh::hilStartupTrace("mesh_acl_begin");
   acl.load(_fs, self_id);
+  guest_login.begin(_fs);
+  if (!guest_login.enabled()) acl.removeGuestClients();
   mesh::hilStartupTrace("mesh_acl_ready");
   // TODO: key_store.begin();
   region_map.load(_fs);
@@ -3934,6 +4150,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #if defined(WITH_ESPNOW_BRIDGE) \
     && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
   if (_prefs.espnow_bridge_enabled) setEspNowBridgeState(true);
+#endif
+#ifdef WITH_UDP_BRIDGE
+  serviceUDPBridge();
 #endif
   mesh::hilStartupTrace("mesh_bridge_ready");
 
@@ -4168,6 +4387,10 @@ bool MyMesh::sendGroupFloodText(const mesh::GroupChannel& channel, const char* t
 
 void MyMesh::onSendComplete(mesh::Packet* packet) {
   mesh::Mesh::onSendComplete(packet);
+  _cli.morseReply().complete(packet);
+#if MESH_ENABLE_FLEET_CONTROL
+  if (_cli.fleetChannel()) _cli.fleetChannel()->complete(packet, _cli.radioProfiles());
+#endif
   if (temp_radio_reply_barrier.complete(packet) && !temp_radio_reply_barrier.waiting()) finishRadioReply(true);
   if (packet == pending_battery_alert_packet) {
     pending_battery_alert_packet = NULL;
@@ -4178,12 +4401,20 @@ void MyMesh::onSendComplete(mesh::Packet* packet) {
 
 void MyMesh::onRadioProfileCopyQueued(mesh::Packet* packet, const mesh::Packet* original,
                                      uint8_t priority) {
+#if MESH_ENABLE_FLEET_CONTROL
+  if (_cli.fleetChannel()) _cli.fleetChannel()->copy(packet, original);
+#endif
   temp_radio_reply_barrier.trackCopy(original, packet);
+  _cli.morseReply().copy(original, packet);
   mesh::Mesh::onRadioProfileCopyQueued(packet, original, priority);
 }
 
 void MyMesh::onSendFail(mesh::Packet* packet) {
   mesh::Mesh::onSendFail(packet);
+  _cli.morseReply().fail(packet);
+#if MESH_ENABLE_FLEET_CONTROL
+  if (_cli.fleetChannel()) _cli.fleetChannel()->fail(packet, _cli.radioProfiles());
+#endif
   if (temp_radio_reply_barrier.fail(packet)) {
     // Failure of every acknowledgement copy cancels the unconfirmed
     // handoff. A later cached-command retry may replay the reply, but it does
@@ -4274,7 +4505,7 @@ void MyMesh::checkBatteryAlert() {
   }
 
   uint16_t batt_mv = board.getBattMilliVolts();
-  uint8_t batt_pct = batteryPercentFromMilliVolts(batt_mv);
+  uint8_t batt_pct = _cli.batteryPercent(batt_mv);
   if (batt_mv <= LOW_BATTERY_MIN_VALID_MV || batt_pct >= _prefs.battery_alert_low_percent) {
     return;
   }
@@ -4637,6 +4868,11 @@ void MyMesh::formatScheduledRadioSetting(char* reply, int setting_idx, int displ
 
 void MyMesh::addScheduledRadioParams(bool temporary, float freq, float bw, uint8_t sf, uint8_t cr,
                                      uint32_t start_time, uint32_t end_time, char* reply, uint16_t preamble) {
+#if MESH_ENABLE_FLEET_CONTROL
+  if (fleet_schedule_pending_) {
+    strcpy(reply, "Error: fleet schedule acknowledgement pending"); return;
+  }
+#endif
   uint32_t now = getRTCClock()->getCurrentTime();
   if (!isValidScheduledRadioParams(freq, bw, sf, cr)) {
     strcpy(reply, "Error, invalid radio params");
@@ -4669,19 +4905,23 @@ void MyMesh::addScheduledRadioParams(bool temporary, float freq, float bw, uint8
     return;
   }
 
-  scheduled_radio_settings[slot].active = true;
-  scheduled_radio_settings[slot].temporary = temporary;
-  scheduled_radio_settings[slot].started = false;
-  scheduled_radio_settings[slot].freq = freq;
-  scheduled_radio_settings[slot].bw = bw;
-  scheduled_radio_settings[slot].sf = sf;
-  scheduled_radio_settings[slot].cr = cr;
-  scheduled_radio_settings[slot].preamble = preamble;
-  scheduled_radio_settings[slot].start_time = start_time;
-  scheduled_radio_settings[slot].end_time = temporary ? end_time : 0;
+  ScheduledRadioSetting* accepted = &scheduled_radio_settings[slot];
+#if MESH_ENABLE_FLEET_CONTROL
+  if (fleet_command_) accepted = &fleet_schedule_setting_;
+#endif
+  accepted->active = true;
+  accepted->temporary = temporary;
+  accepted->started = false;
+  accepted->freq = freq;
+  accepted->bw = bw;
+  accepted->sf = sf;
+  accepted->cr = cr;
+  accepted->preamble = preamble;
+  accepted->start_time = start_time;
+  accepted->end_time = temporary ? end_time : 0;
   const uint64_t current_uptime_millis =
       uptime_millis + (uint32_t)(millis() - last_millis);
-  scheduled_radio_settings[slot].hard_end_uptime_millis = temporary
+  accepted->hard_end_uptime_millis = temporary
       ? mesh::TempRadioLeaseDeadline::fromEpochEnd(
             current_uptime_millis, now, end_time)
       : 0;
@@ -4689,13 +4929,32 @@ void MyMesh::addScheduledRadioParams(bool temporary, float freq, float bw, uint8
   // apply failure, especially when its deadline is sooner than that retry.
   scheduled_radio_retry_at = 0;
   scheduled_radio_retry_failures = 0;
+#if MESH_ENABLE_FLEET_CONTROL
+  if (fleet_command_) {
+    fleet_schedule_slot_ = slot;
+    fleet_schedule_pending_ = true;
+    fleet_schedule_delivered_ = false;
+    fleet_schedule_delete_all_temp_ = false;
+    memset(fleet_schedule_delete_mask_, 0, sizeof(fleet_schedule_delete_mask_));
+  }
+#endif
   refreshScheduledRadioState();
 
   char delay[16];
   formatScheduledRadioDuration(delay, sizeof(delay), start_time);
+  int accepted_index = getScheduledRadioSettingIndex(temporary, slot);
+  if (accepted != &scheduled_radio_settings[slot]) {
+    accepted_index = 1;
+    for (int i = 0; i < MAX_SCHEDULED_RADIO_SETTINGS; ++i) {
+      const auto& previous = scheduled_radio_settings[i];
+      if (previous.active && previous.temporary == temporary
+          && (previous.start_time < start_time || (previous.start_time == start_time && i < slot)))
+        ++accepted_index;
+    }
+  }
   snprintf(reply, 160, "OK - %s %d in %s",
            temporary ? "tempradioat" : "radioat",
-           getScheduledRadioSettingIndex(temporary, slot),
+           accepted_index,
            delay);
   if (temporary) {
     char duration[64];
@@ -4761,6 +5020,34 @@ void MyMesh::formatScheduledRadioParams(bool temporary, const char* selector, ch
 }
 
 void MyMesh::deleteScheduledRadioParams(bool temporary, const char* selector, char* reply) {
+#if MESH_ENABLE_FLEET_CONTROL
+  if (fleet_schedule_pending_) {
+    strcpy(reply, "Error: fleet schedule acknowledgement pending"); return;
+  }
+  if (fleet_command_) {
+    const bool all = selectorIsEmpty(selector) || selectorIsAll(selector);
+    int idx = -1;
+    if (!all) {
+      int wanted = 0;
+      if (!parsePositiveSelector(selector, wanted)) {
+        strcpy(reply, temporary ? "Error, use: del tempradioat [n]" : "Error, use: del radioat [n]"); return;
+      }
+      idx = findScheduledRadioSettingByIndex(temporary, wanted);
+      if (idx < 0) { strcpy(reply, "Error: not found"); return; }
+    }
+    memset(fleet_schedule_delete_mask_, 0, sizeof(fleet_schedule_delete_mask_));
+    for (int i = 0; i < MAX_SCHEDULED_RADIO_SETTINGS; ++i) {
+      if (scheduled_radio_settings[i].active && scheduled_radio_settings[i].temporary == temporary
+          && (all || idx == i)) fleet_schedule_delete_mask_[i / 8] |= uint8_t(1U << (i % 8));
+    }
+    fleet_schedule_slot_ = -1;
+    fleet_schedule_delete_all_temp_ = all && temporary;
+    fleet_schedule_pending_ = true;
+    fleet_schedule_delivered_ = false;
+    strcpy(reply, "OK - schedule deletion after reply");
+    return;
+  }
+#endif
   if (selectorIsEmpty(selector) || selectorIsAll(selector)) {
     int deleted = 0;
     bool restore_radio = false;
@@ -4801,7 +5088,56 @@ void MyMesh::deleteScheduledRadioParams(bool temporary, const char* selector, ch
   strcpy(reply, "OK");
 }
 
+#if MESH_ENABLE_FLEET_CONTROL
+bool MyMesh::getFleetLocation(int32_t& latitude_e6, int32_t& longitude_e6) const {
+  return mesh::readFleetLocation(_prefs, sensors, latitude_e6, longitude_e6);
+}
+
+void MyMesh::finishFleetReplyMutation(bool delivered) {
+  if (!fleet_schedule_pending_) return;
+  fleet_schedule_delivered_ = delivered;
+  if (!delivered) {
+    fleet_schedule_pending_ = false;
+    fleet_schedule_setting_ = {};
+    memset(fleet_schedule_delete_mask_, 0, sizeof(fleet_schedule_delete_mask_));
+  }
+}
+
+void MyMesh::serviceFleetScheduleReply() {
+  if (!fleet_schedule_pending_ || !fleet_schedule_delivered_) return;
+  // Dispatcher completion hooks only mark delivery. All schedule/radio work
+  // runs here, with the original UTC endpoints and monotonic lease bound.
+  fleet_schedule_pending_ = fleet_schedule_delivered_ = false;
+  if (fleet_schedule_slot_ >= 0) {
+    const uint64_t uptime = uptime_millis + (uint32_t)(millis() - last_millis);
+    const bool expired = fleet_schedule_setting_.temporary
+        && (getRTCClock()->getCurrentTime() >= fleet_schedule_setting_.end_time
+            || mesh::TempRadioLeaseDeadline::expired(uptime, fleet_schedule_setting_.hard_end_uptime_millis));
+    // A local recovery may have reused the slot while this reply was pending.
+    if (!expired && !scheduled_radio_settings[fleet_schedule_slot_].active)
+      scheduled_radio_settings[fleet_schedule_slot_] = fleet_schedule_setting_;
+  } else {
+    for (int i = 0; i < MAX_SCHEDULED_RADIO_SETTINGS; ++i) {
+      if (fleet_schedule_delete_mask_[i / 8] & uint8_t(1U << (i % 8)))
+        clearScheduledRadioSetting(i, true);
+    }
+    if (fleet_schedule_delete_all_temp_ && temp_radio_handoff_pending) {
+      temp_radio_handoff_pending = false;
+      queueSavedRadioApply();
+    }
+  }
+  fleet_schedule_setting_ = {};
+  memset(fleet_schedule_delete_mask_, 0, sizeof(fleet_schedule_delete_mask_));
+  scheduled_radio_retry_at = 0;
+  scheduled_radio_retry_failures = 0;
+  refreshScheduledRadioState();
+}
+#endif
+
 void MyMesh::processScheduledRadioSettings() {
+#if MESH_ENABLE_FLEET_CONTROL
+  serviceFleetScheduleReply();
+#endif
   const uint64_t current_uptime_millis =
       uptime_millis + (uint32_t)(millis() - last_millis);
   bool hard_temp_end_due = false;
@@ -4815,7 +5151,11 @@ void MyMesh::processScheduledRadioSettings() {
     }
   }
 
-  if (temp_radio_reply_barrier.waiting() && !hard_temp_end_due) {
+  if ((temp_radio_reply_barrier.waiting()
+#if MESH_ENABLE_FLEET_CONTROL
+       || fleet_schedule_pending_
+#endif
+      ) && !hard_temp_end_due) {
     // A parameterized-TempRadio reply copy is queued or on air. Unlike a
     // fixed RTC delay, this remains correct under CAD, duty throttling, and
     // unrelated queue pressure.  TX completion/failure releases the barrier.
@@ -5005,65 +5345,90 @@ bool MyMesh::hasScheduledRadioWorkDue() const {
           || millisHasNowPassed(next_scheduled_radio_check_at));
 }
 
-uint32_t MyMesh::limitSleepToMillisTimer(unsigned long timestamp, uint32_t sleep_secs) const {
-  if (!timestamp || sleep_secs == 0) {
-    return sleep_secs;
+uint32_t MyMesh::limitSleepToMillisTimer(unsigned long timestamp, uint32_t sleep_ms) const {
+  if (!timestamp || sleep_ms == 0) {
+    return sleep_ms;
   }
-  unsigned long now = millis();
-  if ((long)(now - timestamp) >= 0) {
+  const uint32_t now = millis();
+  if ((int32_t)(now - (uint32_t)timestamp) >= 0) {
     return 0;
   }
-  unsigned long remaining_ms = timestamp - now;
-  uint32_t remaining_secs = (remaining_ms + 999UL) / 1000UL;
-  return remaining_secs < sleep_secs ? remaining_secs : sleep_secs;
+  const uint32_t remaining_ms = (uint32_t)timestamp - now;
+  return remaining_ms < sleep_ms ? remaining_ms : sleep_ms;
 }
 
-uint32_t MyMesh::limitSleepToScheduledRadioWork(uint32_t sleep_secs) const {
-  sleep_secs = limitSleepToMillisTimer(next_scheduled_radio_check_at, sleep_secs);
+uint32_t MyMesh::limitSleepToScheduledRadioWork(uint32_t sleep_ms) const {
+  sleep_ms = limitSleepToMillisTimer(next_scheduled_radio_check_at, sleep_ms);
   const uint64_t current_uptime_millis =
       uptime_millis + (uint32_t)(millis() - last_millis);
   for (int i = 0; i < MAX_SCHEDULED_RADIO_SETTINGS; i++) {
     const ScheduledRadioSetting& setting = scheduled_radio_settings[i];
     if (!setting.active || !setting.temporary) continue;
-    const uint32_t hard_end_seconds =
-        mesh::TempRadioLeaseDeadline::secondsUntil(
+    const uint32_t hard_end_ms =
+        mesh::TempRadioLeaseDeadline::millisecondsUntil(
             current_uptime_millis, setting.hard_end_uptime_millis);
-    if (hard_end_seconds < sleep_secs) sleep_secs = hard_end_seconds;
+    if (hard_end_ms < sleep_ms) sleep_ms = hard_end_ms;
   }
   if (scheduled_radio_retry_at && !millisHasNowPassed(scheduled_radio_retry_at)) {
-    sleep_secs = limitSleepToMillisTimer(scheduled_radio_retry_at, sleep_secs);
+    sleep_ms = limitSleepToMillisTimer(scheduled_radio_retry_at, sleep_ms);
   }
-  return sleep_secs;
+  return sleep_ms;
 }
 
 uint32_t MyMesh::getPowerSaveSleepSeconds(uint32_t max_secs) const {
-  if (max_secs == 0 || hasPendingWork()) {
+  return mesh::power::powerSaveSleepSeconds(getPowerSaveSleepMilliseconds(
+      mesh::power::secondsToSleepMilliseconds(max_secs)));
+}
+
+uint32_t MyMesh::getPowerSaveSleepMilliseconds(uint32_t max_ms) const {
+  using mesh::powerdiag::mask;
+  using mesh::powerdiag::Reason;
+  const mesh::powerdiag::Mask pending = max_ms ? pendingWorkReason() : mask(Reason::NoWake);
+  if (pending) {
+    if (mesh::powerdiag::enabled()) mesh::powerdiag::decision(pending, millis());
     return 0;
   }
 
-  uint32_t sleep_secs = max_secs;
+  mesh::powerdiag::Mask blocked = 0;
+  uint32_t sleep_ms = max_ms;
   uint32_t queue_delay_ms;
   if (getNextQueueWakeDelay(queue_delay_ms)) {
-    uint32_t queue_delay_secs = (queue_delay_ms + 999UL) / 1000UL;
-    if (queue_delay_secs < sleep_secs) sleep_secs = queue_delay_secs;
+    if (queue_delay_ms < sleep_ms) sleep_ms = queue_delay_ms;
+    if (queue_delay_ms == 0) blocked |= mask(Reason::Queue);
   }
   uint32_t retry_delay_ms;
   if (getNextRetryWakeDelay(retry_delay_ms)) {
-    uint32_t retry_delay_secs = (retry_delay_ms + 999UL) / 1000UL;
-    if (retry_delay_secs < sleep_secs) sleep_secs = retry_delay_secs;
+    if (retry_delay_ms < sleep_ms) sleep_ms = retry_delay_ms;
+    if (retry_delay_ms == 0) blocked |= mask(Reason::Retry);
   }
-  sleep_secs = limitSleepToMillisTimer(next_flood_advert, sleep_secs);
-  sleep_secs = limitSleepToMillisTimer(next_local_advert, sleep_secs);
-  sleep_secs = limitSleepToMillisTimer(dirty_contacts_expiry, sleep_secs);
-  sleep_secs = limitSleepToMillisTimer(next_recent_repeater_sweep, sleep_secs);
+  const uint32_t before_scheduled = sleep_ms;
+  sleep_ms = limitSleepToMillisTimer(next_flood_advert, sleep_ms);
+  sleep_ms = limitSleepToMillisTimer(next_local_advert, sleep_ms);
+  sleep_ms = limitSleepToMillisTimer(dirty_contacts_expiry, sleep_ms);
+  sleep_ms = limitSleepToMillisTimer(next_recent_repeater_sweep, sleep_ms);
   if (_prefs.battery_alert_enabled) {
-    sleep_secs = limitSleepToMillisTimer(next_battery_alert_check, sleep_secs);
+    sleep_ms = limitSleepToMillisTimer(next_battery_alert_check, sleep_ms);
   }
-  sleep_secs = limitSleepToScheduledRadioWork(sleep_secs);
-  return sleep_secs;
+  sleep_ms = limitSleepToScheduledRadioWork(sleep_ms);
+  if (before_scheduled > 0 && sleep_ms == 0) blocked |= mask(Reason::Scheduled);
+#if defined(WITH_RS232_BRIDGE)
+  if (bridge && rs232BridgeEnabled()) {
+    // Preserve the exact rendezvous deadline; the board selects timed sleep
+    // or interrupt idle without rounding away its sub-second remainder.
+    const uint32_t bridge_sleep_ms = bridge->powerWakeDelayMs(millis());
+    if (bridge_sleep_ms < sleep_ms) sleep_ms = bridge_sleep_ms;
+    if (bridge_sleep_ms == 0) blocked |= mask(Reason::BridgeWake);
+  }
+#endif
+  if (blocked && mesh::powerdiag::enabled()) mesh::powerdiag::decision(blocked, millis());
+  return sleep_ms;
 }
 
 void MyMesh::applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins, uint16_t preamble) {
+#if MESH_ENABLE_FLEET_CONTROL
+  // Direct administration supersedes an earlier unconfirmed fleet intent.
+  finishFleetReplyMutation(false);
+#endif
   ++primary_radio_mutation_generation;
   primary_radio_mutation_starts_temp = true;
   if (_cli.radioProfiles().hasReplyMutation()) {
@@ -5123,6 +5488,9 @@ void MyMesh::applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, 
 }
 
 bool MyMesh::scheduleNormalRadio() {
+#if MESH_ENABLE_FLEET_CONTROL
+  finishFleetReplyMutation(false);
+#endif
   ++primary_radio_mutation_generation;
   if (_cli.radioProfiles().hasReplyMutation()) {
     _cli.radioProfiles().finishReplyMutation(false);
@@ -5199,6 +5567,7 @@ void MyMesh::updateFloodAdvertTimer() {
   }
 }
 
+#if MESH_ENABLE_PACKET_FILE_LOGGING
 void MyMesh::dumpLogFile() {
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
   if (_command_output) {
@@ -5230,6 +5599,29 @@ void MyMesh::dumpLogFile() {
   }
 #endif
 }
+#else
+void MyMesh::dumpLogFile() { }
+#endif
+
+bool MyMesh::handleGuestCommand(const char* command, char* reply, size_t capacity) {
+  const bool get = strncmp(command, "get guest", 9) == 0;
+  const bool set = strncmp(command, "set guest", 9) == 0;
+  if ((!get && !set) || (command[9] && command[9] != ' ' && command[9] != '\t')) return false;
+  const char* value = command + 9;
+  while (*value == ' ' || *value == '\t') ++value;
+  if ((get && *value) || (set && strcmp(value, "on") && strcmp(value, "off"))) {
+    snprintf(reply, capacity, "Err - use get guest or set guest on|off");
+  } else if (get) {
+    snprintf(reply, capacity, "> %s%s", guest_login.enabled() ? "on" : "off",
+        guest_login.healthy() ? "" : " (settings unavailable)");
+  } else {
+    const bool saved = guest_login.setEnabled(strcmp(value, "on") == 0);
+    if (!guest_login.enabled()) acl.removeGuestClients();
+    if (saved) snprintf(reply, capacity, "OK - guest %s", guest_login.enabled() ? "on" : "off");
+    else snprintf(reply, capacity, "Err - guest setting save unconfirmed; reboot may differ");
+  }
+  return true;
+}
 
 void MyMesh::printAclSerial() {
 #if MESH_USB_CONSOLE_COOPERATIVE
@@ -5257,16 +5649,22 @@ void MyMesh::printAclSerial() {
 
 #if MESH_USB_CONSOLE_COOPERATIVE
 bool MyMesh::hasPendingSerialOutput() const {
-  return serial_log_active || serial_log_eof_pending || serial_recent_next >= 0
+  return
+#if MESH_ENABLE_PACKET_FILE_LOGGING
+      serial_log_active || serial_log_eof_pending ||
+#endif
+      serial_recent_next >= 0
       || serial_acl_next >= 0;
 }
 
 void MyMesh::cancelPendingSerialOutput() {
+#if MESH_ENABLE_PACKET_FILE_LOGGING
   if (serial_log_active) serial_log_dump.close();
   serial_log_active = false;
   serial_log_eof_pending = false;
   serial_log_skip_line = false;
   serial_log_remaining = 0;
+#endif
   serial_log_pending_size = 0;
   serial_acl_next = -1;
   serial_acl_count = 0;
@@ -5347,13 +5745,15 @@ void MyMesh::servicePendingSerialOutput() {
         }
         char prefix[MAX_ROUTE_HASH_BYTES * 2 + 1];
         char snr[12];
-        mesh::Utils::toHex(prefix, info->prefix, info->prefix_len);
+        alignas(uint32_t) uint8_t recorded_prefix[MAX_ROUTE_HASH_BYTES];
+        SimpleMeshTables::copyRecentRepeaterPrefix(recorded_prefix, *info);
+        mesh::Utils::toHex(prefix, recorded_prefix, info->prefix_len);
         formatLocalSnrX4(snr, sizeof(snr), info->snr_x4);
         length = snprintf(record, sizeof(record), "%s,%s%s\n", prefix,
                           snr[0] == '-' ? "" : " ", snr);
         // Snapshot the row before a short write. Its next pass must retry only
         // the retained suffix, even if the live recent-repeater table changes.
-        serial_recent_cursor = *info;
+        SimpleMeshTables::copyRecentRepeaterInfo(serial_recent_cursor, *info);
         serial_recent_cursor_index = next_index;
         serial_recent_has_cursor = true;
       } else {
@@ -5380,6 +5780,7 @@ void MyMesh::servicePendingSerialOutput() {
     }
     return;
   }
+#if MESH_ENABLE_PACKET_FILE_LOGGING
   if (!serial_log_active) {
     // CommonCLI's synchronous EOF is suppressed until the queued dump ends.
     static const char eof[] = "  ->    EOF\r\n";
@@ -5446,6 +5847,7 @@ void MyMesh::servicePendingSerialOutput() {
     serial_log_dump.close();
     serial_log_active = false;
   }
+#endif
 }
 #endif
 
@@ -6152,7 +6554,8 @@ bool MyMesh::loadFloodPacketFilters() {
   uint8_t count = 0;
   bool success = file.read(magic, sizeof(magic)) == sizeof(magic);
   bool version_6 = success && memcmp(magic, "FPF6", sizeof(magic)) == 0;
-  bool version_7 = success && memcmp(magic, "FPF7", sizeof(magic)) == 0;
+  bool version_8 = success && memcmp(magic, "FPF8", sizeof(magic)) == 0;
+  bool version_7 = version_8 || (success && memcmp(magic, "FPF7", sizeof(magic)) == 0);
   success = (version_6 || version_7)
       && file.read(&count, sizeof(count)) == sizeof(count);
   // A wider firmware image can write inactive trailing slots. Decode them
@@ -6170,6 +6573,8 @@ bool MyMesh::loadFloodPacketFilters() {
   for (int i = 0; success && i < count; i++) {
     auto& entry = i < flood_packet_filter_slots ? loaded[i] : overflow_entry;
     if (i >= flood_packet_filter_slots) memset(&entry, 0, sizeof(entry));
+    char stored_scope_name[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN] = {};
+    char stored_region_name[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN] = {};
     uint8_t active = 0;
     uint8_t suspend_on_temp_radio = 0;
     uint8_t match_blacklisted_path = 0;
@@ -6186,11 +6591,11 @@ bool MyMesh::loadFloodPacketFilters() {
     success = success && file.read(&suspend_on_temp_radio,
                                     sizeof(suspend_on_temp_radio))
         == sizeof(suspend_on_temp_radio);
-    success = success && file.read((uint8_t*)entry.scope_name,
-                                    sizeof(entry.scope_name))
-        == sizeof(entry.scope_name);
+    success = success && file.read((uint8_t*)stored_scope_name,
+                                    sizeof(stored_scope_name))
+        == sizeof(stored_scope_name);
     success = success
-        && memchr(entry.scope_name, 0, sizeof(entry.scope_name)) != NULL;
+        && memchr(stored_scope_name, 0, sizeof(stored_scope_name)) != NULL;
     success = success && file.read(&match_blacklisted_path,
                                     sizeof(match_blacklisted_path))
         == sizeof(match_blacklisted_path);
@@ -6242,20 +6647,23 @@ bool MyMesh::loadFloodPacketFilters() {
                        sizeof(entry.rate_per_minute))
               == sizeof(entry.rate_per_minute);
       success = success
-          && file.read((uint8_t*)entry.target_region_name,
-                       sizeof(entry.target_region_name))
-              == sizeof(entry.target_region_name);
+          && file.read((uint8_t*)stored_region_name,
+                       sizeof(stored_region_name))
+              == sizeof(stored_region_name);
       success = success
           && file.read(&entry.priority, sizeof(entry.priority))
               == sizeof(entry.priority);
       success = success
           && file.read(&stop_on_match, sizeof(stop_on_match))
               == sizeof(stop_on_match);
+      if (success && version_8) {
+        success = FloodRuleExtensions::readFields(file, entry.extra);
+      }
     } else {
       entry.incoming_scope_kind = scope_requires_region_match
           ? FloodFilterPolicy::RULE_IN_ALLOWED
           : FloodFilterPolicy::RULE_IN_ANY;
-      drop_on_match = entry.scope_name[0] == 0 ? 1 : 0;
+      drop_on_match = stored_scope_name[0] == 0 ? 1 : 0;
     }
     if (success && version_7) {
       success = FloodFilterPolicy::decodeStoredRuleChannel(
@@ -6284,8 +6692,8 @@ bool MyMesh::loadFloodPacketFilters() {
       success = false;
     }
     success = success && FloodFilterPolicy::transportActionsSupported(
-        entry.transport_modes, entry.scope_name[0] != 0
-            || entry.target_region_name[0] != 0,
+        entry.transport_modes, stored_scope_name[0] != 0
+            || stored_region_name[0] != 0,
         entry.retry_on_match, entry.scope_uses_slow_timing);
     if (!success) break;
     if (!entry.active) {
@@ -6293,12 +6701,12 @@ bool MyMesh::loadFloodPacketFilters() {
       continue;
     }
 
-    bool direct_target = entry.scope_name[0] != 0;
+    bool direct_target = stored_scope_name[0] != 0;
     bool target_name_terminated = memchr(
-        entry.target_region_name, 0,
-        sizeof(entry.target_region_name)) != NULL;
+        stored_region_name, 0,
+        sizeof(stored_region_name)) != NULL;
     bool region_target = target_name_terminated
-        && entry.target_region_name[0] != 0;
+        && stored_region_name[0] != 0;
     bool input_name_terminated = memchr(
         entry.incoming_scope_name, 0,
         sizeof(entry.incoming_scope_name)) != NULL;
@@ -6354,9 +6762,13 @@ bool MyMesh::loadFloodPacketFilters() {
           || entry.payload_type == PAYLOAD_TYPE_GRP_DATA;
     }
 
-    bool path_valid = FloodFilterPolicy::pathMatcherValid(
-        entry.path_hash_size, entry.path_hops,
-        entry.match_blacklisted_path);
+    // Keep malformed two-target records invalid; never silently select one.
+    if (target_name_terminated && !(direct_target && region_target)) {
+      entry.target_is_region = region_target;
+      memcpy(entry.target_name, region_target ? stored_region_name : stored_scope_name,
+             sizeof(entry.target_name));
+    }
+    bool path_valid = FloodRuleExtensions::validRuleFields(entry);
     bool action_valid = entry.drop_on_match || direct_target
         || region_target || entry.rate_limit_enabled
         || entry.stop_on_match || entry.retry_on_match;
@@ -6365,11 +6777,11 @@ bool MyMesh::loadFloodPacketFilters() {
           && entry.min_hops <= entry.max_hops
           && entry.max_hops <= FLOOD_PACKET_FILTER_MAX_HOPS
           && (!direct_target
-              || isValidStoredFloodFilterScopeName(entry.scope_name))
+              || isValidStoredFloodFilterScopeName(stored_scope_name))
           && target_name_terminated
           && (!region_target
               || isValidStoredFloodRuleRegionName(
-                  entry.target_region_name))
+                  stored_region_name))
           && !(direct_target && region_target)
           && !(entry.drop_on_match && (direct_target || region_target))
           && !(entry.drop_on_match && entry.rate_limit_enabled)
@@ -6382,6 +6794,11 @@ bool MyMesh::loadFloodPacketFilters() {
           && incoming_valid && channel_valid && path_valid
           && action_valid)) {
       success = false;
+    }
+    if (success) {
+      entry.target_is_region = region_target;
+      memcpy(entry.target_name, region_target ? stored_region_name : stored_scope_name,
+             sizeof(entry.target_name));
     }
     if (success && i >= flood_packet_filter_slots) active_overflow = true;
   }
@@ -6610,7 +7027,7 @@ bool MyMesh::isFloodChannelDataRule(
       && valid_hops
       && entry.max_hops == FLOOD_PACKET_FILTER_MAX_HOPS
       && !entry.suspend_on_temp_radio
-      && entry.scope_name[0] == 0
+      && entry.scopeName()[0] == 0
       && !entry.match_blacklisted_path
       && !entry.scope_uses_slow_timing
       && entry.incoming_scope_kind == FloodFilterPolicy::RULE_IN_ANY
@@ -6619,12 +7036,13 @@ bool MyMesh::isFloodChannelDataRule(
       && entry.channel_name[0] == 0
       && entry.path_hash_size == 0
       && entry.path_hops == 0
-      && entry.target_region_name[0] == 0
+      && entry.regionName()[0] == 0
       && entry.drop_on_match
       && !entry.rate_limit_enabled
       && entry.priority == 0
       && !entry.stop_on_match
-      && !entry.retry_on_match;
+      && !entry.retry_on_match
+      && !FloodRuleExtensions::hasFields(entry.extra);
 }
 
 int MyMesh::findFloodChannelDataRule() const {
@@ -6899,7 +7317,7 @@ bool MyMesh::migrateLegacyFloodChannelBlocks() {
           && entry.min_hops == min_hops
           && entry.max_hops == FLOOD_PACKET_FILTER_MAX_HOPS
           && !entry.suspend_on_temp_radio
-          && entry.scope_name[0] == 0
+          && entry.scopeName()[0] == 0
           && !entry.match_blacklisted_path
           && !entry.scope_uses_slow_timing
           && entry.incoming_scope_kind == FloodFilterPolicy::RULE_IN_ANY
@@ -6907,7 +7325,7 @@ bool MyMesh::migrateLegacyFloodChannelBlocks() {
           && entry.channel_key_len == row.key_len
           && memcmp(entry.channel_secret, row.secret, row.key_len) == 0
           && entry.path_hash_size == 0 && entry.path_hops == 0
-          && entry.target_region_name[0] == 0
+          && entry.regionName()[0] == 0
           && entry.drop_on_match && !entry.rate_limit_enabled
           && !entry.stop_on_match;
       if (duplicate) break;
@@ -6974,10 +7392,12 @@ bool MyMesh::saveFloodPacketFilters(bool empty_scope_phase,
     return true;
   };
 
-  const uint8_t magic[4] = {'F', 'P', 'F', '7'};
   const uint8_t count = FloodFilterPolicy::forwardPersistenceCount(
       flood_packet_filters, flood_packet_filter_slots,
       empty_forward_phase);
+  const bool version_8 = FloodRuleExtensions::tableUsesExtensions(
+      flood_packet_filters, count);
+  const uint8_t magic[4] = {'F', 'P', 'F', version_8 ? uint8_t('8') : uint8_t('7')};
   bool success = writeExact(magic, sizeof(magic))
       && writeExact(&count, sizeof(count));
   for (int i = 0; success && i < count; i++) {
@@ -7002,7 +7422,7 @@ bool MyMesh::saveFloodPacketFilters(bool empty_scope_phase,
         && writeExact(&entry.min_hops, sizeof(entry.min_hops))
         && writeExact(&entry.max_hops, sizeof(entry.max_hops))
         && writeExact(&suspend_on_temp_radio, sizeof(suspend_on_temp_radio))
-        && writeExact(entry.scope_name, sizeof(entry.scope_name))
+        && writeExact(entry.scopeName(), sizeof(entry.scopeName()))
         && writeExact(&match_blacklisted_path,
                       sizeof(match_blacklisted_path))
         && writeExact(&scope_requires_region_match,
@@ -7022,10 +7442,13 @@ bool MyMesh::saveFloodPacketFilters(bool empty_scope_phase,
         && writeExact(&drop_on_match, sizeof(drop_on_match))
         && writeExact(&rate_limit_enabled, sizeof(rate_limit_enabled))
         && writeExact(&entry.rate_per_minute, sizeof(entry.rate_per_minute))
-        && writeExact(entry.target_region_name,
-                      sizeof(entry.target_region_name))
+        && writeExact(entry.regionName(),
+                      sizeof(entry.regionName()))
         && writeExact(&entry.priority, sizeof(entry.priority))
         && writeExact(&stop_on_match, sizeof(stop_on_match));
+    if (success && version_8) {
+      success = FloodRuleExtensions::writeFields(writeExact, entry.extra);
+    }
   }
   static_assert(FLOOD_CHANNEL_SCOPE_SLOTS <= 255,
                 "FPF7 scope phase count is one byte");
@@ -7136,11 +7559,11 @@ bool MyMesh::loadFloodPacketFilters() {
     success = success && file.read(&suspend_on_temp_radio,
                                     sizeof(suspend_on_temp_radio))
         == sizeof(suspend_on_temp_radio);
-    success = success && file.read((uint8_t*)loaded[i].scope_name,
-                                    sizeof(loaded[i].scope_name))
-        == sizeof(loaded[i].scope_name);
+    success = success && file.read((uint8_t*)loaded[i].scopeName(),
+                                    sizeof(loaded[i].scopeName()))
+        == sizeof(loaded[i].scopeName());
     success = success
-        && memchr(loaded[i].scope_name, 0, sizeof(loaded[i].scope_name)) != NULL;
+        && memchr(loaded[i].scopeName(), 0, sizeof(loaded[i].scopeName())) != NULL;
     success = success && file.read(&match_blacklisted_path,
                                     sizeof(match_blacklisted_path))
         == sizeof(match_blacklisted_path);
@@ -7159,7 +7582,7 @@ bool MyMesh::loadFloodPacketFilters() {
         || match_blacklisted_path > 1 || scope_requires_region_match > 1
         || scope_uses_slow_timing > 1
         || (!loaded[i].active
-            && (loaded[i].suspend_on_temp_radio || loaded[i].scope_name[0] != 0
+            && (loaded[i].suspend_on_temp_radio || loaded[i].scopeName()[0] != 0
                 || loaded[i].match_blacklisted_path
                 || loaded[i].scope_requires_region_match
                 || loaded[i].scope_uses_slow_timing)))) {
@@ -7170,17 +7593,17 @@ bool MyMesh::loadFloodPacketFilters() {
                 || loaded[i].payload_type == FLOOD_PACKET_FILTER_ANY_TYPE)
             && loaded[i].min_hops <= loaded[i].max_hops
             && loaded[i].max_hops <= FLOOD_PACKET_FILTER_MAX_HOPS
-            && (loaded[i].scope_name[0] == 0
-                || isValidStoredFloodFilterScopeName(loaded[i].scope_name))
+            && (loaded[i].scopeName()[0] == 0
+                || isValidStoredFloodFilterScopeName(loaded[i].scopeName()))
             && (!loaded[i].scope_requires_region_match
-                || loaded[i].scope_name[0] != 0)
+                || loaded[i].scopeName()[0] != 0)
             && (!loaded[i].scope_uses_slow_timing
-                || loaded[i].scope_name[0] != 0))) {
+                || loaded[i].scopeName()[0] != 0))) {
       success = false;
     }
-    if (success && loaded[i].scope_name[0] != 0) {
-      StrHelper::strzcpy(loaded[i].scope_name, loaded[i].scope_name,
-                         sizeof(loaded[i].scope_name));
+    if (success && loaded[i].scopeName()[0] != 0) {
+      StrHelper::strzcpy(loaded[i].scopeName(), loaded[i].scopeName(),
+                         sizeof(loaded[i].scopeName()));
     }
   }
   file.close();
@@ -7220,8 +7643,8 @@ bool MyMesh::saveFloodPacketFilters(bool empty_scope_phase,
     success = success && file.write(&entry.min_hops, sizeof(entry.min_hops)) == sizeof(entry.min_hops);
     success = success && file.write(&entry.max_hops, sizeof(entry.max_hops)) == sizeof(entry.max_hops);
     success = success && file.write(&suspend_on_temp_radio, sizeof(suspend_on_temp_radio)) == sizeof(suspend_on_temp_radio);
-    success = success && file.write((const uint8_t*)entry.scope_name,
-                                    sizeof(entry.scope_name)) == sizeof(entry.scope_name);
+    success = success && file.write((const uint8_t*)entry.scopeName(),
+                                    sizeof(entry.scopeName())) == sizeof(entry.scopeName());
     success = success && file.write(&match_blacklisted_path,
                                     sizeof(match_blacklisted_path))
         == sizeof(match_blacklisted_path);
@@ -7253,14 +7676,16 @@ bool MyMesh::floodPacketFilterFieldsMatch(
     bool incoming_region_allowed,
     const RegionEntry* incoming_region, uint8_t context) const {
   if (!entry.active || !FloodFilterPolicy::ruleModeMatches(
-          entry.transport_modes, context, packet)) return false;
+          entry.transport_modes, context, packet, entry.extra.route)
+      || !FloodRuleExtensions::matchesEnvelope(entry.extra, packet, context)) return false;
   if (!FloodFilterPolicy::channelKeyLengthSupported(
           entry.channel_key_len)) return false;
   if (entry.suspend_on_temp_radio && isAnyTempRadioActive()) return false;
   if (entry.match_blacklisted_path && !floodPacketFilterBlacklistMatches(packet)) {
     return false;
   }
-  if (!FloodFilterPolicy::pathStartsWith(
+  if (!FloodFilterPolicy::pathHashBytesMatch(entry.path_hash_size, packet->getPathHashSize())
+      || !FloodRuleExtensions::pathMatches(entry.extra,
           packet, entry.path_hash_size, entry.path_hops, entry.path)) {
     return false;
   }
@@ -7268,7 +7693,8 @@ bool MyMesh::floodPacketFilterFieldsMatch(
   uint8_t type = packet->getPayloadType();
   uint8_t hops = packet->getPathHashCount();
   if ((entry.payload_type != FLOOD_PACKET_FILTER_ANY_TYPE && entry.payload_type != type)
-      || hops < entry.min_hops || hops > entry.max_hops) {
+      || (packet->isRouteFlood() ? hops < entry.min_hops || hops > entry.max_hops
+          : entry.min_hops != 0 || entry.max_hops != FLOOD_PACKET_FILTER_MAX_HOPS)) {
     return false;
   }
 
@@ -7324,7 +7750,7 @@ bool MyMesh::authenticateFloodPacketFilterChannel(
 
 bool MyMesh::hasFloodPacketFilterRetryRules() const {
   for (int i = 0; i < flood_packet_filter_slots; i++) {
-    if (flood_packet_filters[i].active
+    if (flood_packet_filters[i].active && !flood_packet_filters[i].extra.disabled
         && flood_packet_filters[i].retry_on_match) return true;
   }
   return false;
@@ -7377,14 +7803,14 @@ uint64_t MyMesh::applyFloodPacketFilterStop(uint64_t match_mask) {
     specificities[i] = FloodFilterPolicy::channelMatcherSpecificity(
         entry.channel_key_len);
     bool region_usable = true;
-    if (entry.target_region_name[0] != 0) {
+    if (entry.regionName()[0] != 0) {
       TransportKey scope;
       const char* canonical_name = NULL;
       region_usable = resolveFloodPacketFilterTargetRegion(
-          entry.target_region_name, scope, canonical_name);
+          entry.regionName(), scope, canonical_name);
     }
     stop_flags[i] = FloodFilterPolicy::stopActionApplies(
-        entry.stop_on_match, entry.target_region_name[0] != 0,
+        entry.stop_on_match, entry.regionName()[0] != 0,
         region_usable) ? 1 : 0;
   }
   return FloodFilterPolicy::truncateRulesAtStop(
@@ -7395,9 +7821,9 @@ uint64_t MyMesh::applyFloodPacketFilterStop(uint64_t match_mask) {
 uint64_t MyMesh::evaluateFloodPacketFilterMatches(
     const mesh::Packet* packet, bool incoming_region_allowed,
     const RegionEntry* incoming_region, uint8_t context) {
-  static_assert(FLOOD_PACKET_FILTER_SLOTS <= 64,
-                "flood filter match mask supports at most 64 slots");
-  if (packet == NULL || (context == FloodFilterPolicy::RULE_MODE_RADIO && !packet->isRouteFlood())) return 0;
+  static_assert(FLOOD_PACKET_FILTER_SLOTS < 64,
+                "flood filter mask reserves bit 63 for exhausted pattern work");
+  if (packet == NULL) return 0;
   bool incoming_is_scoped =
       packet->getRouteType() == ROUTE_TYPE_TRANSPORT_FLOOD
       || packet->getRouteType() == ROUTE_TYPE_TRANSPORT_DIRECT;
@@ -7405,6 +7831,7 @@ uint64_t MyMesh::evaluateFloodPacketFilterMatches(
       ? packet->transport_codes[0] : 0;
   bool channel_auth_checked[FLOOD_PACKET_FILTER_SLOTS] = { false };
   bool channel_auth_valid[FLOOD_PACKET_FILTER_SLOTS] = { false };
+  uint32_t pattern_work = 131072;
   uint64_t matches = 0;
   for (int i = 0; i < flood_packet_filter_slots; i++) {
     const auto& entry = flood_packet_filters[i];
@@ -7433,7 +7860,18 @@ uint64_t MyMesh::evaluateFloodPacketFilterMatches(
       channel_auth_checked[i] = true;
       channel_auth_valid[i] = authenticated;
     }
-    if (authenticated) matches |= (uint64_t)1U << i;
+    bool budget_exceeded = false;
+    const bool content_matched = authenticated
+        && FloodRuleExtensions::matchesContent(entry.extra,
+            packet, entry.channel_secret, entry.channel_key_len, &pattern_work,
+            false, &budget_exceeded);
+    if (budget_exceeded) return uint64_t(1) << 63;
+    if (content_matched
+        && (entry.extra.probability == 0 || entry.extra.probability == 100
+            || FloodRuleExtensions::matchesProbability(
+                entry.extra, FloodRuleExtensions::probabilityRoll(
+                    packet, flood_filter_probability_seed, i, context))))
+      matches |= (uint64_t)1U << i;
   }
   return applyFloodPacketFilterStop(matches);
 }
@@ -7453,18 +7891,18 @@ bool MyMesh::applyFloodPacketFilterScope(mesh::Packet* packet,
     if (i < 0) break;
     visited |= (uint64_t)1U << i;
     const auto& entry = flood_packet_filters[i];
-    if (entry.scope_name[0] == 0
-        && entry.target_region_name[0] == 0) {
+    if (entry.scopeName()[0] == 0
+        && entry.regionName()[0] == 0) {
       continue;
     }
 
     TransportKey scope;
-    const char* target_name = entry.scope_name;
-    if (entry.scope_name[0] != 0) {
-      deriveFloodFilterScopeKey(entry.scope_name, scope);
+    const char* target_name = entry.scopeName();
+    if (entry.scopeName()[0] != 0) {
+      deriveFloodFilterScopeKey(entry.scopeName(), scope);
     } else {
       if (!resolveFloodPacketFilterTargetRegion(
-              entry.target_region_name, scope, target_name)) {
+              entry.regionName(), scope, target_name)) {
         continue;
       }
     }
@@ -7489,6 +7927,7 @@ bool MyMesh::applyFloodPacketFilterScope(mesh::Packet* packet,
 bool MyMesh::shouldBlockFloodPacketForward(const mesh::Packet* packet,
                                             uint64_t match_mask) const {
   if (packet == NULL) return false;
+  if (match_mask & (uint64_t(1) << 63)) return true;
   uint8_t type = packet->getPayloadType();
   uint8_t hops = packet->getPathHashCount();
 
@@ -7587,10 +8026,10 @@ bool MyMesh::applyFloodPacketFilterScope(mesh::Packet* packet,
   for (int i = 0; i < flood_packet_filter_slots; i++) {
     const auto& entry = flood_packet_filters[i];
     if ((match_mask & ((uint64_t)1U << i)) == 0
-        || entry.scope_name[0] == 0) continue;
+        || entry.scopeName()[0] == 0) continue;
 
     TransportKey scope;
-    deriveFloodFilterScopeKey(entry.scope_name, scope);
+    deriveFloodFilterScopeKey(entry.scopeName(), scope);
     bool scope_changed = FloodFilterPolicy::setTransportScope(
         packet, scope.calcTransportCode(packet));
     scope_set = true;
@@ -7599,7 +8038,7 @@ bool MyMesh::applyFloodPacketFilterScope(mesh::Packet* packet,
     if (scope_changed && log_change) {
       MESH_DEBUG_PRINTLN("flood.filter set scope slot=%d type=%d hops=%d scope=%s tx=%s",
                          i + 1, packet->getPayloadType(),
-                         packet->getPathHashCount(), entry.scope_name,
+                         packet->getPathHashCount(), entry.scopeName(),
                          entry.scope_uses_slow_timing ? "slow" : "fast");
     }
     return scope_changed;
@@ -7615,7 +8054,7 @@ bool MyMesh::shouldBlockFloodPacketForward(const mesh::Packet* packet,
   for (int i = 0; i < flood_packet_filter_slots; i++) {
     const auto& entry = flood_packet_filters[i];
     if ((match_mask & ((uint64_t)1U << i)) != 0
-        && entry.scope_name[0] == 0) {
+        && entry.scopeName()[0] == 0) {
       MESH_DEBUG_PRINTLN("allowPacketForward: flood.filter matched slot=%d type=%d hops=%d range=%d-%d",
                          i + 1, type, hops, entry.min_hops,
                          entry.max_hops);
@@ -7649,7 +8088,7 @@ void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_
     return;
   }
   const auto& entry = flood_packet_filters[index];
-  if (compact) {
+  if (compact || FloodRuleExtensions::hasFields(entry.extra) || entry.path_hops > 3) {
     FloodRuleCLI::formatCompact(reply, reply_len, index + 1, entry);
     return;
   }
@@ -7703,13 +8142,13 @@ void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_
   action[0] = 0;
   if (entry.drop_on_match) {
     strcpy(action, "drop");
-  } else if (entry.scope_name[0] != 0) {
-    snprintf(action, sizeof(action), "scope=%s", entry.scope_name);
-  } else if (entry.target_region_name[0] != 0) {
+  } else if (entry.scopeName()[0] != 0) {
+    snprintf(action, sizeof(action), "scope=%s", entry.scopeName());
+  } else if (entry.regionName()[0] != 0) {
     snprintf(action, sizeof(action), "region=%s%s",
-             entry.target_region_name,
+             entry.regionName(),
              floodRuleRegionNamePresent(
-                 region_map, entry.target_region_name) ? "" : "?");
+                 region_map, entry.regionName()) ? "" : "?");
   }
   rate[0] = 0;
   if (entry.rate_limit_enabled) {
@@ -7748,6 +8187,28 @@ void MyMesh::formatFloodPacketFilters(const char* args, char* reply, bool compac
   const char* selector = skipFloodFilterSpaces(args);
   if (*selector == '.') selector = skipFloodFilterSpaces(selector + 1);
   if (*selector != 0) {
+    const char* field = strchr(selector, ' ');
+    if (field) {
+      char slot_text[4];
+      const size_t length = size_t(field - selector);
+      uint8_t slot = 0;
+      if (!length || length >= sizeof(slot_text)) {
+        strcpy(reply, "Err - invalid rule slot"); return;
+      }
+      memcpy(slot_text, selector, length); slot_text[length] = 0;
+      field = skipFloodFilterSpaces(field);
+      if (!parseFloodFilterUnsigned(slot_text, flood_packet_filter_slots, slot)
+          || !slot || !flood_packet_filters[slot - 1].active) {
+        strcpy(reply, "Err - rule slot is empty");
+      } else if (floodFilterAsciiEqual(field, "n") || floodFilterAsciiEqual(field, "sender")) {
+        snprintf(reply, 160, "> %s", flood_packet_filters[slot - 1].extra.sender);
+      } else if (floodFilterAsciiEqual(field, "x") || floodFilterAsciiEqual(field, "text")) {
+        snprintf(reply, 160, "> %s", flood_packet_filters[slot - 1].extra.text);
+      } else {
+        strcpy(reply, "Err - field is sender/n or text/x");
+      }
+      return;
+    }
     uint8_t slot;
     if (!parseFloodFilterUnsigned(selector, flood_packet_filter_slots, slot) || slot == 0) {
       snprintf(reply, 160, "Err - filter slot must be 1-%d", flood_packet_filter_slots);
@@ -7771,11 +8232,11 @@ void MyMesh::formatFloodPacketFilters(const char* args, char* reply, bool compac
     formatFloodFilterHopSpec(hops, sizeof(hops), entry.min_hops, entry.max_hops);
     if (entry.drop_on_match) {
       strcpy(target, "!drop");
-    } else if (entry.scope_name[0] != 0) {
-      snprintf(target, sizeof(target), ">%s", entry.scope_name);
-    } else if (entry.target_region_name[0] != 0) {
+    } else if (entry.scopeName()[0] != 0) {
+      snprintf(target, sizeof(target), ">%s", entry.scopeName());
+    } else if (entry.regionName()[0] != 0) {
       snprintf(target, sizeof(target), ">r:%s",
-               entry.target_region_name);
+               entry.regionName());
     } else {
       target[0] = 0;
     }
@@ -7784,7 +8245,7 @@ void MyMesh::formatFloodPacketFilters(const char* args, char* reply, bool compac
       snprintf(priority, sizeof(priority), "^%u",
                (unsigned int)entry.priority);
     }
-    snprintf(item, sizeof(item), " %d=%s~%s@%s%s%s%s%s%s%s%s%s%s",
+    snprintf(item, sizeof(item), " %d=%s~%s@%s%s%s%s%s%s%s%s%s%s%s",
              i + 1, floodFilterPayloadTypeName(entry.payload_type),
              FloodFilterPolicy::ruleModeName(entry.transport_modes), hops,
              entry.match_blacklisted_path ? "?blacklist" : "",
@@ -7794,7 +8255,8 @@ void MyMesh::formatFloodPacketFilters(const char* args, char* reply, bool compac
              entry.retry_on_match ? "~retry" : "",
              entry.scope_uses_slow_timing ? "~slow" : "",
              entry.suspend_on_temp_radio ? "~tempradio" : "",
-             i == findFloodChannelDataRule() ? "~data" : "");
+             i == findFloodChannelDataRule() ? "~data" : "",
+             entry.extra.disabled ? "~off" : "");
     size_t item_len = strlen(item);
     if (used + item_len >= 156) {
       truncated = true;
@@ -7838,29 +8300,42 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
     }
   }
   cursor = skipFloodFilterSpaces(cursor);
-  if (strlen(cursor) >= 192) {
+  if (requested_slot >= 0) {
+    const char* state = cursor;
+    if (!strncmp(state, "enabled=", 8)) state += 8;
+    else if (!strncmp(state, "e=", 2)) state += 2;
+    if (state != cursor || !strcmp(state, "on") || !strcmp(state, "off")) {
+      uint8_t disabled;
+      if (!FloodRuleExtensions::enabledValue(state, disabled)) {
+        strcpy(reply, "Err - enabled is on or off"); return;
+      }
+      auto& entry = flood_packet_filters[requested_slot];
+      if (!entry.active) { strcpy(reply, "Err - empty filter slot"); return; }
+      const uint8_t previous = entry.extra.disabled;
+      const uint8_t previous_channel_data_slot = flood_channel_data_rule_slot;
+      entry.extra.disabled = disabled;
+      // Editing the compatibility row through fr gives it the same ordinary
+      // rule ownership as replacing that row through the full setter.
+      if (previous != disabled && requested_slot == flood_channel_data_rule_slot)
+        flood_channel_data_rule_slot = 0xFF;
+      if (previous != disabled && !saveFloodPacketFilters()) {
+        entry.extra.disabled = previous;
+        flood_channel_data_rule_slot = previous_channel_data_slot;
+        strcpy(reply, "Err - filter save unconfirmed; reboot may differ"); return;
+      }
+      strcpy(reply, disabled ? "OK - rule disabled" : "OK - rule enabled"); return;
+    }
+  }
+  char params[256];
+  if (strlen(cursor) >= sizeof(params)) {
     strcpy(reply, "Err - rule parameters too long");
     return;
   }
 
-  char params[192];
   strcpy(params, cursor);
-  char* tokens[18];
-  int token_count = 0;
-  char* token = params;
-  while (*token != 0) {
-    if (token_count >= 18) {
-      strcpy(reply, "Err - too many rule parameters");
-      return;
-    }
-    tokens[token_count++] = token;
-    char* separator = strchr(token, ' ');
-    if (separator == NULL) break;
-    *separator++ = 0;
-    while (*separator == ' ') separator++;
-    token = separator;
-  }
-  if (token_count == 0) {
+  char* tokens[26];
+  const int token_count = FloodRuleExtensions::tokenize(params, tokens, 26);
+  if (token_count <= 0) {
     strcpy(reply, FLOOD_PACKET_FILTER_USAGE);
     return;
   }
@@ -7914,7 +8389,12 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
   bool retry_on_match = false;
   uint8_t transport_modes = FloodFilterPolicy::RULE_MODE_RADIO;
   bool mode_set = false;
+  FloodRuleExtensions::Fields extra{};
+  uint8_t extra_seen = 0;
   for (int i = 1; i < token_count; i++) {
+    const int extended = FloodRuleExtensions::parseToken(tokens[i], extra, extra_seen, reply);
+    if (extended < 0) return;
+    if (extended > 0) continue;
     if (floodFilterAsciiStartsWith(tokens[i], "mode=")
         || floodFilterAsciiStartsWith(tokens[i], "m=")) {
       if (mode_set) {
@@ -8109,6 +8589,15 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
       StrHelper::strzcpy(target_region_name, region->name,
                          sizeof(target_region_name));
       target_set = true;
+    } else if (floodFilterAsciiEqual(tokens[i], "allow")
+        || floodFilterAsciiEqual(tokens[i], "forward")
+        || floodFilterAsciiEqual(tokens[i], "a")
+        || floodFilterAsciiEqual(tokens[i], "action=allow")
+        || floodFilterAsciiEqual(tokens[i], "action=forward")) {
+      if (stop_on_match) {
+        strcpy(reply, FLOOD_PACKET_FILTER_DUPLICATE); return;
+      }
+      stop_on_match = true;
     } else if (floodFilterAsciiEqual(tokens[i], "drop")
         || floodFilterAsciiEqual(tokens[i], "d")
         || floodFilterAsciiEqual(tokens[i], "action=drop")) {
@@ -8126,9 +8615,12 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
       }
       char rate_text[24];
       const bool compact = floodFilterAsciiStartsWith(tokens[i], "q=");
-      StrHelper::strncpy(rate_text,
-                         tokens[i] + (compact ? 2 : strlen("rate=")),
-                         sizeof(rate_text));
+      const char* value = tokens[i] + (compact ? 2 : strlen("rate="));
+      if (strlen(value) >= sizeof(rate_text)) {
+        strcpy(reply, "Err - rate value too long");
+        return;
+      }
+      StrHelper::strncpy(rate_text, value, sizeof(rate_text));
       char* slash = strchr(rate_text, '/');
       if ((!compact && slash == NULL)
           || (slash != NULL && !(strcmp(slash, "/min") == 0
@@ -8192,6 +8684,7 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
       hashbytes_set = true;
     } else if (floodFilterAsciiStartsWith(tokens[i], "prefix=")
         || floodFilterAsciiStartsWith(tokens[i], "p=")
+        || floodFilterAsciiStartsWith(tokens[i], "pa=")
         || (floodFilterAsciiStartsWith(tokens[i], "path=")
             && !floodFilterAsciiEqual(tokens[i], "path=blacklist"))) {
       if (path_set) {
@@ -8199,12 +8692,11 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
         return;
       }
       const char* value = strchr(tokens[i], '=') + 1;
-      static_assert(FLOOD_PACKET_FILTER_PATH_PREFIX_BYTES_MAX
-                        == FLOOD_GROUP_MODERATION_PATH_BYTES_MAX,
-                    "rule and moderation path buffers must agree");
-      if (!parseFloodModerationPath(value, path_hash_size, path_hops,
-                                    path)) {
-        strcpy(reply, "Err - prefix is * or 1-3 comma-separated 1/2/3-byte IDs");
+      const bool legacy_prefix = floodFilterAsciiStartsWith(tokens[i], "prefix=")
+          || floodFilterAsciiStartsWith(tokens[i], "p=");
+      if (!FloodRuleExtensions::parsePath(value, path_hash_size, path_hops,
+                                    path, extra, legacy_prefix)) {
+        strcpy(reply, "Err - path is [^]ID>...[$], up to four 1/2/3-byte IDs");
         return;
       }
       path_set = true;
@@ -8288,8 +8780,10 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
   candidate.path_hash_size = path_hash_size;
   candidate.path_hops = path_hops;
   memcpy(candidate.path, path, sizeof(candidate.path));
-  StrHelper::strzcpy(candidate.target_region_name, target_region_name,
-                     sizeof(candidate.target_region_name));
+  candidate.target_is_region = target_region_name[0] != 0;
+  StrHelper::strzcpy(candidate.target_name,
+                     candidate.target_is_region ? target_region_name : scope_name,
+                     sizeof(candidate.target_name));
   candidate.drop_on_match = drop_on_match;
   candidate.rate_limit_enabled = rate_limit_enabled;
   candidate.rate_per_minute = rate_per_minute;
@@ -8297,8 +8791,11 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
   candidate.stop_on_match = stop_on_match;
   candidate.retry_on_match = retry_on_match;
   candidate.transport_modes = transport_modes;
-  StrHelper::strzcpy(candidate.scope_name, scope_name,
-                     sizeof(candidate.scope_name));
+  candidate.extra = extra;
+  if (!FloodRuleExtensions::validRuleFields(candidate)) {
+    strcpy(reply, "Err - content needs a keyed group-text channel; scope/retry needs flood route");
+    return;
+  }
 
   int slot = requested_slot;
   if (slot < 0) {
@@ -8309,9 +8806,7 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
       if (i == flood_channel_data_rule_slot) continue;
       const auto& entry = flood_packet_filters[i];
       if (entry.active
-          && memcmp(&entry, &candidate,
-                    offsetof(FloodPacketFilterEntry,
-                             rate_window_started)) == 0) {
+          && FloodFilterPolicy::sameRuleConfiguration(entry, candidate)) {
         slot = i;
         break;
       }
@@ -8349,7 +8844,7 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
     snprintf(reply, 160, "OK - rule %d saved (details exceed reply size)", slot + 1);
     return;
   }
-  snprintf(reply, 160, "OK - %s", detail[0] == '>' ? skipFloodFilterSpaces(detail + 1) : detail);
+  snprintf(reply, 160, "OK - %.154s", detail[0] == '>' ? skipFloodFilterSpaces(detail + 1) : detail);
 }
 #else
 void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_len, bool compact) const {
@@ -8362,8 +8857,8 @@ void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_
   char hops[12];
   formatFloodFilterHopSpec(hops, sizeof(hops), entry.min_hops, entry.max_hops);
   const char* suspension = entry.suspend_on_temp_radio ? " suspend=tempradio" : "";
-  const char* scope_prefix = entry.scope_name[0] ? " scope=" : "";
-  const char* scope_name = entry.scope_name[0] ? entry.scope_name : "";
+  const char* scope_prefix = entry.scopeName()[0] ? " scope=" : "";
+  const char* scope_name = entry.scopeName()[0] ? entry.scopeName() : "";
   const char* path_match = entry.match_blacklisted_path ? " path=blacklist" : "";
   const char* region_requirement =
       entry.scope_requires_region_match ? " require=region" : "";
@@ -8409,8 +8904,8 @@ void MyMesh::formatFloodPacketFilters(const char* args, char* reply, bool compac
     snprintf(item, sizeof(item), " %d=%s@%s%s%s%s%s%s%s",
              i + 1, floodFilterPayloadTypeName(entry.payload_type), hops,
              entry.match_blacklisted_path ? "?blacklist" : "",
-             entry.scope_name[0] ? ">" : "",
-             entry.scope_name,
+             entry.scopeName()[0] ? ">" : "",
+             entry.scopeName(),
              entry.scope_requires_region_match ? "!region" : "",
              entry.scope_uses_slow_timing ? "~slow" : "",
              entry.suspend_on_temp_radio ? "~tempradio" : "");
@@ -8458,12 +8953,16 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
     }
   }
   cursor = skipFloodFilterSpaces(cursor);
-  if (strlen(cursor) >= 140) {
+#if MESH_ENABLE_FLEET_CONTROL
+  char params[256];
+#else
+  char params[140];
+#endif
+  if (strlen(cursor) >= sizeof(params)) {
     strcpy(reply, "Err - filter parameters too long");
     return;
   }
 
-  char params[140];
   strcpy(params, cursor);
   char* tokens[7];
   int token_count = 0;
@@ -8567,7 +9066,7 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
           && entry.suspend_on_temp_radio == suspend_on_temp_radio
           && entry.match_blacklisted_path == match_blacklisted_path
           && entry.scope_requires_region_match == scope_requires_region_match
-          && strcmp(entry.scope_name, scope_name) == 0) {
+          && strcmp(entry.scopeName(), scope_name) == 0) {
         slot = i;
         break;
       }
@@ -8596,7 +9095,7 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
   entry.match_blacklisted_path = match_blacklisted_path;
   entry.scope_requires_region_match = scope_requires_region_match;
   entry.scope_uses_slow_timing = scope_uses_slow_timing;
-  StrHelper::strzcpy(entry.scope_name, scope_name, sizeof(entry.scope_name));
+  StrHelper::strzcpy(entry.scopeName(), scope_name, sizeof(entry.scopeName()));
   if (!saveFloodPacketFilters()) {
     entry = previous;
     strcpy(reply, "Err - unable to save flood filter");
@@ -8605,7 +9104,7 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
 
   char detail[160];
   formatFloodPacketFilterDetail(slot, detail, sizeof(detail));
-  snprintf(reply, 160, "OK - %s", detail[0] == '>' ? skipFloodFilterSpaces(detail + 1) : detail);
+  snprintf(reply, 160, "OK - %.154s", detail[0] == '>' ? skipFloodFilterSpaces(detail + 1) : detail);
 }
 #endif
 
@@ -9309,28 +9808,34 @@ void MyMesh::setFloodChannelScope(const char* args, char* reply) {
   while ((option_result =
               takeFloodModerationToken(cursor, option, sizeof(option))) == 1) {
     if (floodFilterAsciiEqual(option, "tx=slow")
-        || floodFilterAsciiEqual(option, "tx=fast")) {
+        || floodFilterAsciiEqual(option, "tx=fast")
+        || floodFilterAsciiEqual(option, "tx=s")
+        || floodFilterAsciiEqual(option, "tx=f")) {
       if (timing_set) {
         strcpy(reply, "Err - duplicate tx timing");
         return;
       }
       timing_set = true;
-      slow_timing = floodFilterAsciiEqual(option, "tx=slow");
-    } else if (floodFilterAsciiEqual(option, "path=blacklist")) {
+      slow_timing = floodFilterAsciiEqual(option, "tx=slow")
+          || floodFilterAsciiEqual(option, "tx=s");
+    } else if (floodFilterAsciiEqual(option, "path=blacklist")
+        || floodFilterAsciiEqual(option, "p=bl")) {
       if (path_set) {
         strcpy(reply, "Err - duplicate path matcher");
         return;
       }
       path_set = true;
       path_selector = FloodFilterPolicy::SCOPE_PATH_BLACKLIST;
-    } else if (strncmp(option, "path=bucket:", 12) == 0) {
+    } else if (strncmp(option, "path=bucket:", 12) == 0
+        || strncmp(option, "p=b", 3) == 0) {
       if (path_set) {
         strcpy(reply, "Err - duplicate path matcher");
         return;
       }
       uint8_t bucket = 0;
       if (!parseFloodFilterUnsigned(
-              option + 12, FLOOD_RETRY_BRIDGE_BUCKETS, bucket)
+              option + (option[0] == 'p' && option[1] == '=' ? 3 : 12),
+              FLOOD_RETRY_BRIDGE_BUCKETS, bucket)
           || bucket == 0) {
         strcpy(reply, "Err - path bucket must be 1-6");
         return;
@@ -9751,36 +10256,45 @@ static bool floodModerationPathMatches(const mesh::Packet* packet, uint8_t hash_
   return memcmp(packet->path, path, path_hops * hash_size) == 0;
 }
 
-void MyMesh::loadFloodGroupModeration() {
-  memset(flood_group_moderation, 0, sizeof(flood_group_moderation));
-  if (_fs == NULL || !_fs->exists(FLOOD_GROUP_MODERATION_FILE)) return;
-  File file = openFloodSettingsRead(_fs, FLOOD_GROUP_MODERATION_FILE);
-  if (!file) return;
-
-  FloodGroupModerationEntry loaded[FLOOD_GROUP_MODERATION_SLOTS];
-  memset(loaded, 0, sizeof(loaded));
+bool MyMesh::readFloodGroupModerationFile(
+    const char* path, FloodGroupModerationEntry* entries, bool* readable) const {
+  if (readable) *readable = false;
+  if (_fs == NULL) return false;
+  if (!_fs->exists(path)) {
+    if (readable) *readable = true;
+    return false;
+  }
+  File file = openFloodSettingsRead(_fs, path);
+  if (!file) return false;
+  if (entries) memset(entries, 0, sizeof(FloodGroupModerationEntry) * FLOOD_GROUP_MODERATION_SLOTS);
   uint8_t magic[4];
   uint8_t count = 0;
-  bool success = file.read(magic, sizeof(magic)) == sizeof(magic)
+  bool complete = file.size() < 5
+      || (file.read(magic, sizeof(magic)) == sizeof(magic)
+          && file.read(&count, sizeof(count)) == sizeof(count));
+  bool success = file.size() >= 5 && complete
       && memcmp(magic, "FGM1", sizeof(magic)) == 0
-      && file.read(&count, sizeof(count)) == sizeof(count)
-      && count <= FLOOD_GROUP_MODERATION_SLOTS;
+      && count <= FLOOD_GROUP_MODERATION_SLOTS
+      && file.size() == 5U + count * (2U + PUB_KEY_SIZE
+          + 2U * FLOOD_GROUP_MODERATION_NAME_LEN + 3U
+          + FLOOD_GROUP_MODERATION_PATH_BYTES_MAX + sizeof(uint16_t));
+  FloodGroupModerationEntry scratch;
   for (int i = 0; success && i < count; i++) {
-    auto& entry = loaded[i];
+    auto& entry = entries ? entries[i] : scratch;
+    memset(&entry, 0, sizeof(entry));
     uint8_t active = 0;
-    success = file.read(&active, sizeof(active)) == sizeof(active);
-    success = success && file.read(&entry.key_len, sizeof(entry.key_len)) == sizeof(entry.key_len);
-    success = success && file.read(entry.secret, sizeof(entry.secret)) == sizeof(entry.secret);
-    success = success && file.read((uint8_t*)entry.channel_name, sizeof(entry.channel_name)) == sizeof(entry.channel_name);
-    success = success && file.read((uint8_t*)entry.sender, sizeof(entry.sender)) == sizeof(entry.sender);
-    success = success && file.read(&entry.path_hash_size, sizeof(entry.path_hash_size)) == sizeof(entry.path_hash_size);
-    success = success && file.read(&entry.path_hops, sizeof(entry.path_hops)) == sizeof(entry.path_hops);
-    success = success && file.read(entry.path, sizeof(entry.path)) == sizeof(entry.path);
-    success = success && file.read(&entry.max_hops, sizeof(entry.max_hops)) == sizeof(entry.max_hops);
-    success = success && file.read((uint8_t*)&entry.rate_per_minute, sizeof(entry.rate_per_minute)) == sizeof(entry.rate_per_minute);
-    entry.channel_name[sizeof(entry.channel_name) - 1] = 0;
-    entry.sender[sizeof(entry.sender) - 1] = 0;
+    complete = file.read(&active, sizeof(active)) == sizeof(active)
+        && file.read(&entry.key_len, sizeof(entry.key_len)) == sizeof(entry.key_len)
+        && file.read(entry.secret, sizeof(entry.secret)) == sizeof(entry.secret)
+        && file.read((uint8_t*)entry.channel_name, sizeof(entry.channel_name)) == sizeof(entry.channel_name)
+        && file.read((uint8_t*)entry.sender, sizeof(entry.sender)) == sizeof(entry.sender)
+        && file.read(&entry.path_hash_size, sizeof(entry.path_hash_size)) == sizeof(entry.path_hash_size)
+        && file.read(&entry.path_hops, sizeof(entry.path_hops)) == sizeof(entry.path_hops)
+        && file.read(entry.path, sizeof(entry.path)) == sizeof(entry.path)
+        && file.read(&entry.max_hops, sizeof(entry.max_hops)) == sizeof(entry.max_hops)
+        && file.read((uint8_t*)&entry.rate_per_minute, sizeof(entry.rate_per_minute)) == sizeof(entry.rate_per_minute);
     entry.active = active != 0;
+    success = complete && active <= 1;
     if (success && entry.active) {
       bool path_valid = (entry.path_hops == 0 && entry.path_hash_size == 0)
           || (entry.path_hops >= 1 && entry.path_hops <= FLOOD_GROUP_MODERATION_PATH_HOPS_MAX
@@ -9788,6 +10302,8 @@ void MyMesh::loadFloodGroupModeration() {
       bool hops_valid = entry.max_hops == FLOOD_GROUP_MODERATION_HOPS_ALL
           || entry.max_hops <= FLOOD_PACKET_FILTER_MAX_HOPS;
       success = (entry.key_len == CIPHER_KEY_SIZE || entry.key_len == PUB_KEY_SIZE)
+          && memchr(entry.channel_name, 0, sizeof(entry.channel_name)) != NULL
+          && memchr(entry.sender, 0, sizeof(entry.sender)) != NULL
           && entry.channel_name[0] != 0 && floodModerationSenderNameValid(entry.sender)
           && path_valid && hops_valid;
       if (success) {
@@ -9796,34 +10312,114 @@ void MyMesh::loadFloodGroupModeration() {
     }
   }
   file.close();
-  // As with the general table, malformed persistence fails open.
-  if (success) memcpy(flood_group_moderation, loaded, sizeof(flood_group_moderation));
+  if (readable) *readable = complete;
+  return success;
+}
+
+bool MyMesh::recoverFloodGroupModeration() {
+  if (_fs == NULL) return false;
+  bool readable = false;
+  if (readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_FILE, NULL, &readable)) {
+    // A complete public image wins over uncommitted scratch and an old backup.
+    if (_fs->exists(FLOOD_GROUP_MODERATION_TEMP_FILE)
+        && !_fs->remove(FLOOD_GROUP_MODERATION_TEMP_FILE)) return false;
+    if (_fs->exists(FLOOD_GROUP_MODERATION_BACKUP_FILE)
+        && !_fs->remove(FLOOD_GROUP_MODERATION_BACKUP_FILE)) return false;
+    return true;
+  }
+  if (!readable) return false;
+  const char* candidate = NULL;
+  if (readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_BACKUP_FILE, NULL, &readable)) {
+    candidate = FLOOD_GROUP_MODERATION_BACKUP_FILE;
+  } else {
+    if (!readable) return false;
+    if (readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_TEMP_FILE, NULL, &readable))
+      candidate = FLOOD_GROUP_MODERATION_TEMP_FILE;
+    else if (!readable) return false;
+  }
+  if (candidate) {
+    if (_fs->exists(FLOOD_GROUP_MODERATION_FILE)
+        && !_fs->remove(FLOOD_GROUP_MODERATION_FILE)) return false;
+    _fs->rename(candidate, FLOOD_GROUP_MODERATION_FILE);
+    if (!readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_FILE, NULL)) return false;
+  }
+  // Invalid files fail open, but must not prevent an administrator repairing
+  // the table. Never discard a complete candidate after failed promotion.
+  if (_fs->exists(FLOOD_GROUP_MODERATION_TEMP_FILE)
+      && !_fs->remove(FLOOD_GROUP_MODERATION_TEMP_FILE)) return false;
+  if (_fs->exists(FLOOD_GROUP_MODERATION_BACKUP_FILE)
+      && !_fs->remove(FLOOD_GROUP_MODERATION_BACKUP_FILE)) return false;
+  if (!candidate && _fs->exists(FLOOD_GROUP_MODERATION_FILE)
+      && !_fs->remove(FLOOD_GROUP_MODERATION_FILE)) return false;
+  return true;
+}
+
+void MyMesh::loadFloodGroupModeration() {
+  memset(flood_group_moderation, 0, sizeof(flood_group_moderation));
+  if (_fs == NULL) return;
+  recoverFloodGroupModeration();
+  // A recovery failure can still leave a valid public or backup image. Use
+  // it for this boot without replacing the sole durable recovery source.
+  if (!readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_FILE, flood_group_moderation)
+      && !readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_BACKUP_FILE, flood_group_moderation)) {
+    memset(flood_group_moderation, 0, sizeof(flood_group_moderation));
+  }
 }
 
 bool MyMesh::saveFloodGroupModeration() {
-  if (_fs == NULL) return false;
-  File file = openFloodSettingsWrite(_fs, FLOOD_GROUP_MODERATION_FILE);
+  if (!recoverFloodGroupModeration()) return false;
+  File file = openFloodSettingsWrite(_fs, FLOOD_GROUP_MODERATION_TEMP_FILE);
   if (!file) return false;
+  size_t size = 0;
+  uint32_t hash = 2166136261UL;
+  auto writeExact = [&file, &size, &hash](const void* data, size_t length) {
+    if (file.write((const uint8_t*)data, length) != length) return false;
+    hash = updateFloodSettingsHash(hash, (const uint8_t*)data, length);
+    size += length;
+    return true;
+  };
   const uint8_t magic[4] = {'F', 'G', 'M', '1'};
   uint8_t count = FLOOD_GROUP_MODERATION_SLOTS;
-  bool success = file.write(magic, sizeof(magic)) == sizeof(magic)
-      && file.write(&count, sizeof(count)) == sizeof(count);
+  bool success = writeExact(magic, sizeof(magic)) && writeExact(&count, sizeof(count));
   for (int i = 0; success && i < FLOOD_GROUP_MODERATION_SLOTS; i++) {
     const auto& entry = flood_group_moderation[i];
     uint8_t active = entry.active ? 1 : 0;
-    success = file.write(&active, sizeof(active)) == sizeof(active);
-    success = success && file.write(&entry.key_len, sizeof(entry.key_len)) == sizeof(entry.key_len);
-    success = success && file.write(entry.secret, sizeof(entry.secret)) == sizeof(entry.secret);
-    success = success && file.write((const uint8_t*)entry.channel_name, sizeof(entry.channel_name)) == sizeof(entry.channel_name);
-    success = success && file.write((const uint8_t*)entry.sender, sizeof(entry.sender)) == sizeof(entry.sender);
-    success = success && file.write(&entry.path_hash_size, sizeof(entry.path_hash_size)) == sizeof(entry.path_hash_size);
-    success = success && file.write(&entry.path_hops, sizeof(entry.path_hops)) == sizeof(entry.path_hops);
-    success = success && file.write(entry.path, sizeof(entry.path)) == sizeof(entry.path);
-    success = success && file.write(&entry.max_hops, sizeof(entry.max_hops)) == sizeof(entry.max_hops);
-    success = success && file.write((const uint8_t*)&entry.rate_per_minute, sizeof(entry.rate_per_minute)) == sizeof(entry.rate_per_minute);
+    success = writeExact(&active, sizeof(active))
+        && writeExact(&entry.key_len, sizeof(entry.key_len))
+        && writeExact(entry.secret, sizeof(entry.secret))
+        && writeExact(entry.channel_name, sizeof(entry.channel_name))
+        && writeExact(entry.sender, sizeof(entry.sender))
+        && writeExact(&entry.path_hash_size, sizeof(entry.path_hash_size))
+        && writeExact(&entry.path_hops, sizeof(entry.path_hops))
+        && writeExact(entry.path, sizeof(entry.path))
+        && writeExact(&entry.max_hops, sizeof(entry.max_hops))
+        && writeExact(&entry.rate_per_minute, sizeof(entry.rate_per_minute));
   }
+  file.flush();
   file.close();
-  return success;
+  if (!success || !verifyFloodSettingsWrite(_fs, FLOOD_GROUP_MODERATION_TEMP_FILE, size, hash)
+      || !readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_TEMP_FILE, NULL)) {
+    _fs->remove(FLOOD_GROUP_MODERATION_TEMP_FILE);
+    return false;
+  }
+  if (_fs->exists(FLOOD_GROUP_MODERATION_FILE)) {
+    _fs->rename(FLOOD_GROUP_MODERATION_FILE, FLOOD_GROUP_MODERATION_BACKUP_FILE);
+    if (_fs->exists(FLOOD_GROUP_MODERATION_FILE)
+        || !readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_BACKUP_FILE, NULL)) {
+      _fs->remove(FLOOD_GROUP_MODERATION_TEMP_FILE);
+      return false;
+    }
+  }
+  _fs->rename(FLOOD_GROUP_MODERATION_TEMP_FILE, FLOOD_GROUP_MODERATION_FILE);
+  if (!verifyFloodSettingsWrite(_fs, FLOOD_GROUP_MODERATION_FILE, size, hash)
+      || !readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_FILE, NULL)) {
+    // Preserve both candidates when publication cannot be confirmed. Recovery
+    // selects the complete public image, otherwise the previous backup.
+    return false;
+  }
+  if (_fs->exists(FLOOD_GROUP_MODERATION_BACKUP_FILE))
+    _fs->remove(FLOOD_GROUP_MODERATION_BACKUP_FILE);
+  return true;
 }
 
 #endif
@@ -9831,35 +10427,36 @@ bool MyMesh::saveFloodGroupModeration() {
 bool MyMesh::decodeFloodGroupPlainText(const mesh::Packet* packet, const uint8_t* secret, uint8_t key_len,
                                        uint32_t& timestamp, char* sender, size_t sender_len) const {
   if (sender != NULL && sender_len > 0) sender[0] = 0;
-  if (packet == NULL || secret == NULL || sender == NULL || sender_len < 2
+  if (sender == NULL || sender_len < 2) return false;
+  uint8_t data[MAX_PACKET_PAYLOAD];
+  mesh::FloodGroupPlainText::View view;
+  if (!decodeFloodGroupPlainTextSpan(packet, secret, key_len, data, sizeof(data), view)
+      || !view.has_sender || view.sender.size >= sender_len) return false;
+  timestamp = view.timestamp;
+  memcpy(sender, view.sender.data, view.sender.size);
+  sender[view.sender.size] = 0;
+  return true;
+}
+
+bool MyMesh::decodeFloodGroupPlainTextSpan(
+    const mesh::Packet* packet, const uint8_t* secret, uint8_t key_len,
+    uint8_t* buffer, size_t capacity, mesh::FloodGroupPlainText::View& view) const {
+  view = mesh::FloodGroupPlainText::View{};
+  if (packet == NULL || secret == NULL || buffer == NULL
       || !packet->isRouteFlood() || packet->getPayloadType() != PAYLOAD_TYPE_GRP_TXT
       || (key_len != CIPHER_KEY_SIZE && key_len != PUB_KEY_SIZE)
-      || packet->payload_len <= PATH_HASH_SIZE + CIPHER_MAC_SIZE) return false;
+      || packet->payload_len < PATH_HASH_SIZE + CIPHER_MAC_SIZE + CIPHER_BLOCK_SIZE
+      || ((packet->payload_len - PATH_HASH_SIZE - CIPHER_MAC_SIZE) % CIPHER_BLOCK_SIZE) != 0
+      || capacity < size_t(packet->payload_len - PATH_HASH_SIZE - CIPHER_MAC_SIZE)) return false;
 
   uint8_t channel_hash = 0;
   mesh::Utils::sha256(&channel_hash, sizeof(channel_hash), secret, key_len);
   if (packet->payload[0] != channel_hash) return false;
 
-  uint8_t data[MAX_PACKET_PAYLOAD];
-  int len = mesh::Utils::MACThenDecrypt(secret, data, &packet->payload[PATH_HASH_SIZE],
+  int len = mesh::Utils::MACThenDecrypt(secret, buffer, &packet->payload[PATH_HASH_SIZE],
                                         packet->payload_len - PATH_HASH_SIZE);
-  if (len <= 5 || (data[4] >> 2) != TXT_TYPE_PLAIN) return false;
-
-  memcpy(&timestamp, data, sizeof(timestamp));
-  const uint8_t* text = &data[5];
-  size_t text_len = (size_t)len - 5;
-  const uint8_t* colon = (const uint8_t*)memchr(text, ':', text_len);
-  if (colon == NULL) return false;
-
-  size_t parsed_len = (size_t)(colon - text);
-  while (parsed_len > 0 && text[parsed_len - 1] == ' ') parsed_len--;
-  if (parsed_len == 0 || parsed_len >= sender_len) return false;
-  for (size_t i = 0; i < parsed_len; i++) {
-    if (text[i] == '\r' || text[i] == '\n' || text[i] < 0x20) return false;
-  }
-  memcpy(sender, text, parsed_len);
-  sender[parsed_len] = 0;
-  return true;
+  return len > 0 && size_t(len) <= capacity
+      && mesh::FloodGroupPlainText::parse(buffer, size_t(len), TXT_TYPE_PLAIN, view);
 }
 
 #if MESH_ENABLE_FLOOD_GROUP_MODERATION
@@ -9872,8 +10469,8 @@ bool MyMesh::shouldBlockFloodGroupTextForward(const mesh::Packet* packet) {
   uint8_t cached_key_len = 0;
   bool cache_present = false;
   bool cache_valid = false;
-  char decoded_sender[FLOOD_GROUP_MODERATION_NAME_LEN];
-  decoded_sender[0] = 0;
+  uint8_t decrypted[MAX_PACKET_PAYLOAD];
+  mesh::FloodGroupPlainText::View decoded;
   uint8_t hops = packet->getPathHashCount();
   uint8_t rate_slots[FLOOD_GROUP_MODERATION_SLOTS];
   uint8_t rate_slot_count = 0;
@@ -9891,15 +10488,12 @@ bool MyMesh::shouldBlockFloodGroupTextForward(const mesh::Packet* packet) {
       cached_key_len = entry.key_len;
       memcpy(cached_secret, entry.secret, entry.key_len);
       cache_valid = false;
-      decoded_sender[0] = 0;
-
-      uint32_t ignored_timestamp = 0;
-      cache_valid = decodeFloodGroupPlainText(packet, entry.secret, entry.key_len,
-                                              ignored_timestamp, decoded_sender,
-                                              sizeof(decoded_sender));
+      cache_valid = decodeFloodGroupPlainTextSpan(packet, entry.secret, entry.key_len,
+                                                  decrypted, sizeof(decrypted), decoded);
     }
-    if (!cache_valid
-        || (strcmp(entry.sender, "*") != 0 && !floodFilterAsciiEqual(entry.sender, decoded_sender))) continue;
+    if (!cache_valid || !decoded.has_sender
+        || (strcmp(entry.sender, "*") != 0
+            && !mesh::FloodGroupPlainText::senderEquals(decoded, entry.sender))) continue;
 
     bool rule_blocked = entry.max_hops != FLOOD_GROUP_MODERATION_HOPS_ALL && hops >= entry.max_hops;
     if (entry.rate_per_minute != FLOOD_GROUP_MODERATION_RATE_UNLIMITED) {
@@ -9911,8 +10505,9 @@ bool MyMesh::shouldBlockFloodGroupTextForward(const mesh::Packet* packet) {
       }
     }
     if (rule_blocked) {
-      MESH_DEBUG_PRINTLN("allowPacketForward: flood.moderation slot=%d channel=%s sender=%s hops=%d rate=%d",
-                         i + 1, entry.channel_name, decoded_sender, hops, entry.rate_per_minute);
+      MESH_DEBUG_PRINTLN("allowPacketForward: flood.moderation slot=%d channel=%s sender=%.*s hops=%d rate=%d",
+                         i + 1, entry.channel_name, int(decoded.sender.size),
+                         (const char*)decoded.sender.data, hops, entry.rate_per_minute);
       return true;
     }
     if (entry.rate_per_minute != FLOOD_GROUP_MODERATION_RATE_UNLIMITED) {
@@ -10045,7 +10640,7 @@ void MyMesh::setFloodGroupModeration(const char* args, char* reply) {
   bool rate_set = false;
   char option[48];
   while ((token_result = takeFloodModerationToken(cursor, option, sizeof(option))) == 1) {
-    if (strcmp(option, "drop") == 0) {
+    if (strcmp(option, "drop") == 0 || strcmp(option, "d") == 0) {
       if (rate_set) {
         strcpy(reply, "Err - use only one rate/drop option");
         return;
@@ -10053,19 +10648,26 @@ void MyMesh::setFloodGroupModeration(const char* args, char* reply) {
       rate_per_minute = 0;
       rate_set = true;
       action_set = true;
-    } else if (strncmp(option, "rate=", 5) == 0) {
+    } else if (strncmp(option, "rate=", 5) == 0 || strncmp(option, "q=", 2) == 0) {
       if (rate_set) {
         strcpy(reply, "Err - use only one rate/drop option");
         return;
       }
       char rate_text[24];
-      StrHelper::strncpy(rate_text, option + 5, sizeof(rate_text));
+      const bool compact_rate = option[0] == 'q';
+      const char* value = option + (compact_rate ? 2 : 5);
+      if (strlen(value) >= sizeof(rate_text)) {
+        strcpy(reply, "Err - rate value too long");
+        return;
+      }
+      StrHelper::strncpy(rate_text, value, sizeof(rate_text));
       char* slash = strchr(rate_text, '/');
-      if (slash == NULL || !(strcmp(slash, "/min") == 0 || strcmp(slash, "/m") == 0)) {
+      if ((!slash && !compact_rate)
+          || (slash && !(strcmp(slash, "/min") == 0 || strcmp(slash, "/m") == 0))) {
         strcpy(reply, "Err - rate format is X/min");
         return;
       }
-      *slash = 0;
+      if (slash) *slash = 0;
       uint32_t parsed;
       if (!parseFloodModerationUnsigned(rate_text, FLOOD_GROUP_MODERATION_RATE_UNLIMITED - 1, parsed)) {
         strcpy(reply, "Err - rate must be 0-65534/min");
@@ -10074,20 +10676,22 @@ void MyMesh::setFloodGroupModeration(const char* args, char* reply) {
       rate_per_minute = (uint16_t)parsed;
       rate_set = true;
       action_set = true;
-    } else if (strncmp(option, "hops=", 5) == 0) {
-      if (strcmp(option + 5, "all") == 0) {
+    } else if (strncmp(option, "hops=", 5) == 0 || strncmp(option, "h=", 2) == 0) {
+      const char* value = option + (option[1] == '=' ? 2 : 5);
+      if (strcmp(value, "all") == 0) {
         max_hops = FLOOD_GROUP_MODERATION_HOPS_ALL;
       } else {
         uint32_t parsed;
-        if (!parseFloodModerationUnsigned(option + 5, FLOOD_PACKET_FILTER_MAX_HOPS, parsed)) {
+        if (!parseFloodModerationUnsigned(value, FLOOD_PACKET_FILTER_MAX_HOPS, parsed)) {
           strcpy(reply, "Err - hops must be all or 0-63");
           return;
         }
         max_hops = (uint8_t)parsed;
         action_set = true;
       }
-    } else if (strncmp(option, "path=", 5) == 0) {
-      if (!parseFloodModerationPath(option + 5, path_hash_size, path_hops, path)) {
+    } else if (strncmp(option, "path=", 5) == 0 || strncmp(option, "p=", 2) == 0) {
+      if (!parseFloodModerationPath(option + (option[1] == '=' ? 2 : 5),
+                                     path_hash_size, path_hops, path)) {
         strcpy(reply, "Err - path is * or 1-3 comma-separated 1/2/3-byte hashes");
         return;
       }
@@ -10161,12 +10765,12 @@ void MyMesh::setFloodGroupModeration(const char* args, char* reply) {
   entry.rate_per_minute = rate_per_minute;
   if (!saveFloodGroupModeration()) {
     entry = previous;
-    strcpy(reply, "Err - unable to save moderation rule");
+    strcpy(reply, "Err - moderation save unconfirmed; reboot may differ");
     return;
   }
   char detail[160];
   formatFloodGroupModerationDetail(slot, detail, sizeof(detail));
-  snprintf(reply, 160, "OK - %s", detail[0] == '>' ? skipFloodFilterSpaces(detail + 1) : detail);
+  snprintf(reply, 160, "OK - %.154s", detail[0] == '>' ? skipFloodFilterSpaces(detail + 1) : detail);
 }
 
 void MyMesh::deleteFloodGroupModeration(const char* args, char* reply) {
@@ -10178,7 +10782,7 @@ void MyMesh::deleteFloodGroupModeration(const char* args, char* reply) {
     memset(flood_group_moderation, 0, sizeof(flood_group_moderation));
     if (!saveFloodGroupModeration()) {
       memcpy(flood_group_moderation, previous, sizeof(flood_group_moderation));
-      strcpy(reply, "Err - unable to save moderation rules");
+      strcpy(reply, "Err - moderation save unconfirmed; reboot may differ");
     } else {
       strcpy(reply, "OK - all moderation rules removed");
     }
@@ -10198,7 +10802,7 @@ void MyMesh::deleteFloodGroupModeration(const char* args, char* reply) {
   memset(&flood_group_moderation[index], 0, sizeof(flood_group_moderation[index]));
   if (!saveFloodGroupModeration()) {
     flood_group_moderation[index] = previous;
-    strcpy(reply, "Err - unable to save moderation rules");
+    strcpy(reply, "Err - moderation save unconfirmed; reboot may differ");
   } else {
     strcpy(reply, "OK");
   }
@@ -10359,10 +10963,12 @@ uint32_t MyMesh::estimateClockTransitMillis(const mesh::Packet* packet) const {
 
   // The origin sends the packet without a path entry. Each relay then appends
   // one entry, waits for its flood jitter, and transmits the longer packet.
-  uint64_t total = _radio->getEstAirtimeFor(base_length);
+  uint64_t total = _radio->getProfileAirtime(packet->radio_profile,
+      base_length, packet->tx_cr);
   const uint64_t maximum = (uint64_t)CLOCK_SYNC_CONSENSUS_WINDOW_SECONDS * 1000ULL;
   for (uint8_t relay = 1; relay <= hops; relay++) {
-    uint32_t airtime = _radio->getEstAirtimeFor(base_length + relay * hash_size);
+    uint32_t airtime = _radio->getProfileAirtime(packet->radio_profile,
+        base_length + relay * hash_size, packet->tx_cr);
     if (_prefs.tx_delay_factor > 0.0f) {
       // Flood forwarding selects uniformly from 0..5*t, where
       // t=airtime*tx_delay_factor. Use its midpoint as the best expectation.
@@ -10902,6 +11508,11 @@ void MyMesh::clearStats() {
 #ifdef WITH_WEBCONFIG
 void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
   memset(&s, 0, sizeof(s));
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) \
+    && HELTEC_TFT_RUNTIME_ROTATION == 1
+  s.display_rotation_supported = true;
+  s.display_rotation_degrees = mesh::ui::displayRotationDegrees();
+#endif
   StrHelper::strncpy(s.name, _prefs.node_name, sizeof(s.name));
   StrHelper::strncpy(s.admin_password, _prefs.password, sizeof(s.admin_password));
   s.lat = _prefs.node_lat;
@@ -10923,6 +11534,13 @@ void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
   s.rx_ps_rx_us = _prefs.rx_ps_rx_us;
   s.rx_ps_sleep_us = _prefs.rx_ps_sleep_us;
   s.power_saving = _prefs.powersaving_enabled;
+#if defined(ESP32_PLATFORM)
+  s.cpu_freq_mhz = _prefs.cpu_freq_mhz;
+  s.cpu_actual_mhz = board.getCpuFrequencyMHz();
+  s.cpu_supported_mask = (board.supportsCpuFrequencyMHz(80) ? 1U : 0U)
+      | (board.supportsCpuFrequencyMHz(160) ? 2U : 0U)
+      | (board.supportsCpuFrequencyMHz(240) ? 4U : 0U);
+#endif
   s.mqtt_enabled = _prefs.bridge_enabled != 0;
   s.repeat = !_prefs.disable_fwd;
   // Editable web configuration must retain the saved intervals during tempradio.
@@ -10976,12 +11594,26 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
   return startWebConfigImpl(force_ap, reply, false);
 }
 
+bool MyMesh::webConfigOwnsWiFi() const {
+  bool owns_wifi = true;
+#ifdef WITH_MQTT_BRIDGE
+  owns_wifi = !mqtt_bridge || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping());
+#endif
+#ifdef WITH_UDP_BRIDGE
+  owns_wifi = owns_wifi && !isUDPBridgeNetworkEnabled();
+#endif
+  return owns_wifi;
+}
+
 bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup) {
   if (_cli.getBoard()->isOTAUpdateRunning()) {
     strcpy(reply, "Err: OTA server is running - 'stop ota' first");
     return true;
   }
   if (_webconfig && (_webconfig->isRunning() || _webconfig->isStopping())) {
+    if (!automatic_setup && !_webconfig->isStopping()) {
+      _webconfig->requestNetworkAccess();
+    }
     strcpy(reply, _webconfig->isStopping() ? "Err: webconfig still stopping, retry shortly"
                                            : "Err: webconfig already running");
     return true;
@@ -11005,11 +11637,9 @@ bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup
 #endif
   if (!_webconfig) {
     void* mqtt_prefs = nullptr;
-    bool owns_wifi = true;
+    const bool owns_wifi = webConfigOwnsWiFi();
 #ifdef WITH_MQTT_BRIDGE
     mqtt_prefs = _cli.getObserverPrefs();
-    owns_wifi = !mqtt_bridge
-        || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping());
 #endif
     _webconfig = new WebConfigServer(this, mqtt_prefs, owns_wifi,
                                      self_id.pub_key, getFirmwareVer(), getBuildDate(), getRole(),
@@ -11020,6 +11650,7 @@ bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup
     }
   }
 
+  if (!automatic_setup) _webconfig->requestNetworkAccess();
   const bool setup_was_suspended = _unconfigured_setup_espnow_suspended;
 #ifdef WITH_ESPNOW_BRIDGE
   const bool espnow_was_running = isEspNowBridgeRunning();
@@ -11028,11 +11659,13 @@ bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup
   // WiFi start (including master-radio restoration) must retain explicit ESP-NOW.
   if (automatic_setup) suspendUnconfiguredSetupBridges();
 
-#ifdef WITH_MQTT_BRIDGE
-  _webconfig->updateWiFiOwnership(!mqtt_bridge
-      || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping()));
-#endif
+  _webconfig->updateWiFiOwnership(webConfigOwnsWiFi());
 
+#ifdef WITH_UDP_BRIDGE
+  // The portal may switch to AP/setup mode synchronously. Close the station
+  // socket before that transition; saved UDP intent resumes in a later STA loop.
+  if (udp_bridge) udp_bridge->serviceNetwork(false);
+#endif
   bool started;
   if (force_ap) {
     started = _webconfig->startSetupMode(reply);
@@ -11493,70 +12126,56 @@ bool MyMesh::handleClientPathCommand(ClientInfo* sender, char* command, char* re
 }
 
 static bool commandFamilyMatches(const char* command, const char* family) {
-  size_t len = strlen(family);
-  if (strncmp(command, family, len) != 0) return false;
-  return command[len] == 0 || command[len] == ' ' || command[len] == '.';
+  return mesh::cli::floodCommandArguments(command, family) != nullptr;
+}
+
+// Keep delegated namespaces explicit while sharing the matcher loop. The
+// generic get namespace includes credentials and must never be granted whole.
+static bool commandListMatches(const char* command, const char* const* families) {
+  for (; *families; ++families) {
+    if (commandFamilyMatches(command, *families)) return true;
+  }
+  return false;
 }
 
 static bool isCommonManagerReadOnlyAllowed(const char* cmd) {
-  while (*cmd == ' ') cmd++; // skip leading spaces
-  if (commandFamilyMatches(cmd, "ver") || commandFamilyMatches(cmd, "board")
-      || commandFamilyMatches(cmd, "neighbors") || strcmp(cmd, "clock") == 0) return true;
-  // sensor reads only
-  if (commandFamilyMatches(cmd, "sensor get") || commandFamilyMatches(cmd, "sensor list")) return true;
-
-  // Keep delegated reads explicit. CommonCLI's generic `get` namespace also
-  // contains credentials (guest.password, WiFi/MQTT secrets, bridge.secret,
-  // and similar settings), so it must never be granted wholesale.
-  return commandFamilyMatches(cmd, "get role")
-      || commandFamilyMatches(cmd, "get public.key")
-      || commandFamilyMatches(cmd, "get clock.sync")
-      || commandFamilyMatches(cmd, "get battery.alert")
-      || commandFamilyMatches(cmd, "get rx.watchdog")
-      || commandFamilyMatches(cmd, "get recent.repeater")
-      || commandFamilyMatches(cmd, "get recent.repeaters")
-      || commandFamilyMatches(cmd, "get outpath")
-      || commandFamilyMatches(cmd, "get altpath");
+  while (*cmd == ' ') cmd++;
+  static const char* const families[] = {
+    "ver", "board", "neighbors", "sensor get", "sensor list", "get role",
+    "get public.key", "get clock.sync", "get battery.alert", "get rx.watchdog",
+    "get recent.repeater", "get recent.repeaters", "get outpath", "get altpath", nullptr
+  };
+  return strcmp(cmd, "clock") == 0 || commandListMatches(cmd, families);
 }
 
 // Whitelist helpers for delegated manager roles. Admins bypass both lists.
 static bool isRegionMgrAllowed(const char* cmd) {
   while (*cmd == ' ') cmd++;
-  return commandFamilyMatches(cmd, "region")
-      || commandFamilyMatches(cmd, "get flood.channel.scope")
-      || commandFamilyMatches(cmd, "set flood.channel.scope")
-      || commandFamilyMatches(cmd, "del flood.channel.scope")
-      || isCommonManagerReadOnlyAllowed(cmd);
+  static const char* const families[] = {
+    "region", "get flood.channel.scope", "set flood.channel.scope", "del flood.channel.scope",
+    "get flood.channel.scope.require", "set flood.channel.scope.require",
+    "del flood.channel.scope.require", nullptr
+  };
+  return commandListMatches(cmd, families) || isCommonManagerReadOnlyAllowed(cmd);
 }
 
 static bool isFilterMgrAllowed(const char* cmd) {
   while (*cmd == ' ') cmd++;
-  if (isCommonManagerReadOnlyAllowed(cmd)) return true;
-  if (commandFamilyMatches(cmd, "get repeat")
-      || commandFamilyMatches(cmd, "get loop.detect")
-      || commandFamilyMatches(cmd, "get flood.max")
-      || commandFamilyMatches(cmd, "get flood.channel.data")
-      || commandFamilyMatches(cmd, "get flood.filter")
+  static const char* const families[] = {
+    "get repeat", "get loop.detect", "get flood.max", "get flood.channel.data",
+    "get flood.advert", "get flood.filter", "get flood.filter.blacklist",
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
-      || commandFamilyMatches(cmd, "get flood.rule")
-      || commandFamilyMatches(cmd, "get fr")
+    "get flood.rule", "get fr",
 #endif
-      || commandFamilyMatches(cmd, "get flood.moderation")) return true;
-  // General payload/hop filters plus the remaining flood-hop gates.
-  return commandFamilyMatches(cmd, "set flood.filter")
-      || commandFamilyMatches(cmd, "del flood.filter")
+    "get flood.moderation", "set flood.filter", "del flood.filter",
+    "set flood.filter.blacklist", "del flood.filter.blacklist",
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
-      || commandFamilyMatches(cmd, "set flood.rule")
-      || commandFamilyMatches(cmd, "set fr")
-      || commandFamilyMatches(cmd, "del flood.rule")
-      || commandFamilyMatches(cmd, "del fr")
+    "set flood.rule", "set fr", "del flood.rule", "del fr",
 #endif
-      || commandFamilyMatches(cmd, "set flood.moderation")
-      || commandFamilyMatches(cmd, "del flood.moderation")
-      || commandFamilyMatches(cmd, "set flood.channel.data")
-      || commandFamilyMatches(cmd, "set flood.max")
-      || commandFamilyMatches(cmd, "set loop.detect")
-      || commandFamilyMatches(cmd, "set repeat");
+    "set flood.moderation", "del flood.moderation", "clear flood.advert",
+    "set flood.channel.data", "set flood.max", "set loop.detect", "set repeat", nullptr
+  };
+  return isCommonManagerReadOnlyAllowed(cmd) || commandListMatches(cmd, families);
 }
 
 bool MyMesh::handleReplayResetCommand(ClientInfo* sender, const char* command,
@@ -11593,7 +12212,11 @@ bool MyMesh::handleReplayResetCommand(ClientInfo* sender, const char* command,
       || (clock_sync_last_result >= CLOCK_SYNC_RESULT_WITHIN_DRIFT
           && clock_sync_last_result <= CLOCK_SYNC_RESULT_CORRECTED_BACKWARD);
   if (!clock_observed || !clockSyncEpochIsValid(now)) {
+#if defined(STM32_PLATFORM) && defined(WIO_E5_MINI_NO_EXTERNAL_SENSORS)
+    strcpy(reply, "Err - verify/sync clock before replay reset");
+#else
     strcpy(reply, "Err - set/sync and verify the repeater clock before replay recovery");
+#endif
     return true;
   }
 
@@ -11605,7 +12228,11 @@ bool MyMesh::handleReplayResetCommand(ClientInfo* sender, const char* command,
       const auto issued = replay_reset_nonce.issue(
           sender->id.pub_key, request.key, random_token, now_ms, now);
       if (issued == mesh::ReplayResetNonce::IssueResult::Busy) {
+#if defined(STM32_PLATFORM) && defined(WIO_E5_MINI_NO_EXTERNAL_SENSORS)
+        strcpy(reply, "Err - replay confirmation pending (up to 300s)");
+#else
         strcpy(reply, "Err - another replay confirmation is pending (up to 300 seconds)");
+#endif
       } else if (issued == mesh::ReplayResetNonce::IssueResult::AwaitingConfirmation) {
         snprintf(reply, 156, "Err - token is confirmation-only; use earlier reply or wait %lus for expiry",
                  (unsigned long)replay_reset_nonce.remainingSeconds(now_ms, now));
@@ -11627,7 +12254,11 @@ bool MyMesh::handleReplayResetCommand(ClientInfo* sender, const char* command,
     // or growing nonce history is necessary.
     if (!replay_reset_nonce.consume(sender->id.pub_key, request.key,
                                     request.token, now_ms, now)) {
+#if defined(STM32_PLATFORM) && defined(WIO_E5_MINI_NO_EXTERNAL_SENSORS)
+      strcpy(reply, "Err - token expired/used or clock changed; reset again");
+#else
       strcpy(reply, "Err - expired/used replay token or clock changed; request a new reset");
+#endif
       return true;
     }
   } else if (kind == mesh::ReplayResetKind::ExactKeyConfirm) {
@@ -11689,6 +12320,20 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
   // same over LoRa and serial. Keep leading whitespace intact until after the
   // region-load handler because it encodes region hierarchy indentation.
   char* command_end = command + strlen(command);
+#ifdef ESP_PLATFORM
+  // Password bytes are significant, including spaces and invalid line breaks
+  // that the ESP32 setter must reject rather than silently remove.
+  const char* password_command = command;
+  while (*password_command == ' ') password_command++;
+  if (strlen(password_command) > 4 && password_command[2] == '|') {
+    password_command += 3;
+  }
+  char command_verb[10];
+  strncpy(command_verb, password_command, sizeof(command_verb) - 1);
+  command_verb[sizeof(command_verb) - 1] = 0;
+  mesh::cli::normalizeCommandVerb(command_verb);
+  if (strcmp(command_verb, "password ") != 0)
+#endif
   while (command_end > command
       && (command_end[-1] == ' ' || command_end[-1] == '\t'
           || command_end[-1] == '\r' || command_end[-1] == '\n')) {
@@ -11745,6 +12390,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
 
   while (*command == ' ') command++; // skip leading spaces
 
+#if MESH_ENABLE_TELEMETRY_HISTORY
+  const bool prefixed_reply = strlen(command) > 4 && command[2] == '|';
+#endif
   if (strlen(command) > 4 && command[2] == '|') { // optional prefix (for companion radio CLI)
     memcpy(reply, command, 3);                    // reflect the prefix back
     reply += 3;
@@ -11784,6 +12432,17 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
 #endif
 
 #if MESH_ENABLE_TELEMETRY_HISTORY
+  const char* noise_commands[] = {"get telemetry.noise", "get telemetry.noise2"};
+  for (uint8_t profile = 0; profile < 2; ++profile) {
+    const size_t length = strlen(noise_commands[profile]);
+    if (strncmp(command, noise_commands[profile], length) == 0
+        && (command[length] == 0 || command[length] == ' ')) {
+      if (sender != NULL && !sender->isAdmin()) strcpy(reply, "Err - not permitted");
+      else noise_floor_history.formatPageReply(profile, command + length, reply,
+                                                prefixed_reply ? 157 : 160, !prefixed_reply);
+      return;
+    }
+  }
   const char* telemetry_args = NULL;
   mesh::TelemetryHistory::Series telemetry_series =
       mesh::TelemetryHistory::SERIES_TEMPERATURE;
@@ -11800,6 +12459,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
   static const char telemetry_tx_schedule_command[] =
       "set telemetry.tx schedule";
   static const char telemetry_tx_send_now_command[] = "send telemetry.tx now";
+
+  if (handleTelemetryHistoryTxTypesCommand(command, reply,
+          sender == NULL || sender->isAdmin())) return;
 
   if (strcmp(command, telemetry_tx_send_now_command) == 0) {
     if (sender != NULL && !sender->isAdmin()) {
@@ -11820,17 +12482,19 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       strcpy(reply, "OK - telemetry.tx already queued");
       return;
     }
-    if (telemetry_history.voltageSampleCount() == 0) {
-      strcpy(reply, "Err - telemetry history is empty");
+    if (telemetry_history_tx_types == 0) {
+      strcpy(reply, "Err - no telemetry packet types enabled");
       return;
     }
-    telemetry_history_tx_pending = TELEMETRY_HISTORY_TX_TEMPERATURE
-        | TELEMETRY_HISTORY_TX_VOLTAGE;
-    const uint8_t external_channels =
-        external_voltage_history.populatedChannelCount();
-    if (external_channels != 0) {
-      telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE;
+    const uint8_t pending = availableTelemetryHistoryTxTypes();
+    if (pending == 0) {
+      strcpy(reply, "Err - no enabled telemetry data available");
+      return;
     }
+    telemetry_history_tx_pending = pending;
+    const uint8_t external_channels =
+        pending & TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE
+            ? external_voltage_history.populatedChannelCount() : 0;
     if (!telemetry_history_tx_manual) {
       telemetry_history_tx_resume_uptime = telemetry_history_next_tx_uptime;
     }
@@ -11846,8 +12510,12 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     const unsigned external_packets = (unsigned)external_channels
         * external_voltage_history.binaryChunkCount();
     snprintf(reply, 160,
-             "OK - telemetry.tx queued temp=%u volt=%u i2c=%u/%u",
-             sent, sent, (unsigned)external_channels, external_packets);
+             "OK - telemetry.tx queued temp=%u volt=%u i2c=%u/%u noise=%u/%u",
+             pending & TELEMETRY_HISTORY_TX_TEMPERATURE ? sent : 0U,
+             pending & TELEMETRY_HISTORY_TX_VOLTAGE ? sent : 0U,
+             (unsigned)external_channels, external_packets,
+             (telemetry_history_tx_pending & TELEMETRY_HISTORY_TX_NOISE) != 0,
+             (telemetry_history_tx_pending & TELEMETRY_HISTORY_TX_NOISE2) != 0);
     return;
   }
 
@@ -11855,7 +12523,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     if (sender != NULL && !sender->isAdmin()) {
       strcpy(reply, "Err - not permitted");
     } else {
-      formatTelemetryHistoryTxStatus(reply, 160);
+      formatTelemetryHistoryTxStatus(reply, prefixed_reply ? 157 : 160);
     }
     return;
   }
@@ -11991,7 +12659,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       telemetry_history_tx_resume_uptime = previous_resume_tx;
       strcpy(reply, "Err - unable to save telemetry.tx");
     } else if (telemetry_history_tx_enabled) {
-      snprintf(reply, 160, "OK - telemetry.tx schedule=%ud temp=165 volt=165",
+      snprintf(reply, 160, "OK - telemetry.tx schedule=%ud",
                (unsigned)telemetry_history_tx_interval_days);
     } else {
       strcpy(reply, "OK - telemetry.tx off");
@@ -12102,11 +12770,24 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
 
   // Compatibility path for manually defined legacy portable builds. Current
   // release builds use FULL and do not enter this branch.
+  // Keep the same permissions as the normal handoff below. In particular,
+  // RF test/Morse commands must never bypass admin checks in a legacy build.
+  if (sender && !sender->isAdmin()) {
+    bool allowed = (sender->isRegionMgr() && isRegionMgrAllowed(command))
+        || (sender->isFilterMgr() && isFilterMgrAllowed(command));
+    if (!allowed) {
+      strcpy(reply, "Err - not permitted");
+      return;
+    }
+  }
+  if (handleGuestCommand(command, reply, 157)
+      || mesh::cli::handleGuestsGet(acl, command, reply, 157)
+      || mesh::cli::handleLoginsGet(login_history, command, reply, 157)) return;
   _cli.handleCommand(sender_timestamp, command, reply);
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
   if (_command_output && _local_cli_output.owns(*_command_output)) reply[0] = 0;
 #endif
-#if MESH_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE && MESH_ENABLE_PACKET_FILE_LOGGING
   if (sender_timestamp == 0 && serial_log_eof_pending
       && strcmp(reply, "   EOF") == 0) reply[0] = 0;
 #endif
@@ -12121,6 +12802,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       return;
     }
   }
+
+  if (handleGuestCommand(command, reply, 157)
+      || mesh::cli::handleGuestsGet(acl, command, reply, 157)
+      || mesh::cli::handleLoginsGet(login_history, command, reply, 157)) return;
 
   if (strncmp(command, "backup prv.key", 14) == 0
       && (command[14] == 0 || command[14] == ' ')) {
@@ -12172,28 +12857,28 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
 #endif
   if (commandFamilyMatches(command, "get flood.channel.scope.require")) {
     formatFloodChannelScopeRequirements(
-        command + strlen("get flood.channel.scope.require"), reply);
+        mesh::cli::floodCommandArguments(command, "get flood.channel.scope.require"), reply);
   } else if (commandFamilyMatches(command, "set flood.channel.scope.require")) {
     setFloodChannelScopeRequirement(
-        command + strlen("set flood.channel.scope.require"), reply);
+        mesh::cli::floodCommandArguments(command, "set flood.channel.scope.require"), reply);
   } else if (commandFamilyMatches(command, "del flood.channel.scope.require")) {
     deleteFloodChannelScopeRequirement(
-        command + strlen("del flood.channel.scope.require"), reply);
+        mesh::cli::floodCommandArguments(command, "del flood.channel.scope.require"), reply);
   } else if (commandFamilyMatches(command, "get flood.channel.scope")) {
-    formatFloodChannelScopes(command + strlen("get flood.channel.scope"), reply);
+    formatFloodChannelScopes(mesh::cli::floodCommandArguments(command, "get flood.channel.scope"), reply);
   } else if (commandFamilyMatches(command, "set flood.channel.scope")) {
-    setFloodChannelScope(command + strlen("set flood.channel.scope"), reply);
+    setFloodChannelScope(mesh::cli::floodCommandArguments(command, "set flood.channel.scope"), reply);
   } else if (commandFamilyMatches(command, "del flood.channel.scope")) {
-    deleteFloodChannelScope(command + strlen("del flood.channel.scope"), reply);
+    deleteFloodChannelScope(mesh::cli::floodCommandArguments(command, "del flood.channel.scope"), reply);
   } else if (commandFamilyMatches(command, "get flood.filter.blacklist")) {
     formatFloodPacketFilterBlacklist(
-        command + strlen("get flood.filter.blacklist"), reply);
+        mesh::cli::floodCommandArguments(command, "get flood.filter.blacklist"), reply);
   } else if (commandFamilyMatches(command, "set flood.filter.blacklist")) {
     setFloodPacketFilterBlacklist(
-        command + strlen("set flood.filter.blacklist"), reply);
+        mesh::cli::floodCommandArguments(command, "set flood.filter.blacklist"), reply);
   } else if (commandFamilyMatches(command, "del flood.filter.blacklist")) {
     deleteFloodPacketFilterBlacklist(
-        command + strlen("del flood.filter.blacklist"), reply);
+        mesh::cli::floodCommandArguments(command, "del flood.filter.blacklist"), reply);
   } else if (commandFamilyMatches(command, "get flood.filter")) {
     formatFloodPacketFilters(command + strlen("get flood.filter"), reply);
   } else if (commandFamilyMatches(command, "set flood.filter")) {
@@ -12208,20 +12893,20 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
   } else if (commandFamilyMatches(command, "del fr")) {
     deleteFloodPacketFilter(command + strlen("del fr"), reply);
   } else if (commandFamilyMatches(command, "get flood.rule")) {
-    formatFloodPacketFilters(command + strlen("get flood.rule"), reply);
+    formatFloodPacketFilters(mesh::cli::floodCommandArguments(command, "get flood.rule"), reply);
   } else if (commandFamilyMatches(command, "set flood.rule")) {
-    setFloodPacketFilter(command + strlen("set flood.rule"), reply, true);
+    setFloodPacketFilter(mesh::cli::floodCommandArguments(command, "set flood.rule"), reply, true);
   } else if (commandFamilyMatches(command, "del flood.rule")) {
-    deleteFloodPacketFilter(command + strlen("del flood.rule"), reply);
+    deleteFloodPacketFilter(mesh::cli::floodCommandArguments(command, "del flood.rule"), reply);
 #endif
   }
 #if MESH_ENABLE_FLOOD_GROUP_MODERATION
   else if (commandFamilyMatches(command, "get flood.moderation")) {
-    formatFloodGroupModeration(command + strlen("get flood.moderation"), reply);
+    formatFloodGroupModeration(mesh::cli::floodCommandArguments(command, "get flood.moderation"), reply);
   } else if (commandFamilyMatches(command, "set flood.moderation")) {
-    setFloodGroupModeration(command + strlen("set flood.moderation"), reply);
+    setFloodGroupModeration(mesh::cli::floodCommandArguments(command, "set flood.moderation"), reply);
   } else if (commandFamilyMatches(command, "del flood.moderation")) {
-    deleteFloodGroupModeration(command + strlen("del flood.moderation"), reply);
+    deleteFloodGroupModeration(mesh::cli::floodCommandArguments(command, "del flood.moderation"), reply);
   }
 #endif
 #if MESH_ENABLE_CLOCK_SYNC
@@ -12578,7 +13263,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
     if (_command_output && _local_cli_output.owns(*_command_output)) reply[0] = 0;
 #endif
-#if MESH_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE && MESH_ENABLE_PACKET_FILE_LOGGING
     if (sender_timestamp == 0 && serial_log_eof_pending
         && strcmp(reply, "   EOF") == 0) reply[0] = 0;
 #endif
@@ -12601,6 +13286,19 @@ void MyMesh::loop() {
   _cli.loop();
   serviceRadioReplyDeadline();
   processDeferredCliCommand();
+#if MESH_ENABLE_FLEET_CONTROL
+  if (_cli.fleetChannel()) {
+    _cli.fleetChannel()->service(*this, _cli.radioProfiles(), _prefs.node_name,
+        [this](uint32_t sequence, char* command, char* reply) {
+          if (region_load_active) {
+            strcpy(reply, "Err - region load active; retry later"); return;
+          }
+          // Signature and a strict command allowlist are checked before this
+          // dispatch. Fleet capability never grants unrestricted admin CLI.
+          handleCommand(sequence, nullptr, command, reply);
+        });
+  }
+#endif
   servicePostMeshLoop();
 #if defined(ENABLE_OTA) && OTA_DYNAMIC_CONTEXT
   mesh::ota::ota_service_temp_radio_context(isAnyTempRadioActive());
@@ -12641,6 +13339,98 @@ uint8_t MyMesh::resizeTelemetryGpsDays(uint8_t requested_days) {
 }
 #endif
 
+uint8_t MyMesh::availableTelemetryHistoryTxTypes() const {
+  uint8_t available = 0;
+  if (telemetry_history.voltageSampleCount() != 0)
+    available |= TELEMETRY_HISTORY_TX_TEMPERATURE | TELEMETRY_HISTORY_TX_VOLTAGE;
+  if (external_voltage_history.populatedChannelCount() != 0)
+    available |= TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE;
+  if (noise_floor_history.sampleCount(0) != 0)
+    available |= TELEMETRY_HISTORY_TX_NOISE;
+  if (isDualRadioActive() && noise_floor_history.sampleCount(1) != 0)
+    available |= TELEMETRY_HISTORY_TX_NOISE2;
+  return available & telemetry_history_tx_types;
+}
+
+void MyMesh::finishTelemetryHistoryTxBatch(uint64_t now) {
+  if (telemetry_history_tx_manual) {
+    telemetry_history_next_tx_uptime = telemetry_history_tx_resume_uptime;
+    telemetry_history_tx_manual = false;
+    telemetry_history_tx_resume_uptime = 0;
+  } else {
+    telemetry_history_next_tx_uptime = telemetry_history_tx_enabled
+        ? now + (uint64_t)telemetry_history_tx_interval_days
+            * 24ULL * 60ULL * 60ULL * 1000ULL
+        : 0;
+  }
+}
+
+bool MyMesh::handleTelemetryHistoryTxTypesCommand(char* command, char* reply,
+                                                  bool permitted) {
+  const bool get = strncmp(command, "get telemetry.tx.", 17) == 0;
+  const bool set = strncmp(command, "set telemetry.tx.", 17) == 0;
+  if (!get && !set) return false;
+  if (!permitted) { strcpy(reply, "Err - not permitted"); return true; }
+
+  static const char* const names[] = {
+      "temp", "volt", "volt.i2c", "noise", "noise2", "types"};
+  char* key = command + 17;
+  char* value = strchr(key, ' ');
+  const size_t length = value ? (size_t)(value - key) : strlen(key);
+  unsigned index = 0;
+  while (index < sizeof(names) / sizeof(names[0])
+      && (strlen(names[index]) != length || memcmp(key, names[index], length))) ++index;
+  if (index == sizeof(names) / sizeof(names[0])) {
+    strcpy(reply, "Err - unknown telemetry packet type");
+    return true;
+  }
+  const uint8_t bit = index == 5 ? TELEMETRY_HISTORY_TX_ALL_TYPES : uint8_t(1U << index);
+  if (get && value) { strcpy(reply, "Err - unexpected arguments"); return true; }
+  if (set) {
+    value = value ? trimSpaces(value) : NULL;
+    if (!value || (strcmp(value, "on") && strcmp(value, "off"))) {
+      strcpy(reply, "Err - use on or off");
+      return true;
+    }
+  }
+  if (!telemetry_history_tx_prefs_healthy) {
+    strcpy(reply, "Err - telemetry.tx prefs unavailable");
+    return true;
+  }
+  if (get) {
+    if (index == 5) {
+      snprintf(reply, 160, "> temp=%s volt=%s volt.i2c=%s noise=%s noise2=%s",
+          telemetry_history_tx_types & TELEMETRY_HISTORY_TX_TEMPERATURE ? "on" : "off",
+          telemetry_history_tx_types & TELEMETRY_HISTORY_TX_VOLTAGE ? "on" : "off",
+          telemetry_history_tx_types & TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE ? "on" : "off",
+          telemetry_history_tx_types & TELEMETRY_HISTORY_TX_NOISE ? "on" : "off",
+          telemetry_history_tx_types & TELEMETRY_HISTORY_TX_NOISE2 ? "on" : "off");
+    } else {
+      snprintf(reply, 160, "> %s", telemetry_history_tx_types & bit ? "on" : "off");
+    }
+    return true;
+  }
+  const uint8_t previous = telemetry_history_tx_types;
+  telemetry_history_tx_types = !strcmp(value, "on") ? previous | bit : previous & ~bit;
+  if (telemetry_history_tx_types != previous && !saveTelemetryHistoryTxPrefs()) {
+    telemetry_history_tx_types = previous;
+    strcpy(reply, "Err - unable to save telemetry.tx types");
+    return true;
+  }
+  // Already admitted radio packets belong to the TX queue. Only future batch
+  // work can be cancelled, and newly enabled types join the next batch.
+  const uint8_t pending = telemetry_history_tx_pending;
+  telemetry_history_tx_pending &= telemetry_history_tx_types;
+  if (!(telemetry_history_tx_types & TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE)) {
+    telemetry_history_tx_external_channel = 0;
+    telemetry_history_tx_external_chunk = 0;
+  }
+  if (pending && !telemetry_history_tx_pending)
+    finishTelemetryHistoryTxBatch(uptime_millis + (uint32_t)(millis() - last_millis));
+  snprintf(reply, 160, "OK - telemetry.tx.%s=%s", names[index], value);
+  return true;
+}
+
 static bool recoverTelemetryHistoryTxPrefs(FILESYSTEM* fs) {
   if (fs == NULL) return false;
 #if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
@@ -12657,12 +13447,15 @@ static bool readTelemetryHistoryTxPrefsImage(FILESYSTEM* fs,
   File file = openFloodSettingsRead(fs, TELEMETRY_HISTORY_TX_PREFS_FILE);
   if (!file) return false;
   size = file.size();
-  const bool complete = (size == 6 || size == 7 + MAX_PATH_SIZE)
+  const bool complete = (size == 6 || size == 7 || size == 7 + MAX_PATH_SIZE)
       && file.read(image, size) == size;
   file.close();
   if (!complete) return false;
-  const bool legacy = size == 7 + MAX_PATH_SIZE;
-  if (memcmp(image, legacy ? "THT2" : "THT3", 4) || image[4] > 1) return false;
+  const bool legacy = size == 7 + MAX_PATH_SIZE && !memcmp(image, "THT2", 4);
+  const bool previous = size == 6 && !memcmp(image, "THT3", 4);
+  const bool selective = size == 7 && !memcmp(image, "THT4", 4);
+  if ((!legacy && !previous && !selective) || image[4] > 1
+      || (selective && (image[6] & ~TELEMETRY_HISTORY_TX_ALL_TYPES))) return false;
   const uint8_t days = image[legacy ? 6 : 5];
   if (days < 1 || days > TELEMETRY_HISTORY_TX_MAX_DAYS) return false;
   return !legacy || (image[5] == OUT_PATH_UNKNOWN ? image[4] == 0
@@ -12677,6 +13470,7 @@ void MyMesh::loadTelemetryHistoryTxPrefs() {
   telemetry_history_tx_manual = false;
   telemetry_history_tx_external_channel = 0;
   telemetry_history_tx_external_chunk = 0;
+  telemetry_history_tx_types = TELEMETRY_HISTORY_TX_ALL_TYPES;
   telemetry_history_next_tx_uptime = 0;
   telemetry_history_tx_resume_uptime = 0;
 
@@ -12686,13 +13480,14 @@ void MyMesh::loadTelemetryHistoryTxPrefs() {
   if (!present) { telemetry_history_tx_prefs_healthy = true; return; }
   uint8_t image[7 + MAX_PATH_SIZE]; size_t size = 0;
   if (!readTelemetryHistoryTxPrefsImage(_fs, image, size)) return;
-  const bool legacy = size == sizeof(image);
+  const bool legacy = !memcmp(image, "THT2", 4);
   // Preserve the only durable old route until shared-route adoption succeeds.
   // Otherwise an enabled legacy producer would silently use fresh zero-hop.
   if (legacy && image[5] != OUT_PATH_UNKNOWN
       && !_cli.adoptLegacyDataTxPath(image + 7, image[5])) return;
   telemetry_history_tx_enabled = image[4] != 0;
   telemetry_history_tx_interval_days = image[legacy ? 6 : 5];
+  if (!memcmp(image, "THT4", 4)) telemetry_history_tx_types = image[6];
   telemetry_history_tx_prefs_healthy = true;
 }
 
@@ -12705,8 +13500,9 @@ bool MyMesh::saveTelemetryHistoryTxPrefs() {
       || (previous_present && !readTelemetryHistoryTxPrefsImage(_fs, previous, previous_size))) {
     telemetry_history_tx_prefs_healthy = false; return false;
   }
-  const uint8_t image[] = {'T', 'H', 'T', '3', uint8_t(telemetry_history_tx_enabled),
-                           telemetry_history_tx_interval_days};
+  const uint8_t image[] = {'T', 'H', 'T', '4', uint8_t(telemetry_history_tx_enabled),
+                           telemetry_history_tx_interval_days,
+                           telemetry_history_tx_types};
   bool success;
   {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
@@ -12736,6 +13532,15 @@ bool MyMesh::saveTelemetryHistoryTxPrefs() {
   return success;
 }
 
+void MyMesh::recordTelemetryHistoryTx(const mesh::Packet* packet) {
+  if (packet->getPayloadType() != PAYLOAD_TYPE_RAW_CUSTOM || packet->forwarded
+      || !isTelemetryHistoryPayload(packet)
+      || memcmp(packet->payload + 4, self_id.pub_key,
+                mesh::TelemetryHistory::BINARY_SOURCE_ID_SIZE) != 0) return;
+  telemetry_history_last_tx_uptime =
+      uptime_millis + (uint32_t)(millis() - last_millis);
+}
+
 void MyMesh::formatTelemetryHistoryTxStatus(char* reply,
                                             size_t reply_size) const {
   char source_id[mesh::TelemetryHistory::BINARY_SOURCE_ID_SIZE * 2U + 1U];
@@ -12747,11 +13552,18 @@ void MyMesh::formatTelemetryHistoryTxStatus(char* reply,
   char path_reply[132];
   formatPathReply(data_path, have_path ? data_path_len : OUT_PATH_UNKNOWN,
                   path_reply, sizeof(path_reply));
-  snprintf(reply, reply_size, "> %s%ud id=%s i2c=%u%s p=%s",
+  char last[16] = "never";
+  if (telemetry_history_last_tx_uptime != UINT64_MAX) {
+    const uint64_t now = uptime_millis + (uint32_t)(millis() - last_millis);
+    mesh::cli::formatRecentRepeaterAge(last, sizeof(last),
+        (uint32_t)((now - telemetry_history_last_tx_uptime) / 1000U));
+  }
+  snprintf(reply, reply_size, "> %s%ud id=%s i2c=%u last=%s%s p=%s",
            telemetry_history_tx_enabled ? "on " : "off ",
            (unsigned)telemetry_history_tx_interval_days,
            source_id,
            (unsigned)external_voltage_history.populatedChannelCount(),
+           last,
            telemetry_history_tx_prefs_healthy ? "" : " fault=prefs",
            path_reply[0] == '>' && path_reply[1] == ' '
                ? path_reply + 2 : path_reply);
@@ -12773,6 +13585,18 @@ bool MyMesh::sendTelemetryHistorySnapshot(
   mesh::Packet* packet = createRawData(payload, payload_len);
   if (packet == NULL) return false;
   return sendDirect(packet, data_path, data_path_len);
+}
+
+bool MyMesh::sendNoiseFloorHistorySnapshot(uint8_t profile) {
+  const uint8_t* data_path = NULL;
+  uint8_t data_path_len = OUT_PATH_UNKNOWN;
+  if (!_cli.getDataTxPath(data_path, data_path_len)) return false;
+  uint8_t payload[mesh::NoiseFloorHistory::BINARY_PAYLOAD_SIZE];
+  const size_t length = noise_floor_history.formatBinarySnapshot(
+      profile, self_id.pub_key, payload, sizeof(payload));
+  if (length <= mesh::NoiseFloorHistory::BINARY_HEADER_SIZE) return false;
+  mesh::Packet* packet = createRawData(payload, length);
+  return packet != NULL && sendDirect(packet, data_path, data_path_len);
 }
 
 bool MyMesh::sendExternalVoltageHistorySnapshot(uint8_t channel_index,
@@ -12800,6 +13624,14 @@ void MyMesh::serviceTelemetryHistoryTx() {
   if (!telemetry_history_tx_prefs_healthy) return;
   const uint64_t current_uptime_millis =
       uptime_millis + (uint32_t)(millis() - last_millis);
+  if (telemetry_history_tx_pending != 0) {
+    telemetry_history_tx_pending &= telemetry_history_tx_types;
+    if (telemetry_history_tx_pending == 0) {
+      finishTelemetryHistoryTxBatch(current_uptime_millis);
+      return;
+    }
+  }
+  if (telemetry_history_tx_types == 0) return;
   if (telemetry_history_next_tx_uptime != 0
       && current_uptime_millis < telemetry_history_next_tx_uptime) {
     return;
@@ -12811,16 +13643,14 @@ void MyMesh::serviceTelemetryHistoryTx() {
                < mesh::TelemetryHistory::BINARY_MAX_SAMPLES) {
       return;
     }
+    const uint8_t available = availableTelemetryHistoryTxTypes();
+    if (available == 0) return;
     const uint8_t* data_path = NULL;
     uint8_t data_path_len = OUT_PATH_UNKNOWN;
     if (!_cli.getDataTxPath(data_path, data_path_len)) return;
     telemetry_history_tx_manual = false;
     telemetry_history_tx_resume_uptime = 0;
-    telemetry_history_tx_pending = TELEMETRY_HISTORY_TX_TEMPERATURE
-        | TELEMETRY_HISTORY_TX_VOLTAGE;
-    if (external_voltage_history.populatedChannelCount() != 0) {
-      telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE;
-    }
+    telemetry_history_tx_pending = available;
     telemetry_history_tx_external_channel = 0;
     telemetry_history_tx_external_chunk = 0;
   }
@@ -12841,6 +13671,14 @@ void MyMesh::serviceTelemetryHistoryTx() {
       telemetry_history_tx_pending &=
           (uint8_t)~TELEMETRY_HISTORY_TX_VOLTAGE;
     }
+  } else if ((telemetry_history_tx_pending & TELEMETRY_HISTORY_TX_NOISE) != 0) {
+    sent = noise_floor_history.sampleCount(0) == 0
+        || sendNoiseFloorHistorySnapshot(0);
+    if (sent) telemetry_history_tx_pending &= (uint8_t)~TELEMETRY_HISTORY_TX_NOISE;
+  } else if ((telemetry_history_tx_pending & TELEMETRY_HISTORY_TX_NOISE2) != 0) {
+    sent = !isDualRadioActive() || noise_floor_history.sampleCount(1) == 0
+        || sendNoiseFloorHistorySnapshot(1);
+    if (sent) telemetry_history_tx_pending &= (uint8_t)~TELEMETRY_HISTORY_TX_NOISE2;
   } else if ((telemetry_history_tx_pending
               & TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE) != 0) {
     const uint8_t channel_count =
@@ -12875,21 +13713,16 @@ void MyMesh::serviceTelemetryHistoryTx() {
   }
 
   if (telemetry_history_tx_pending == 0) {
-    if (telemetry_history_tx_manual) {
-      telemetry_history_next_tx_uptime = telemetry_history_tx_resume_uptime;
-      telemetry_history_tx_manual = false;
-      telemetry_history_tx_resume_uptime = 0;
-    } else {
-      telemetry_history_next_tx_uptime = telemetry_history_tx_enabled
-          ? current_uptime_millis
-              + (uint64_t)telemetry_history_tx_interval_days
-                  * 24ULL * 60ULL * 60ULL * 1000ULL
-          : 0;
-    }
+    finishTelemetryHistoryTxBatch(current_uptime_millis);
   } else {
     telemetry_history_next_tx_uptime =
         current_uptime_millis + TELEMETRY_HISTORY_TX_PACKET_SPACING_MILLIS;
   }
+}
+
+void MyMesh::sampleNoiseFloorHistory() {
+  noise_floor_sampler.poll(*_radio, noise_floor_history,
+                          rtc_clock.getCurrentTime(), millis());
 }
 
 void MyMesh::sampleTelemetryHistory() {
@@ -12942,6 +13775,17 @@ void MyMesh::sampleTelemetryHistory() {
 #endif
 
 void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
+  if (mesh::morseTimingActive(_radio)) {
+    // RS232 heartbeat/wake servicing remains live; only optional periodic,
+    // sensor, filesystem and UI/network background work is deferred.
+#if defined(WITH_RS232_BRIDGE)
+    serviceRs232BridgePower();
+#endif
+    const uint32_t now = millis();
+    uptime_millis += now - last_millis;
+    last_millis = now;
+    return;
+  }
   if (pending_self_advert) {
     const uint32_t delay_millis = pending_self_advert_delay;
     const bool flood = pending_self_advert_flood;
@@ -12954,6 +13798,7 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
 #endif
   checkRxInactivityWatchdog();
 #if MESH_ENABLE_TELEMETRY_HISTORY
+  sampleNoiseFloorHistory();
   sampleTelemetryHistory();
   serviceTelemetryHistoryTx();
 #endif
@@ -12966,6 +13811,10 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
   expireRecentRepeatersIfDue();
 #endif
 
+#ifdef WITH_UDP_BRIDGE
+  // The UDP socket belongs to this loop and follows station/OTA ownership.
+  serviceUDPBridge();
+#endif
 #if defined(WITH_MQTT_BRIDGE)
   // MQTT owns TLS on Core 0; the radio loop only reaps an acknowledged stop.
   if (mqtt_bridge && mqtt_bridge->isRunning()) mqtt_bridge->loop();
@@ -12982,7 +13831,7 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
   #endif
 #endif
 #if defined(WITH_RS232_BRIDGE)
-  if (isRs232BridgeRunning()) bridge->loop();
+  serviceRs232BridgePower();
 #elif defined(WITH_BRIDGE) && !defined(WITH_MQTT_BRIDGE) \
         && !defined(WITH_ESPNOW_BRIDGE)
   AbstractBridge* active_bridge = activeBridge();
@@ -13019,11 +13868,18 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
     // duty-limited channel) is lost when the flash spins the loop and reboots.
     drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
     const bool mqtt_was_running = mqtt_bridge && mqtt_bridge->isRunning();
+#ifdef WITH_UDP_BRIDGE
+    const bool udp_was_enabled = isUDPBridgeNetworkEnabled();
+    setUDPBridgeNetworkState(false);
+#endif
 #ifdef WITH_ESPNOW_BRIDGE
     const bool espnow_was_running = espnow_bridge.isRunning();
 #endif
     auto resume_paused_bridges = [&]() {
       if (mqtt_was_running) setMqttBridgeState(true);
+#ifdef WITH_UDP_BRIDGE
+      if (udp_was_enabled) setUDPBridgeNetworkState(true);
+#endif
 #ifdef WITH_ESPNOW_BRIDGE
       if (espnow_was_running) setEspNowBridgeState(true);
 #endif
@@ -13061,10 +13917,7 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
     mesh::usbConsolePort().printf("%s\r\n", wc_reply);
   }
   if (_webconfig) {
-#ifdef WITH_MQTT_BRIDGE
-    _webconfig->updateWiFiOwnership(!mqtt_bridge
-        || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping()));
-#endif
+    _webconfig->updateWiFiOwnership(webConfigOwnsWiFi());
     _webconfig->tick(millis());
     if (!_webconfig->isRunning() && !_webconfig->isStopping()) {
       delete _webconfig;
@@ -13280,9 +14133,15 @@ void MyMesh::resetNeighborDiscoverJsonBudget() {
 // progress metadata; UINT32_MAX likewise reserves the widest heard-age value.
 // If this result cannot fit, stop before transmitting another scope request.
 bool MyMesh::completeNeighborDiscoverEntry() {
-  NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+  if ((size_t)neighbor_discover_next >= NEIGHBOR_SCOPE_RESULTS) {
+    neighbor_discover_truncated = true;
+    finishNeighborDiscover();
+    return false;
+  }
+  auto& entry = neighbor_discover_metadata[neighbor_discover_next];
   char pubkey_hex[65];
-  mesh::Utils::toHex(pubkey_hex, entry.id.pub_key, PUB_KEY_SIZE);
+  mesh::Utils::toHex(pubkey_hex,
+                    neighbor_discover[neighbor_discover_next].id.pub_key, PUB_KEY_SIZE);
 
   MQTTMessageBuilder::NeighborsMessageEntry measured = {
     pubkey_hex,
@@ -13316,7 +14175,7 @@ bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx,
                                             float snr, int16_t rssi) {
   if (overlay_idx < 0 || overlay_idx >= neighbor_discover_count
       || (size_t)overlay_idx >= NEIGHBOR_SCOPE_RESULTS) return false;
-  NeighborDiscoverEntry& entry = neighbor_discover[overlay_idx];
+  auto& entry = neighbor_discover_metadata[overlay_idx];
   if (entry.status != ND_PENDING || len < 8) return false;
 
   uint32_t tag;
@@ -13337,7 +14196,7 @@ bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx,
   entry.heard_timestamp = getRTCClock()->getCurrentTime();
   entry.snr = (int8_t)(snr * 4);
   entry.rssi = rssi;
-  touchNeighbourHeard(entry.id, entry.heard_timestamp, snr, rssi);
+  touchNeighbourHeard(neighbor_discover[overlay_idx].id, entry.heard_timestamp, snr, rssi);
   return true;
 }
 
@@ -13467,9 +14326,9 @@ void MyMesh::finishNeighborDiscover() {
     uint32_t now_secs = getRTCClock()->getCurrentTime();
 
     for (int i = 0; i < publish_count; i++) {
-      auto& entry = neighbor_discover[i];
+      auto& entry = neighbor_discover_metadata[i];
       char* hex = &pubkey_hex[i * hex_size];
-      mesh::Utils::toHex(hex, entry.id.pub_key, PUB_KEY_SIZE);
+      mesh::Utils::toHex(hex, neighbor_discover[i].id.pub_key, PUB_KEY_SIZE);
       entries[i].pubkey_hex = hex;
       entries[i].snr = entry.snr / 4.0f;
       entries[i].rssi = entry.rssi;
@@ -13539,8 +14398,13 @@ void MyMesh::loopNeighborDiscover() {
     finishNeighborDiscover();
     return;
   }
+  if ((size_t)neighbor_discover_next >= NEIGHBOR_SCOPE_RESULTS) {
+    neighbor_discover_truncated = true;
+    finishNeighborDiscover();
+    return;
+  }
 
-  NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+  auto& entry = neighbor_discover_metadata[neighbor_discover_next];
   if (entry.status == ND_QUEUED) {
     if (!millisHasNowPassed(neighbor_discover_until)) return;
     if (cancelNeighborDiscoverRequest()) {
@@ -13574,7 +14438,8 @@ void MyMesh::loopNeighborDiscover() {
   }
 
   uint32_t tag;
-  mesh::Packet* request = sendAnonRegionsReq(entry.id, tag);
+  mesh::Packet* request = sendAnonRegionsReq(
+      neighbor_discover[neighbor_discover_next].id, tag);
   if (request) {
     entry.tag = tag;
     entry.status = ND_QUEUED;
@@ -13609,35 +14474,46 @@ bool MyMesh::startNeighborDiscover(char* reply) {
     return false;  // reply already set
   }
 
+  // Select in the exact original stable order without putting another full
+  // 254-entry table on the loop stack. The live cache is only mutated on this
+  // mesh task, so it remains stable during this synchronous snapshot step.
+  static_assert(MAX_NEIGHBOURS <= 255, "Snapshot indexes and count must fit one byte");
+  uint8_t order[MAX_NEIGHBOURS];
   neighbor_discover_count = 0;
   for (int i = 0; i < MAX_NEIGHBOURS; i++) {
     if (neighbours[i].heard_timestamp > 0) {
-      NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_count];
-      entry.id = neighbours[i].id;
-      entry.heard_timestamp = neighbours[i].heard_timestamp;
-      entry.snr = neighbours[i].snr;
-      entry.rssi = neighbours[i].rssi;
-      entry.tag = 0;
-      entry.status = ND_UNSENT;
-      neighbor_discover_count++;
+      order[neighbor_discover_count++] = (uint8_t)i;
     }
   }
 
-  // Query the freshest/strongest entries first; pubkey makes ties deterministic.
   for (int i = 1; i < neighbor_discover_count; i++) {
-    NeighborDiscoverEntry entry = neighbor_discover[i];
+    const uint8_t entry_index = order[i];
+    const auto& entry = neighbours[entry_index];
     int j = i;
     while (j > 0) {
-      auto& rhs = neighbor_discover[j - 1];
+      const auto& rhs = neighbours[order[j - 1]];
       bool before = entry.heard_timestamp > rhs.heard_timestamp
         || (entry.heard_timestamp == rhs.heard_timestamp && entry.snr > rhs.snr)
         || (entry.heard_timestamp == rhs.heard_timestamp && entry.snr == rhs.snr
             && memcmp(entry.id.pub_key, rhs.id.pub_key, PUB_KEY_SIZE) < 0);
       if (!before) break;
-      neighbor_discover[j] = neighbor_discover[j - 1];
+      order[j] = order[j - 1];
       j--;
     }
-    neighbor_discover[j] = entry;
+    order[j] = entry_index;
+  }
+
+  memset(neighbor_discover_metadata, 0, sizeof(neighbor_discover_metadata));
+  for (int i = 0; i < neighbor_discover_count; i++) {
+    const auto& source = neighbours[order[i]];
+    neighbor_discover[i].id = source.id;
+    if ((size_t)i < NEIGHBOR_SCOPE_RESULTS) {
+      auto& metadata = neighbor_discover_metadata[i];
+      metadata.heard_timestamp = source.heard_timestamp;
+      metadata.snr = source.snr;
+      metadata.rssi = source.rssi;
+      metadata.status = ND_UNSENT;
+    }
   }
 
   memset(neighbor_discover_scopes, 0, sizeof(neighbor_discover_scopes));
@@ -13658,19 +14534,184 @@ bool MyMesh::startNeighborDiscover(char* reply) {
 }
 #endif // WITH_MQTT_NEIGHBORS
 
+#ifdef WITH_UDP_BRIDGE
+bool MyMesh::ensureUDPBridge() {
+  if (!udp_bridge) {
+    udp_bridge = new (std::nothrow) UDPBridge(
+        &_prefs, _mgr, getRTCClock(), &udp_bridge_settings.prefs());
+    if (!udp_bridge) return false;
+    configureBridgeFilter(udp_bridge);
+  }
+  return true;
+}
+
+bool MyMesh::isUDPBridgeNetworkEnabled() const {
+  if (!udp_bridge_settings.healthy() || !udp_bridge_settings.prefs().enabled
+      || udp_network_paused || mesh::wireless::control().masterOff()
+      || mesh::wireless::control().pendingDisable(mesh::wireless::WiFi)
+      || mesh::wireless::control().blocked(mesh::wireless::WiFi)) return false;
+  const size_t secret_length = strnlen(_prefs.bridge_secret, sizeof(_prefs.bridge_secret));
+  if (secret_length == 0 || secret_length >= sizeof(_prefs.bridge_secret)) return false;
+  for (const auto& peer : udp_bridge_settings.prefs().peers) {
+    if (peer.enabled()) return true;
+  }
+  return false;
+}
+
+bool MyMesh::setUDPBridgeNetworkState(bool enabled) {
+  udp_network_paused = !enabled;
+  udp_station_retry_at = 0;
+  if (!enabled) {
+    if (udp_bridge) udp_bridge->serviceNetwork(false);
+    mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::UdpBridge, false);
+  } else {
+    serviceUDPBridge();
+  }
+  return true;  // Saved intent may wait for WiFi, credentials or OTA ownership.
+}
+
+bool MyMesh::setUDPBridgePrefs(const mesh::bridge::udp::Prefs& value) {
+  if (!mesh::bridge::udp::validPrefs(value)) return false;
+  // Allocate before committing enabled intent. A failed allocation must not
+  // report a working saved change or disturb the old socket and preferences.
+  const bool had_transport = udp_bridge != nullptr;
+  if (value.enabled && !ensureUDPBridge()) return false;
+  if (!udp_bridge_settings.setPrefs(value)) {
+    if (!udp_bridge_settings.healthy()) setUDPBridgeNetworkState(false);
+    if (!had_transport) { delete udp_bridge; udp_bridge = nullptr; }
+    return false;
+  }
+  if (udp_bridge) udp_bridge->end();
+  if (!value.enabled) {
+    delete udp_bridge;
+    udp_bridge = nullptr;
+  }
+  udp_station_retry_at = 0;
+  udp_network_paused = false;
+  serviceUDPBridge();
+  return true;
+}
+
+void MyMesh::formatUDPBridgeStatus(char* reply, size_t capacity) {
+  if (!reply || !capacity) return;
+  const auto& prefs = udp_bridge_settings.prefs();
+  uint8_t peers = 0;
+  for (const auto& peer : prefs.peers) if (peer.enabled()) ++peers;
+  const size_t secret_length = strnlen(_prefs.bridge_secret, sizeof(_prefs.bridge_secret));
+  const auto& control = mesh::wireless::control();
+  const char* reason = !udp_bridge_settings.healthy() ? "prefs-error"
+      : !prefs.enabled ? "off"
+      : control.masterOff() || control.pendingDisable(mesh::wireless::WiFi)
+          || control.blocked(mesh::wireless::WiFi) ? "wifi-paused"
+      : _cli.getBoard()->isOTAUpdateRunning() ? "ota-paused"
+      : udp_network_paused ? "paused"
+      : !secret_length || secret_length >= sizeof(_prefs.bridge_secret) ? "no-secret"
+      : !peers ? "no-peers"
+      : (WiFi.getMode() & WIFI_AP) ? "ap-mode"
+      : WiFi.getMode() != WIFI_STA || WiFi.status() != WL_CONNECTED
+          || static_cast<uint32_t>(WiFi.localIP()) == 0 ? "disconnected"
+      : !udp_bridge ? "no-memory" : nullptr;
+  const auto ip = WiFi.localIP();
+  const uint32_t address = static_cast<uint32_t>(ip);
+  const auto* octets = reinterpret_cast<const uint8_t*>(&address);
+  if (reason) {
+    snprintf(reply, capacity, "> %s ip=%u.%u.%u.%u port=%u peers=%u", reason,
+        octets[0], octets[1], octets[2], octets[3], unsigned(prefs.port), unsigned(peers));
+  } else {
+    udp_bridge->formatStatus(reply, capacity);
+  }
+}
+
+void MyMesh::formatUDPBridgeStats(const char* page, char* reply, size_t capacity) {
+  if (udp_bridge) udp_bridge->formatStats(page, reply, capacity);
+  else snprintf(reply, capacity, "> off; no UDP bridge counters allocated");
+}
+
+bool MyMesh::sendUDPBridgeTest(uint8_t peer_index, uint32_t nonce) {
+  serviceUDPBridge();
+  return udp_bridge && udp_bridge->sendTest(peer_index, nonce);
+}
+
+bool MyMesh::resetUDPBridgeStats() {
+  if (udp_bridge) udp_bridge->resetStats();
+  return true;
+}
+
+void MyMesh::serviceUDPBridge() {
+  const bool requested = isUDPBridgeNetworkEnabled()
+      && !_cli.getBoard()->isOTAUpdateRunning();
+  // MQTT's broker outage clock does not describe this independent LAN bridge.
+  // Publish a separate hold before asking its worker to resume a parked STA.
+  mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::UdpBridge, requested);
+  if (!requested) {
+    if (udp_bridge) udp_bridge->serviceNetwork(false);
+    return;
+  }
+  if (!ensureUDPBridge()) return;
+  wifi_mode_t sdk_mode = WIFI_MODE_NULL;
+  const bool station_ready = WiFi.getMode() == WIFI_STA
+      && esp_wifi_get_mode(&sdk_mode) == ESP_OK && sdk_mode == WIFI_MODE_STA
+      && WiFi.status() == WL_CONNECTED && static_cast<uint32_t>(WiFi.localIP()) != 0;
+  udp_bridge->serviceNetwork(station_ready, static_cast<uint32_t>(WiFi.localIP()),
+      static_cast<uint32_t>(WiFi.subnetMask()));
+  if (station_ready) {
+    udp_bridge->loop();
+    return;
+  }
+  // An AP, setup portal, OTA uploader or MQTT worker owns its WiFi lifecycle.
+  // UDP may share its connected station, but never reconnects underneath it.
+#ifdef WITH_MQTT_BRIDGE
+  if (mqtt_bridge && (mqtt_bridge->isRunning() || mqtt_bridge->isStopping())) return;
+#endif
+#ifdef WITH_WEBCONFIG
+  // A LAN/connecting listener follows this station owner. An explicit setup
+  // AP, active recovery browser or draining request retains its own link.
+  if (_webconfig && !_webconfig->prepareStationOwner()) return;
+#endif
+  if (!mesh::wifi::stationMutationAllowed()) return;
+  if (!millisHasNowPassed(udp_station_retry_at)) return;
+  udp_station_retry_at = millis() + 15000U;
+  mesh::wifi::Credentials credentials;
+#ifdef WITH_MQTT_BRIDGE
+  const auto* legacy = _cli.getObserverPrefs();
+  const auto state = mesh::wifi::resolveCredentials(credentials,
+      legacy ? legacy->wifi_ssid : nullptr, legacy ? legacy->wifi_password : nullptr,
+      legacy ? legacy->wifi_power_save : mesh::wifi::kDefaultPowerSave);
+#else
+  const auto state = mesh::wifi::resolveCredentials(credentials);
+#endif
+  if (state != mesh::wifi::CredentialState::Ready) return;
+  WiFi.persistent(false);
+  if (!WiFi.mode(WIFI_STA) || mesh::wifi::applyProtocolMask(WIFI_IF_STA) != ESP_OK) return;
+  mesh::wifi::setStationAutoReconnect(true);
+  mesh::wifi::beginStation(credentials.ssid, credentials.password);
+  const uint8_t power_save = mesh::wifi::effectivePowerSave(credentials.power_save, false,
+      mesh::wifi::espNowChannelConstrained());
+  esp_wifi_set_ps(power_save == mesh::wifi::kPowerSaveNone ? WIFI_PS_NONE
+      : power_save == mesh::wifi::kPowerSaveMax ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM);
+}
+#endif
+
 // To check if there is pending work
 #if defined(ESP32_PLATFORM)
 void MyMesh::serviceIdleWiFi() {
-#if (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+#if (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_UDP_BRIDGE) \
     || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))) \
     && (!defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW) \
     && (!defined(MESH_ESPNOW_RADIO) || !MESH_ESPNOW_RADIO)
   if (_cli.getBoard()->isOTAUpdateRunning()) return;
+#ifdef WITH_UDP_BRIDGE
+  if (isUDPBridgeNetworkEnabled()) return;
+#endif
+  if (mesh::wifi::networkPower().foregroundActive()) return;
 #ifdef WITH_WEBCONFIG
-  if (isWebConfigActive()) return;
+  if (isWebConfigActive() && (!mesh::wifi::networkPower().backgroundSuspended()
+      || _webconfig->isNetworkForegroundActive(millis()))) return;
 #endif
 #ifdef WITH_MQTT_BRIDGE
   if (_ota_update_at) return;
+  // The MQTT worker owns physical shutdown and resume, including cooldown.
+  // Never race its Core 0 Arduino/SDK interface transition from this loop.
   if (mqtt_bridge && (mqtt_bridge->isRunning() || mqtt_bridge->isStopping())) return;
 #endif
 #ifdef WITH_ESPNOW_BRIDGE
@@ -13697,48 +14738,78 @@ void MyMesh::serviceIdleWiFi() {
 #endif
 
 bool MyMesh::hasPendingWork() const {
-  if (isDualRadioActive()) return true;
-  if (hasPendingOtaApply()) return true;
+  return pendingWorkReason() != 0;
+}
+
+mesh::powerdiag::Mask MyMesh::pendingWorkReason() const {
+  using mesh::powerdiag::mask;
+  using mesh::powerdiag::Reason;
+  // Keep the original guard order and short circuit: diagnostics must not
+  // probe additional hardware or change which work keeps the MCU awake.
+  if (!canIdleDualRadio()) return mask(Reason::DualRadio);
+  if (hasPendingOtaApply()) return mask(Reason::Ota);
+#ifdef WITH_UDP_BRIDGE
+  if (isUDPBridgeRunning()) return mask(Reason::Bridge);
+#endif
+#if defined(ESP32_PLATFORM)
+  if (mesh::wifi::networkPower().foregroundActive()) return mask(Reason::Network);
+#endif
 #ifdef WITH_WEBCONFIG
-  if (isWebConfigActive()) return true;
+  if (isWebConfigActive() && (!mesh::wifi::networkPower().backgroundSuspended()
+      || _webconfig->isNetworkForegroundActive(millis()))) return mask(Reason::Network);
 #endif
 #if defined(ESP32_PLATFORM) \
-    && (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+    && (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_UDP_BRIDGE) \
         || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))) \
     && (!defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW) \
     && (!defined(MESH_ESPNOW_RADIO) || !MESH_ESPNOW_RADIO)
   // Cleanup may fail while the Arduino facade already reports OFF. Require
   // the live SDK driver to be gone before permitting manual light sleep.
   wifi_mode_t sdk_mode = WIFI_MODE_NULL;
-  if (esp_wifi_get_mode(&sdk_mode) != ESP_ERR_WIFI_NOT_INIT) return true;
+  if (esp_wifi_get_mode(&sdk_mode) != ESP_ERR_WIFI_NOT_INIT) return mask(Reason::Network);
 #endif
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
-  if (_local_cli_output.busy()) return true;
+  if (_local_cli_output.busy()) return mask(Reason::SerialIO);
 #endif
-  if (deferred_cli_command.pending || pending_self_advert || _cli.hasActiveUserGpioTimer()) return true;
+  if (deferred_cli_command.pending || pending_self_advert || _cli.hasActiveUserGpioTimer()) return mask(Reason::Scheduled);
 #if defined(WITH_BRIDGE)
   const AbstractBridge* active_bridge = activeBridge();
-  if (active_bridge && active_bridge->isRunning()) return true;
+  if (active_bridge && active_bridge->isRunning()) {
 #ifdef WITH_MQTT_BRIDGE
-  if (mqtt_bridge && mqtt_bridge->isStopping()) return true;
+    if (active_bridge != mqtt_bridge || !mqtt_bridge->isNetworkSuspended()) return mask(Reason::Bridge);
+#else
+    return mask(Reason::Bridge);
+#endif
+  }
+#ifdef WITH_MQTT_BRIDGE
+  if (mqtt_bridge && mqtt_bridge->isStopping()) return mask(Reason::BridgeCleanup);
 #endif
 #if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
-  if (isRs232BridgeRunning()) return true;
+  if (isRs232BridgeRunning()) return mask(Reason::Bridge);
+#endif
+#if defined(WITH_RS232_BRIDGE)
+  // A partial GPS release/claim is not a completed standby. Never allow MCU
+  // sleep while its UART ownership remains unresolved, even if end stopped RX.
+  if (active_rs232_bridge_uart != 0) return mask(Reason::BridgeCleanup);
+  if (bridge && rs232BridgeEnabled() && bridge->powerWakeDelayMs(millis()) == 0) return mask(Reason::BridgeWake);
 #endif
 #if defined(WITH_ESPNOW_BRIDGE) \
     && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
-  if (espnow_bridge.isRunning()) return true;
+  if (espnow_bridge.isRunning()) return mask(Reason::Bridge);
 #endif
 #endif
-  if (radio_driver.isWatchdogObserving()) return true;  // keep MCU awake for one radio duty cycle
-  if (radio_driver.isCalibratingNoiseFloor()) return true;  // keep MCU awake for the noise-floor window
-  if (hasQueuedWorkDue() || hasRetryWorkDue()) return true;
-  if (isMillisTimerDue(next_flood_advert) || isMillisTimerDue(next_local_advert)) return true;
-  if (isMillisTimerDue(dirty_contacts_expiry)) return true;
-  if (isMillisTimerDue(next_recent_repeater_sweep)) return true;
-  if (_prefs.battery_alert_enabled && isMillisTimerDue(next_battery_alert_check)) return true;
+  if (radio_driver.isWatchdogObserving()) return mask(Reason::RadioWatchdog);
+  uint32_t noise_floor_delay_ms;
+  if (getNextNoiseFloorWakeDelay(noise_floor_delay_ms) && noise_floor_delay_ms == 0)
+    return mask(Reason::Calibration);
+  if (hasQueuedWorkDue()) return mask(Reason::Queue);
+  if (hasRetryWorkDue()) return mask(Reason::Retry);
+  if (isMillisTimerDue(next_flood_advert) || isMillisTimerDue(next_local_advert)) return mask(Reason::Scheduled);
+  if (isMillisTimerDue(dirty_contacts_expiry)) return mask(Reason::Scheduled);
+  if (isMillisTimerDue(next_recent_repeater_sweep)) return mask(Reason::Scheduled);
+  if (_prefs.battery_alert_enabled && isMillisTimerDue(next_battery_alert_check)) return mask(Reason::Scheduled);
 #if ENV_INCLUDE_D7S
-  if (quakeAlertBusy()) return true;  // an event is being handled: stay awake until it is sent or dropped
+  if (quakeAlertBusy()) return mask(Reason::Scheduled);  // an event is being handled: stay awake until it is sent or dropped
 #endif
-  return hasScheduledRadioWorkDue();
+  return hasScheduledRadioWorkDue() ? mask(Reason::Scheduled) : 0;
 }

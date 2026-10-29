@@ -1,14 +1,45 @@
+#include <helpers/RegulatorSettings.h>
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/CpuClockPolicy.h>
+#include <helpers/esp32/PowerTestControls.h>
+#endif
+#include <helpers/LedSettings.h>
 #include <helpers/ui/DisplayPowerSettings.h>
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT && defined(DISPLAY_CLASS)
+#include <helpers/ui/OLEDControllerSettings.h>
+#endif
 #include <helpers/BatteryChargeCLI.h>
+#include <helpers/BatteryCalibrationStore.h>
+#include <helpers/MorseCLI.h>
+#include <helpers/MorseLoopPolicy.h>
+#if defined(MESH_HIL_TX_FREQ_MHZ)
+#include <helpers/radiolib/HilTxFrequencyGuard.h>
+#endif
+#if defined(RAK_4631)
+#include <helpers/PeripheralModePrefs.h>
+#endif
 #include <helpers/ui/StartupScreen.h>
 #include "NotificationSettingsFile.h"
 #include "MyMesh.h"
+#if defined(RAK_4631) && defined(COMPANION_RADIO_FULL) \
+    || (defined(STM32_PLATFORM) && defined(STM32WLxx) && COMPANION_FEATURE_TEXT_TERMINAL)
+#include "CompanionHelpWriter.h"
+#endif
+#include <helpers/CompanionStartupFrequency.h>
+#include <helpers/CompanionRadioDiagnostics.h>
+#include <helpers/CompanionPowerDiagnostics.h>
 #include <helpers/CompanionTxRoutingCLI.h>
+#include <helpers/CompanionTrafficRouting.h>
+#include <helpers/CompanionChannelAlias.h>
+#include <helpers/FleetCommand.h>
 #include "CompanionBluetooth.h"
 #include "CompanionWireless.h"
 #include "CompanionRetry.h"
 #if defined(MESH_SOAK_DIAGNOSTICS)
 #include "../../tools/hil/S3SoakDiagnostics.h"
+#endif
+#if defined(ESP32_PLATFORM) && defined(MESH_HIL_RADIO_TRACE) && MESH_HIL_RADIO_TRACE
+#include <helpers/radiolib/ESP32RadioTraceCLI.h>
 #endif
 
 #include <Arduino.h> // needed for PlatformIO
@@ -18,14 +49,22 @@
 #endif
 #include <Mesh.h>
 #include <helpers/CompanionHardwareCommandCompat.h>
+#if defined(MESH_HIL_BLE_BENCH) && MESH_HIL_BLE_BENCH
+#include <helpers/CompanionBleBench.h>
+#endif
 #include <helpers/CompanionStatusResponse.h>
 #include <helpers/CompanionReader.h>
 #include <helpers/IdentityGeneration.h>
 #include <helpers/LazyPersistence.h>
 #include <helpers/StorageLayout.h>
 #include <helpers/StatsFormatHelper.h>
+#include <helpers/SmallTableSort.h>
 #include <helpers/UsbAsciiBinarySwitch.h>
 #include <helpers/UsbLogging.h>
+#if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
+#include <helpers/esp32/CompanionAdminPassword.h>
+#include <helpers/esp32/ManagementPassword.h>
+#endif
 #include <helpers/UsbLoggingWatchdog.h>
 #if MESH_PACKET_LOGGING
 #include <helpers/SerialPacketLog.h>
@@ -39,6 +78,9 @@
 #endif
 #if defined(ENABLE_OTA)
 #include <helpers/ota/OtaContext.h>
+#if defined(OTA_RAK15002_SD_STORE) && defined(ETHERNET_USE_RAK13800)
+bool handleRak4631PeripheralCommand(const char* command, char* reply, size_t capacity);
+#endif
 #endif
 #if defined(ENABLE_OTA)
 #include <helpers/ota/OtaSpeedConfig.h>
@@ -46,6 +88,16 @@
 #include "helpers/radiolib/RXPowerSaving.h"
 #include "helpers/radiolib/RxBoostedGainDefaults.h"
 #include "helpers/radiolib/CadTiming.h"
+
+#if COMPANION_FEATURE_READER
+static bool isCompanionReaderRequest(const char* command) {
+  if (!command) return false;
+  mesh::bible::skipSpace(command);
+  if (!mesh::bible::token(command, "get")) return false;
+  mesh::bible::skipSpace(command);
+  return mesh::bible::token(command, "reader");
+}
+#endif
 
 #if defined(MESHCORE_EXTRAFS_HIL) \
     && (!defined(NRF52_PLATFORM) || !defined(EXTRAFS) || defined(QSPIFLASH))
@@ -260,7 +312,7 @@ static bool save_filter(const ContactInfo& c);
 #define DEFAULT_AUTOADD_CONFIG 0
 #endif
 #ifndef DEFAULT_BUZZER_QUIET
-#define DEFAULT_BUZZER_QUIET 0
+#define DEFAULT_BUZZER_QUIET 1
 #endif
 #ifndef DEFAULT_CAD_ENABLED
 // Preserve the tuned Companion behavior that preceded the runtime setting.
@@ -466,6 +518,13 @@ bool MyMesh::updateContactFromFrame(ContactInfo &contact, uint32_t& last_mod, co
   return true;
 }
 
+#if COMPANION_RTC_FAST_OFFLINE_FRAMES
+alignas(4) RTC_FAST_ATTR MyMesh::Frame MyMesh::rtc_fast_offline_frames[COMPANION_RTC_FAST_OFFLINE_FRAMES];
+#endif
+#if COMPANION_RTC_SLOW_OFFLINE_FRAMES
+alignas(4) RTC_SLOW_ATTR MyMesh::Frame MyMesh::rtc_slow_offline_frames[COMPANION_RTC_SLOW_OFFLINE_FRAMES];
+#endif
+
 bool MyMesh::Frame::isChannelMsg() const {
   return len > 0 && (buf[0] == RESP_CODE_CHANNEL_MSG_RECV || buf[0] == RESP_CODE_CHANNEL_MSG_RECV_V3 ||
                      buf[0] == RESP_CODE_CHANNEL_DATA_RECV);
@@ -483,6 +542,8 @@ int MyMesh::getOfflineQueueCapacity() const {
 
 MyMesh::Frame& MyMesh::offlineQueueFrameAt(int logical_index) {
 #if defined(OTA_SHARED_COMPANION_QUEUE)
+  return offline_queue.at((offline_queue_head + logical_index) % getOfflineQueueCapacity());
+#elif COMPANION_RTC_FAST_OFFLINE_FRAMES || COMPANION_RTC_SLOW_OFFLINE_FRAMES
   return offline_queue.at((offline_queue_head + logical_index) % getOfflineQueueCapacity());
 #elif ONE_KEY_DM_SHARED_OFFLINE_QUEUE
   return offline_queue[logical_index];
@@ -515,9 +576,9 @@ uint16_t MyMesh::drainOfflineQueueForOta(void* owner) {
   MyMesh* mesh = static_cast<MyMesh*>(owner);
   uint8_t discarded[MAX_FRAME_SIZE];
   uint16_t removed = 0;
-  // Explicit OTA work borrows the upper half of this volatile queue. Keep the
-  // newest 128 frames and notify the UI for each oldest frame consumed.
-  while (mesh->offline_queue_len > 128) {
+  // Explicit OTA work borrows the queue's workspace region. Keep the newest
+  // retained frames and notify the UI for each oldest frame consumed.
+  while (mesh->offline_queue_len > static_cast<int>(OTA_RETAINED_OFFLINE_FRAMES)) {
     if (mesh->getFromOfflineQueue(discarded) <= 0) break;
     ++removed;
   }
@@ -601,12 +662,15 @@ bool MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
   return false;
 }
 
-int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
-  if (offline_queue_len > 0) {         // check offline queue
-    Frame& head = offlineQueueFrameAt(0);
-    size_t len = head.len; // take from top of queue
-    memcpy(frame, head.buf, len);
+int MyMesh::peekOfflineQueue(uint8_t frame[]) {
+  if (!frame || offline_queue_len <= 0) return 0;
+  Frame& head = offlineQueueFrameAt(0);
+  memcpy(frame, head.buf, head.len);
+  return head.len;
+}
 
+void MyMesh::popOfflineQueue() {
+  if (offline_queue_len > 0) {
     offline_queue_len--;
 #if ONE_KEY_DM_SHARED_OFFLINE_QUEUE
     for (int i = 0; i < offline_queue_len; ++i) {
@@ -622,9 +686,38 @@ int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
 #ifdef DISPLAY_CLASS
     if (_ui) _ui->syncMessageQueue(offline_queue_len, 0);
 #endif
-    return len;
   }
-  return 0; // queue is empty
+}
+
+int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
+  // Explicit OTA queue draining intentionally consumes frames without app
+  // delivery. Normal app downloads commit only after transport acceptance.
+  const int len = peekOfflineQueue(frame);
+  if (len > 0) popOfflineQueue();
+  return len;
+}
+
+void MyMesh::syncNextOfflineMessage() {
+  BaseSerialInterface* reply_route = _serial->captureReplyRoute();
+  const Frame* head = offline_queue_len > 0 ? &offlineQueueFrameAt(0) : nullptr;
+  size_t out_len = head ? head->len : 0;
+  const bool have_message = out_len > 0;
+  const uint8_t* reply_frame = out_frame;
+  if (have_message) {
+    // A full or disconnected requester must leave this message pending.
+    // Another connected transport cannot accept its reply on its behalf.
+    // Transports consume or copy the frame before returning, so the retained
+    // queue head can be sent directly and is only removed after acceptance.
+    if (!_serial->isReplyRouteAvailable(reply_route)) return;
+    reply_frame = head->buf;
+  } else {
+    out_frame[0] = RESP_CODE_NO_MORE_MESSAGES;
+    out_len = 1;
+  }
+  const size_t accepted = _serial->writeFrameToRoute(reply_route, reply_frame, out_len);
+  if (have_message && accepted == out_len) {
+    popOfflineQueue();
+  }
 }
 
 float MyMesh::getAirtimeBudgetFactor() const {
@@ -663,11 +756,13 @@ int MyMesh::calcRxDelay(float score, uint32_t air_time) const {
 }
 
 uint32_t MyMesh::getRetransmitDelay(const mesh::Packet *packet) {
-  uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.tx_delay_factor);
+  uint32_t t = (_radio->getProfileAirtime(packet->radio_profile,
+      packet->getRawLength(), packet->tx_cr) * _prefs.tx_delay_factor);
   return getRNG()->nextInt(0, 5*t + 1);
 }
 uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
-  uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.direct_tx_delay_factor);
+  uint32_t t = (_radio->getProfileAirtime(packet->radio_profile,
+      packet->getRawLength(), packet->tx_cr) * _prefs.direct_tx_delay_factor);
   return getRNG()->nextInt(0, 5*t + 1);
 }
 
@@ -890,7 +985,7 @@ static int sort_by_recent(const void *a, const void *b) {
 
 int MyMesh::getRecentlyHeard(AdvertPath dest[], int max_num) {
   if (max_num > ADVERT_PATH_TABLE_SIZE) max_num = ADVERT_PATH_TABLE_SIZE;
-  qsort(advert_paths, ADVERT_PATH_TABLE_SIZE, sizeof(advert_paths[0]), sort_by_recent);
+  mesh::sortSmallTable(advert_paths, ADVERT_PATH_TABLE_SIZE, sizeof(advert_paths[0]), sort_by_recent);
 
   for (int i = 0; i < max_num; i++) {
     dest[i] = advert_paths[i];
@@ -1356,8 +1451,14 @@ bool MyMesh::onAddressedTextPacket(mesh::Packet* packet, uint8_t src_hash,
     uint8_t id[ONE_KEY_DM_ID_SIZE];
     makeOneKeyDMId(id, timestamp, text);
     for (uint8_t j = 0; j < held_dm_count; ++j) {
+#if ONE_KEY_DM_COMPACT_HELD
+      uint8_t held_id[ONE_KEY_DM_ID_SIZE];
+      makeOneKeyDMId(held_id, held_dms[j].timestamp, held_dms[j].text);
+#else
+      const uint8_t* held_id = held_dms[j].id;
+#endif
       if (memcmp(held_dms[j].sender_key, pub_key, PUB_KEY_SIZE) == 0 &&
-          memcmp(held_dms[j].id, id, ONE_KEY_DM_ID_SIZE) == 0) return true;
+          memcmp(held_id, id, ONE_KEY_DM_ID_SIZE) == 0) return true;
     }
 
     // Only verified and decryptable messages count toward the FIFO of 15.
@@ -1397,8 +1498,19 @@ bool MyMesh::onAddressedTextPacket(mesh::Packet* packet, uint8_t src_hash,
     }
     HeldOneKeyDM& entry = held_dms[held_dm_count++];
     memcpy(entry.sender_key, pub_key, PUB_KEY_SIZE);
+#if ONE_KEY_DM_COMPACT_HELD
+    entry.timestamp = timestamp;
+    // Preserve the exact ACK of the authenticated original plaintext,
+    // including its attempt/type byte; the delivery ID is derived separately.
+    mesh::Utils::sha256(entry.ack_hash, sizeof(entry.ack_hash), data,
+                        5 + strlen(text), pub_key, PUB_KEY_SIZE);
+    entry.path_len = packet->isRouteFlood() ? packet->path_len : 0xFF;
+    entry.snr = packet->_snr;
+    memcpy(entry.text, text, strlen(text) + 1);
+#else
     memcpy(entry.id, id, ONE_KEY_DM_ID_SIZE);
     entry.packet = *packet;
+#endif
 #endif
     return true;
   }
@@ -1455,6 +1567,19 @@ void MyMesh::releaseHeldOneKeyDMs() {
 #else
     if (offline_queue_len >= getOfflineQueueCapacity()) break;
 
+#if ONE_KEY_DM_COMPACT_HELD
+    uint8_t id[ONE_KEY_DM_ID_SIZE];
+    makeOneKeyDMId(id, entry.timestamp, entry.text);
+    if (!wasDeliveredOneKeyDM(entry.sender_key, id)) {
+      mesh::Packet packet;
+      packet.header = entry.path_len == 0xFF ? ROUTE_TYPE_DIRECT : ROUTE_TYPE_FLOOD;
+      packet.path_len = entry.path_len == 0xFF ? 0 : entry.path_len;
+      packet._snr = entry.snr;
+      onMessageRecv(*contact, &packet, entry.timestamp, entry.text);
+      rememberDeliveredOneKeyDM(entry.sender_key, id);
+    }
+    sendAckTo(*contact, entry.ack_hash, sizeof(entry.ack_hash));
+#else
     uint8_t data[MAX_PACKET_PAYLOAD + 1];
     const int decoded_len = mesh::Utils::MACThenDecrypt(
         contact->getSharedSecret(self_id), data, &entry.packet.payload[2],
@@ -1477,6 +1602,7 @@ void MyMesh::releaseHeldOneKeyDMs() {
         }
       }
     }
+#endif
     for (uint8_t j = i + 1; j < held_dm_count; ++j) held_dms[j - 1] = held_dms[j];
     --held_dm_count;
 #endif
@@ -1484,7 +1610,7 @@ void MyMesh::releaseHeldOneKeyDMs() {
 }
 #endif // MESH_ENABLE_ONE_KEY_DM
 
-void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt,
+bool MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt,
                           uint32_t sender_timestamp, const uint8_t *extra,
                           int extra_len, const char *text,
                           bool terminal_command_reply,
@@ -1537,9 +1663,12 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
     memset(private_key_backup_nonce, 0, sizeof(private_key_backup_nonce));
     memset(private_key_backup_sender, 0, sizeof(private_key_backup_sender));
     memset(out_frame, 0, i);
-    return;
+    return false;
   }
   const bool queued = addToOfflineQueue(out_frame, i);
+  // Signed room posts are retried by the server until retained. Do not make
+  // an unretained post visible as delivered or notify the user about it.
+  if (txt_type == TXT_TYPE_SIGNED_PLAIN && !queued) return false;
 
   if (_serial->isConnected()) {
     uint8_t frame[1];
@@ -1585,6 +1714,7 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   }
 #endif
   if (_ui) _ui->setMessageNotificationOverride(false);
+  return queued;
 }
 
 static uint16_t emergencyClientRepeatKey(const mesh::Packet* packet) {
@@ -1602,7 +1732,8 @@ static bool __attribute__((noinline)) hasEmergencyClientRepeat(uint16_t key) {
 }
 
 bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
-  if (emergency_client_repeat_packet != NULL && packet->getPathHashCount() > 0) {
+  if (emergency_client_repeat_packet != NULL && packet->getPathHashCount() > 0
+      && packet->radio_origin == emergency_client_repeat_packet->radio_origin) {
     if (emergencyClientRepeatKey(packet) == emergency_client_repeat_key) {
       releasePacket(emergency_client_repeat_packet);
       emergency_client_repeat_packet = NULL;
@@ -1621,6 +1752,138 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   return true;
 }
 
+bool MyMesh::isAliasRadio2Defined() const {
+  const auto profiles = _radio->profiles();
+  return profiles != nullptr && profiles->enabled();
+}
+
+bool MyMesh::resolveChannelAlias(ChannelDetails& channel) const {
+  uint8_t original_key[16];
+  memcpy(original_key, channel.channel.secret, sizeof(original_key));
+  if (!resolveCompanionChannelKey(channel.name, channel.channel.secret,
+      [](uint8_t* out, size_t size, const uint8_t* text, int length) {
+        mesh::Utils::sha256(out, size, text, length);
+      })) return false;
+  const auto kind = parseCompanionChannelAlias(channel.name).kind;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (isMeshtextChannel(channel)) channel.channel.tx_radio = mesh::RADIO_TX_OFF;
+#endif
+  if (isAliasRadio2Defined()
+      && (kind == CompanionChannelKind::Radio2 || kind == CompanionChannelKind::Meshtext)) {
+    channel.channel.tx_radio = kind == CompanionChannelKind::Radio2
+        ? mesh::RADIO_TX_SECONDARY : mesh::RADIO_TX_OFF;
+  }
+  if (memcmp(original_key, channel.channel.secret, sizeof(original_key)) != 0) {
+    // BaseChatMesh already cached the hash for ordinary/private keys. Only a
+    // rewritten automatic alias needs another SHA-256 during receive scans.
+    mesh::Utils::sha256(channel.channel.hash, sizeof(channel.channel.hash), channel.channel.secret, 16);
+  }
+  return true;
+}
+
+bool MyMesh::getChannel(int channel_idx, ChannelDetails& channel) {
+  return BaseChatMesh::getChannel(channel_idx, channel) && resolveChannelAlias(channel);
+}
+
+bool MyMesh::setChannel(int channel_idx, const ChannelDetails& channel) {
+  if (parseCompanionChannelAlias(channel.name).kind == CompanionChannelKind::Invalid) return false;
+#if MESH_ENABLE_ETHERNET_TUNNEL
+  if (_ethernet_settings.enabled && channel.name[0]
+      && parseCompanionChannelAlias(channel.name).kind != CompanionChannelKind::MeshCore) return false;
+#endif
+  const bool saved = BaseChatMesh::setChannel(channel_idx, channel);
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (saved) _mt_delivery_config_dirty = true;
+#endif
+#if MESH_ENABLE_ETHERNET_TUNNEL
+  if (saved) ++_ethernet_channel_generation;
+#endif
+  return saved;
+}
+
+int MyMesh::searchChannelsForPacket(const mesh::Packet* packet, const uint8_t* hash,
+                                  mesh::GroupChannel matches[], int max_matches) {
+  int count = 0;
+  const bool radio2_defined = isAliasRadio2Defined();
+  for (int priority = 0; priority < 2; ++priority) {
+    for (int i = 0; i < MAX_GROUP_CHANNELS && count < max_matches; ++i) {
+      ChannelDetails channel;
+      if (!getChannel(i, channel) || channel.name[0] == 0
+#if MESH_ENABLE_MESHTEXT_CHAT
+          || isMeshtextChannel(channel)
+#endif
+          || companionChannelReceivePriority(channel.name, packet->radio_origin, radio2_defined) != priority
+          || channel.channel.hash[0] != hash[0]) continue;
+      bool duplicate = false;
+      for (int j = 0; j < count; ++j) {
+        if (memcmp(matches[j].secret, channel.channel.secret, sizeof(channel.channel.secret)) == 0) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (!duplicate) matches[count++] = channel.channel;
+    }
+  }
+  return count;
+}
+
+int MyMesh::findChannelIdxForPacket(const mesh::GroupChannel& key, const mesh::Packet* packet) {
+  const bool radio2_defined = isAliasRadio2Defined();
+  for (int priority = 0; priority < 2; ++priority) {
+    for (int i = 0; i < MAX_GROUP_CHANNELS; ++i) {
+      ChannelDetails channel;
+      if (getChannel(i, channel) && channel.name[0] != 0
+#if MESH_ENABLE_MESHTEXT_CHAT
+          && !isMeshtextChannel(channel)
+#endif
+          && companionChannelReceivePriority(channel.name, packet->radio_origin, radio2_defined) == priority
+          && memcmp(channel.channel.secret, key.secret, sizeof(key.secret)) == 0) return i;
+    }
+  }
+  return -1;
+}
+
+bool MyMesh::allowGroupPacketOnRadio(mesh::Packet* packet) {
+  if (!isAliasRadio2Defined() || packet->payload_len < 1) return true;
+  if (packet->payload_len > MAX_PACKET_PAYLOAD) return false;
+  // Reject only an authenticated key match. The one-byte channel hash alone
+  // must not suppress unrelated channels or opaque relaying.
+  for (int i = 0; i < MAX_GROUP_CHANNELS; ++i) {
+    ChannelDetails channel;
+    if (!getChannel(i, channel) || channel.name[0] == 0
+        || channel.channel.hash[0] != packet->payload[0]) continue;
+    const auto alias = parseCompanionChannelAlias(channel.name);
+    if (alias.kind != CompanionChannelKind::Radio2
+        && alias.kind != CompanionChannelKind::Meshtext) continue;
+    uint8_t data[MAX_PACKET_PAYLOAD];
+    if (mesh::Utils::MACThenDecrypt(channel.channel.secret, data, packet->payload + 1,
+                                  packet->payload_len - 1) <= 0) continue;
+    const int selected = findChannelIdxForPacket(channel.channel, packet);
+    if (selected < 0) return false;
+    ChannelDetails selected_channel;
+    if (getChannel(selected, selected_channel)
+        && parseCompanionChannelAlias(selected_channel.name).kind == CompanionChannelKind::Radio2) {
+      // Also bind direct-path relaying, which runs before local delivery.
+      packet->tx_radio = mesh::RADIO_TX_SECONDARY;
+    }
+    return true;
+  }
+  return true;
+}
+
+void MyMesh::onGroupDataRecv(mesh::Packet* packet, uint8_t type,
+                           const mesh::GroupChannel& key, uint8_t* data, size_t len) {
+  const int index = findChannelIdxForPacket(key, packet);
+  if (index < 0) return;
+  ChannelDetails channel;
+  if (getChannel(index, channel) && isAliasRadio2Defined()
+      && parseCompanionChannelAlias(channel.name).kind == CompanionChannelKind::Radio2) {
+    // Forwarding and the emergency hold copy stay on the originating profile.
+    packet->tx_radio = mesh::RADIO_TX_SECONDARY;
+  }
+  BaseChatMesh::onGroupDataRecv(packet, type, key, data, len);
+}
+
 #ifdef COMPANION_MESH_CLOCK_SYNC
 void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
                           uint32_t timestamp, const uint8_t* app_data,
@@ -1635,6 +1898,7 @@ void MyMesh::onGroupPacketRecv(mesh::Packet* packet) {
 #endif
 
 bool MyMesh::allowFloodRetry(const mesh::Packet* packet) const {
+  if (_morse_reply.ownsReply(packet)) return false;
   if (packet == NULL || _prefs.flood_retry_attempts == 0) return false;
   // A companion may retry its own advert once, using the core's deliberately
   // slow origin-advert delay. Do not add retries while relaying a neighbour's
@@ -1690,8 +1954,146 @@ bool MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
   }
 }
 
+void MyMesh::onRadioProfileCopyQueued(mesh::Packet* packet, const mesh::Packet* original, uint8_t priority) {
+  mesh::Mesh::onRadioProfileCopyQueued(packet, original, priority);
+  _morse_reply.copy(original, packet);
+#if MESH_ENABLE_FLEET_CONTROL
+  if (original && original == _fleet_admission_original) _fleet_admission_copy = packet;
+#endif
+}
+
+void MyMesh::onSendComplete(mesh::Packet* packet) {
+  mesh::Mesh::onSendComplete(packet);
+  _morse_reply.complete(packet);
+}
+
+void MyMesh::onSendFail(mesh::Packet* packet) {
+  mesh::Mesh::onSendFail(packet);
+  _morse_reply.fail(packet);
+}
+
+bool MyMesh::allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash,
+                              uint8_t next_hop_hash_len) const {
+  return !_morse_reply.ownsReply(packet)
+      && mesh::Mesh::allowDirectRetry(packet, next_hop_hash, next_hop_hash_len);
+}
+
+#if MESH_ENABLE_FLEET_CONTROL
+
+bool MyMesh::sendFleetCommandData(mesh::GroupChannel& channel, const uint8_t* envelope, size_t length) {
+  if (!envelope || !length || length > mesh::FleetCommand::MaxEnvelopeLength) return false;
+  if (length <= mesh::FleetCommand::MaxPayloadLength) {
+    return sendGroupData(channel, nullptr, OUT_PATH_UNKNOWN,
+                         mesh::FleetCommand::DataType, envelope, (int)length);
+  }
+  mesh::Packet* reserved[2] = {};
+  uint8_t group[3 + mesh::FleetCommand::MaxPayloadLength];
+  group[0] = (uint8_t)mesh::FleetCommand::DataType;
+  group[1] = (uint8_t)(mesh::FleetCommand::DataType >> 8);
+  // Reserve both encrypted packets before handing either to the dispatcher.
+  for (uint8_t part = 0; part < 2; ++part) {
+    const size_t bytes = mesh::FleetCommand::fragment(envelope, length, part,
+                                                     group + 3, sizeof(group) - 3);
+    if (bytes) {
+      group[2] = (uint8_t)bytes;
+      reserved[part] = createGroupDatagram(PAYLOAD_TYPE_GRP_DATA, channel, group, 3 + bytes);
+    }
+    if (!reserved[part]) {
+      if (reserved[0]) releasePacket(reserved[0]);
+      memset(group, 0, sizeof(group));
+      return false;
+    }
+  }
+  memset(group, 0, sizeof(group));
+  _fleet_admission_original = reserved[0];
+  _fleet_admission_copy = nullptr;
+  const bool first_queued = sendFloodScoped(channel, reserved[0]);
+  mesh::Packet* first_copy = _fleet_admission_copy;
+  _fleet_admission_original = nullptr;
+  _fleet_admission_copy = nullptr;
+  if (!first_queued) {
+    // sendFloodScoped/sendPacket owns and releases the failed first packet.
+    releasePacket(reserved[1]);
+    return false;
+  }
+  if (sendFloodScoped(channel, reserved[1])) return true;
+  // A failed second send has already been released. No dispatcher loop runs
+  // inside admission, so the first packet and its optional copy are still
+  // queued and can be retired by exact pointer without touching other work.
+  for (int i = _mgr->getOutboundTotal() - 1; i >= 0; --i) {
+    const mesh::Packet* queued = _mgr->getOutboundByIdx(i);
+    if (queued != reserved[0] && queued != first_copy) continue;
+    mesh::Packet* cancelled = _mgr->removeOutboundByIdx(i);
+    cancelOutboundRadioRetry(cancelled);
+    onSendFail(cancelled); // Clear its pending flood retry metadata too.
+    releasePacket(cancelled);
+  }
+  return false;
+}
+#endif
+
+#if MESH_ENABLE_LOST_REPLY
+void MyMesh::maybeReplyToLostQuestion(const ContactInfo& from,
+                                     uint32_t sender_timestamp, const char* text) {
+  if ((_prefs.lost_reply != mesh::companion::LostReplyNo
+       && _prefs.lost_reply != mesh::companion::LostReplyYes)
+      || from.type != ADV_TYPE_CHAT || isTransientContact(from)
+      || !mesh::companion::isLostReplyQuestion(text)) return;
+
+  // Contact cache references are borrowed. Preserve identity before servicing
+  // other sends, then acquire the recipient only when ready to compose it.
+  uint8_t recipient_key[PUB_KEY_SIZE];
+  memcpy(recipient_key, from.id.pub_key, sizeof(recipient_key));
+  const uint32_t now = _ms->getMillis();
+  if (!lost_reply_limiter.canReply(recipient_key, sender_timestamp, now)) return;
+
+  expireExpectedAcks();
+  AckTableEntry* available = NULL;
+  for (AckTableEntry& entry : expected_ack_table) {
+    if (entry.ack == 0) { available = &entry; break; }
+  }
+  // Automatic answers must leave ordinary sends and their ACK/RX reserve
+  // intact. A busy application can retry its question after capacity returns.
+  if (available == NULL || _mgr->getFreeCount() <= 2) return;
+  ContactInfo* recipient = lookupPersistentContactByPubKey(recipient_key, PUB_KEY_SIZE);
+  if (recipient == NULL || recipient->type != ADV_TYPE_CHAT) return;
+  const char* answer = _prefs.lost_reply == mesh::companion::LostReplyYes ? "Yes" : "No";
+  const uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+  uint32_t expected_ack = 0, timeout = 0;
+  // The final argument receives the actual packet hash for ACK cancellation. No
+  // semantic message retry key is supplied, so user sends are not replaced.
+  uint8_t retry_key[MAX_HASH_SIZE] = {};
+  const int result = sendMessageDetached(*recipient, timestamp, answer,
+                                         expected_ack, timeout, retry_key);
+  // Automatic ACKs use the existing per-entry expiry service. Do not move an
+  // application or terminal send's shared BaseChatMesh timeout deadline.
+  if (result == MSG_SEND_FAILED) return;
+
+  lost_reply_limiter.rememberReply(recipient_key, sender_timestamp, now);
+  if (expected_ack != 0) {
+    clearExpectedAck(*available, false);
+    available->msg_sent = now;
+    available->expires_at = futureMillis(timeout);
+    available->ack = expected_ack;
+    available->message_timestamp = timestamp;
+    available->contact = recipient;
+    memcpy(available->retry_key, retry_key, sizeof(available->retry_key));
+    mesh::Utils::sha256(available->text_fingerprint, sizeof(available->text_fingerprint),
+                        recipient_key, PUB_KEY_SIZE,
+                        (const uint8_t*)answer, strlen(answer));
+    // No application or terminal transport owns this automatic send.
+    available->reply_route = NULL;
+    expireExpectedAcks();
+  }
+}
+#endif
+
 void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                            const char *text) {
+#if MESH_ENABLE_LOST_REPLY
+  // Answer independently of app inbox capacity, including held/retried DMs.
+  maybeReplyToLostQuestion(from, sender_timestamp, text);
+#endif
 #if MESH_ENABLE_ONE_KEY_DM
   uint8_t dm_id[ONE_KEY_DM_ID_SIZE];
   makeOneKeyDMId(dm_id, sender_timestamp, text);
@@ -1700,8 +2102,14 @@ void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t 
   bool replaced_held_dm = false;
 #endif
   for (uint8_t i = 0; i < held_dm_count; ++i) {
+#if ONE_KEY_DM_COMPACT_HELD
+    uint8_t held_id[ONE_KEY_DM_ID_SIZE];
+    makeOneKeyDMId(held_id, held_dms[i].timestamp, held_dms[i].text);
+#else
+    const uint8_t* held_id = held_dms[i].id;
+#endif
     if (memcmp(held_dms[i].sender_key, from.id.pub_key, PUB_KEY_SIZE) == 0 &&
-        memcmp(held_dms[i].id, dm_id, ONE_KEY_DM_ID_SIZE) == 0) {
+        memcmp(held_id, dm_id, ONE_KEY_DM_ID_SIZE) == 0) {
 #if ONE_KEY_DM_SHARED_OFFLINE_QUEUE
       // Removing the held frame frees exactly one ordinary slot for this retry.
       removeHeldOneKeyDM(i);
@@ -1745,21 +2153,40 @@ void MyMesh::onCLICommandRecv(const ContactInfo &from, mesh::Packet *pkt, uint32
                                const char *text, char* reply) {
   markConnectionActive(from); // in case this is from a server, and we have a connection
   if (from.isRemoteCLIAllowed()) {
+    const uint32_t before = _morse_reply.generation();
+    _morse_reply.beginCommand(from.id.pub_key);
     // A timestamp received over the radio must never grant local-console access.
     if (!handleCommand(text, sender_timestamp ? sender_timestamp : 1, reply)) {
       strcat(reply, "Unknown command");   // reply may have cmd prefix from 'text'
     }
+    _morse_reply.endCommand();
+    _morse_reply_admission = _morse_reply.generation() != before;
   } else {
     queueMessage(from, TXT_TYPE_CLI_COMMAND, pkt, sender_timestamp, NULL, 0, text);
   }
 }
 
-void MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
+void MyMesh::onCLIReplyPrepared(const ContactInfo& from, mesh::Packet* reply) {
+  if (!_morse_reply_admission || !_morse_reply.pending()
+      || memcmp(from.id.pub_key, _morse_reply.actor(), PUB_KEY_SIZE) != 0) return;
+  _morse_reply.prepareReply(reply);
+  if (reply) reply->radio_reply = true;
+}
+
+void MyMesh::onCLIReplyQueued(const ContactInfo& from, mesh::Packet* reply, bool queued) {
+  if (!_morse_reply_admission) return;
+  if (memcmp(from.id.pub_key, _morse_reply.actor(), PUB_KEY_SIZE) == 0)
+    _morse_reply.armReply(reply, queued);
+  _morse_reply_admission = false;
+}
+
+bool MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                                  const uint8_t *sender_prefix, const char *text) {
+  if (!queueMessage(from, TXT_TYPE_SIGNED_PLAIN, pkt, sender_timestamp, sender_prefix, 4, text)) return false;
   markConnectionActive(from);
   // from.sync_since change needs to be persisted
   scheduleContactWrite(from);
-  queueMessage(from, TXT_TYPE_SIGNED_PLAIN, pkt, sender_timestamp, sender_prefix, 4, text);
+  return true;
 }
 
 void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint32_t timestamp,
@@ -1767,74 +2194,11 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   const bool is_emergency_channel =
       memcmp(channel.secret, EMERGENCY_CHANNEL_SECRET,
              sizeof(EMERGENCY_CHANNEL_SECRET)) == 0;
-  int i = 0;
-  if (app_target_ver >= 3) {
-    out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
-    out_frame[i++] = (int8_t)(pkt->getSNR() * 4);
-    out_frame[i++] = 0; // reserved1
-    out_frame[i++] = 0; // reserved2
-  } else {
-    out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV;
-  }
-
-  uint8_t channel_idx = findChannelIdx(channel);
-  out_frame[i++] = channel_idx;
-  uint8_t path_len = out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
-
-  out_frame[i++] = TXT_TYPE_PLAIN;
-  memcpy(&out_frame[i], &timestamp, 4);
-  i += 4;
-  int tlen = strlen(text); // TODO: UTF-8 ??
-  if (i + tlen > MAX_FRAME_SIZE) {
-    tlen = MAX_FRAME_SIZE - i;
-  }
-  memcpy(&out_frame[i], text, tlen);
-  i += tlen;
-  const bool queued = addToOfflineQueue(out_frame, i);
-
-#if COMPANION_FEATURE_NOTIFICATIONS
-  const bool notification_managed = _notifications.message(nullptr, channel.secret, _serial->isConnected(), millis());
-  if (_ui) _ui->setMessageNotificationOverride(notification_managed, _notifications.overridesScreen());
-#else
-  const bool notification_managed = false;
-#endif
-  if (_serial->isConnected()) {
-    uint8_t frame[1];
-    frame[0] = PUSH_CODE_MSG_WAITING;
-    _serial->writeFrame(frame, 1);
-  } else {
-#ifdef DISPLAY_CLASS
-    if (_ui && !notification_managed) _ui->notify(UIEventType::channelMessage);
-#endif
-  }
-
-#if COMPANION_FEATURE_TEXT_TERMINAL
-  if (hasTerminalOutput()
-      && _terminal_display.shouldShowChannel(is_emergency_channel)) {
-    ChannelDetails details;
-    const char* channel_name = getChannel(channel_idx, details) ? details.name : "Unknown";
-    terminalOutput().printf(
-        "\r\nCHANNEL MSG -> %s (%s)\r\n  %s\r\n> ", channel_name,
-        pkt->isRouteDirect() ? "DIRECT" : "FLOOD", text);
-  }
-#endif
-#ifdef DISPLAY_CLASS
-  // Get the channel name from the channel index
-  const char *channel_name = "Unknown";
-  ChannelDetails channel_details;
-  if (getChannel(channel_idx, channel_details)) {
-    channel_name = channel_details.name;
-  }
-  char channel_label[64];
-  snprintf(channel_label, sizeof(channel_label), "Ch %u %s",
-           (unsigned int)channel_idx, channel_name);
-  if (_ui) {
-    _ui->newMsg(path_len, channel_label, text, offline_queue_len,
-                channel_idx, channel_name, queued ? offline_queue_len - 1 : -1);
-  }
-#endif
-
-  if (_ui) _ui->setMessageNotificationOverride(false);
+  const int selected_channel = findChannelIdxForPacket(channel, pkt);
+  if (selected_channel < 0) return;
+  queueChannelText(selected_channel, channel.secret, pkt->getSNR(),
+                   pkt->isRouteFlood() ? pkt->path_len : 0xFF,
+                   timestamp, text, is_emergency_channel);
 
   if (pkt->isRouteFlood() && is_emergency_channel) {
     bool zero_path = pkt->getPathHashCount() == 0;
@@ -1860,6 +2224,129 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   }
 }
 
+static bool isEmergencyNoticeChannelName(const char* name) {
+  const auto alias = parseCompanionChannelAlias(name);
+  return alias.hashtag && alias.kind != CompanionChannelKind::Invalid
+      && alias.kind != CompanionChannelKind::Meshtext
+      && strcmp(alias.tail, "emergency") == 0;
+}
+
+void MyMesh::seedEmergencyChannelNotice(uint8_t index, const ChannelDetails& previous) {
+  if (index >= MAX_GROUP_CHANNELS) return;
+  const uint8_t bit = 1U << (index % 8);
+  uint8_t& pending = pending_emergency_notices[index / 8];
+  ChannelDetails channel;
+  if (!getChannel(index, channel) || !isEmergencyNoticeChannelName(channel.name)) {
+    pending &= ~bit;
+    return;
+  }
+  if (!isEmergencyNoticeChannelName(previous.name)) pending |= bit;
+  if (!(pending & bit)) return; // Edits and reapplying a saved channel are not joins.
+
+  // Drain real traffic first. Starting with an empty inbox also makes this
+  // notice the oldest evictable channel frame if more traffic arrives later.
+  // Do not take a newly freed slot while a real one-key DM is still held.
+  if (offline_queue_len != 0) return;
+#if MESH_ENABLE_ONE_KEY_DM
+  if (held_dm_count != 0) return;
+#endif
+  if (queueChannelText(index, channel.channel.secret, 0, 0xFF,
+      getRTCClock()->getCurrentTime(),
+      "#EMERGENCY: This is an emergency channel. Do not use for testing or small talk.",
+      true, false)) pending &= ~bit;
+}
+
+void MyMesh::servicePendingChannelNotices() {
+  for (unsigned index = 0; index < MAX_GROUP_CHANNELS; ++index) {
+    if (!(pending_emergency_notices[index / 8] & (1U << (index % 8)))) continue;
+    ChannelDetails current{};
+    getChannel(index, current);
+    seedEmergencyChannelNotice(index, current);
+    return; // At most one local notice per loop, never a radio send.
+  }
+}
+
+bool MyMesh::queueChannelText(uint8_t channel_idx, const uint8_t secret[32], float snr,
+                            uint8_t path_len, uint32_t timestamp, const char* text,
+                            bool is_emergency_channel, bool notify) {
+  if (!text || channel_idx >= MAX_GROUP_CHANNELS) return false;
+  int i = 0;
+  if (app_target_ver >= 3) {
+    out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
+    const float bounded_snr = !isfinite(snr) ? 0 : snr < -32 ? -32 : snr > 31.75f ? 31.75f : snr;
+    out_frame[i++] = (int8_t)(bounded_snr * 4);
+    out_frame[i++] = 0; // reserved1
+    out_frame[i++] = 0; // reserved2
+  } else {
+    out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV;
+  }
+
+  out_frame[i++] = channel_idx;
+  out_frame[i++] = path_len;
+
+  out_frame[i++] = TXT_TYPE_PLAIN;
+  memcpy(&out_frame[i], &timestamp, 4);
+  i += 4;
+  int tlen = strlen(text); // TODO: UTF-8 ??
+  if (i + tlen > MAX_FRAME_SIZE) {
+    tlen = MAX_FRAME_SIZE - i;
+    while (tlen > 0 && (uint8_t(text[tlen]) & 0xc0) == 0x80) --tlen;
+  }
+  memcpy(&out_frame[i], text, tlen);
+  i += tlen;
+  const bool queued = addToOfflineQueue(out_frame, i);
+  if (!queued) return false;
+
+#if COMPANION_FEATURE_NOTIFICATIONS
+  const bool notification_managed = notify && _notifications.message(nullptr, secret, _serial && _serial->isConnected(), millis());
+  if (_ui) _ui->setMessageNotificationOverride(notification_managed, _notifications.overridesScreen());
+#else
+  const bool notification_managed = false;
+#endif
+  // Older screen UIs can vibrate inside newMsg(), independently of notify().
+  // Treat local notices as managed/screen-suppressed while retaining history.
+  if (!notify && _ui) _ui->setMessageNotificationOverride(true, true);
+  if (_serial && _serial->isConnected()) {
+    uint8_t frame[1];
+    frame[0] = PUSH_CODE_MSG_WAITING;
+    _serial->writeFrame(frame, 1);
+  } else {
+#ifdef DISPLAY_CLASS
+    if (notify && _ui && !notification_managed) _ui->notify(UIEventType::channelMessage);
+#endif
+  }
+
+#if COMPANION_FEATURE_TEXT_TERMINAL
+  if (notify && hasTerminalOutput()
+      && _terminal_display.shouldShowChannel(is_emergency_channel)) {
+    ChannelDetails details;
+    const char* channel_name = getChannel(channel_idx, details) ? details.name : "Unknown";
+    terminalOutput().printf(
+        "\r\nCHANNEL MSG -> %s (%s)\r\n  %s\r\n> ", channel_name,
+        path_len == 0xFF ? "DIRECT" : "FLOOD", text);
+  }
+#endif
+#ifdef DISPLAY_CLASS
+  // Get the channel name from the channel index
+  const char *channel_name = "Unknown";
+  ChannelDetails channel_details;
+  if (getChannel(channel_idx, channel_details)) {
+    channel_name = channel_details.name;
+  }
+  char channel_label[64];
+  snprintf(channel_label, sizeof(channel_label), "Ch %u %s",
+           (unsigned int)channel_idx, channel_name);
+  if (_ui) {
+    _ui->newMsg(path_len, channel_label, text, offline_queue_len,
+                channel_idx, channel_name, queued ? offline_queue_len - 1 : -1);
+  }
+#endif
+
+  if (_ui) _ui->setMessageNotificationOverride(false);
+
+  return true;
+}
+
 void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint16_t data_type,
                                const uint8_t *data, size_t data_len) {
   if (data_len > MAX_CHANNEL_DATA_LENGTH) {
@@ -1874,7 +2361,9 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   out_frame[i++] = 0; // reserved1
   out_frame[i++] = 0; // reserved2
 
-  uint8_t channel_idx = findChannelIdx(channel);
+  const int selected_channel = findChannelIdxForPacket(channel, pkt);
+  if (selected_channel < 0) return;
+  uint8_t channel_idx = selected_channel;
   out_frame[i++] = channel_idx;
   out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
   out_frame[i++] = (uint8_t)(data_type & 0xFF);
@@ -1897,6 +2386,12 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
 
 uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_timestamp, const uint8_t *data,
                                  uint8_t len, uint8_t *reply) {
+  if (data == NULL || len == 0 || reply == NULL) return 0;
+#if MESH_ENABLE_LOST_REPLY
+  if (data[0] == mesh::tracker::RequestType) {
+    return handleTrackerStatusRequest(contact, sender_timestamp, data, len, reply);
+  }
+#endif
   if (data[0] == REQ_TYPE_GET_TELEMETRY_DATA) {
     uint8_t permissions = 0;
     uint8_t cp = contact.flags >> 1; // LSB used as 'favourite' bit (so only use upper bits)
@@ -1943,6 +2438,50 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
   }
   return 0; // unknown
 }
+
+#if MESH_ENABLE_LOST_REPLY
+uint8_t MyMesh::handleTrackerStatusRequest(const ContactInfo& from, uint32_t tag,
+                                          const uint8_t* data, uint8_t len,
+                                          uint8_t* reply) {
+  mesh::tracker::StatusRequest request;
+  if (reply == NULL || !mesh::tracker::parseStatusRequest(data, len, request)
+      || isTransientContact(from)
+      || (from.type != ADV_TYPE_CHAT && from.type != ADV_TYPE_SENSOR)) return 0;
+
+  // A contact cache reference can move when another contact is loaded.
+  uint8_t key[PUB_KEY_SIZE];
+  memcpy(key, from.id.pub_key, sizeof(key));
+  ContactInfo* saved = lookupPersistentContactByPubKey(key, sizeof(key));
+  if (saved == NULL
+      || (saved->type != ADV_TYPE_CHAT && saved->type != ADV_TYPE_SENSOR)) return 0;
+  const uint32_t now = _ms->getMillis();
+  if (!lost_reply_limiter.canReply(key, tag, now)) return 0;
+
+  const uint8_t state = _prefs.lost_reply <= mesh::companion::LostReplyYes
+      ? _prefs.lost_reply : uint8_t(mesh::companion::LostReplyOff);
+  const size_t count = mesh::tracker::makeStatusResponse(
+      tag, state, state == mesh::tracker::Lost ? 120 : 0,
+      reply, mesh::tracker::ResponseLength);
+  if (count != 0) {
+    lost_reply_limiter.rememberReply(key, tag, now);
+    const uint32_t owner_time = getRTCClock()->getCurrentTime();
+    const uint32_t clock_difference = tag > owner_time
+        ? tag - owner_time : owner_time - tag;
+    // The freshest authenticated advert/report owns position. Clock-bounded
+    // reports cannot poison that durable floor with a wildly future tag.
+    if ((request.flags & mesh::tracker::FreshGps) && canMutateContacts()
+        && tag > saved->last_advert_timestamp && clock_difference <= 300) {
+      saved->gps_lat = request.latitude / 10;
+      saved->gps_lon = request.longitude / 10;
+      saved->last_advert_timestamp = tag;
+      saved->lastmod = owner_time;
+      onDiscoveredContact(*saved, false, 0, NULL);
+    }
+  }
+  // BaseChatMesh sends this response without touching the user DM ACK table.
+  return uint8_t(count);
+}
+#endif
 
 void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) {
   const uint32_t now = _ms->getMillis();
@@ -2278,7 +2817,11 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
                   _prefs.airtime_factor),
 #endif
       _serial(NULL), _mota_source_control(NULL),
-      telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _ui(ui), _iter(0) {
+      telemetry(MAX_PACKET_PAYLOAD - 4),
+#if COMPANION_RTC_FAST_OFFLINE_FRAMES || COMPANION_RTC_SLOW_OFFLINE_FRAMES
+      offline_queue(rtcFastQueueBank(), rtcSlowQueueBank()),
+#endif
+      _store(&store), _ui(ui), _iter(0) {
   _iter_started = false;
   _iter_reply_route = NULL;
   _iter_start_pending = false;
@@ -2358,9 +2901,13 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.manual_add_contacts = DEFAULT_MANUAL_ADD_CONTACTS;
   _prefs.tx_power_dbm = LORA_TX_POWER;
   _prefs.buzzer_quiet = DEFAULT_BUZZER_QUIET ? 1 : 0;
+  _prefs.vibe_quiet = 0;
   _prefs.gps_enabled = 0;       // GPS disabled by default
   _prefs.gps_interval = 0;      // Use the default 1-second fix-processing interval
   _prefs.gps_sync_interval_hours = 0; // Retain the board's default time-sync cadence
+#if defined(RAK_4631)
+  _prefs.peripherals_shared = 0; // A genuinely fresh missing image is GPS-only.
+#endif
   _prefs.autoadd_config = DEFAULT_AUTOADD_CONFIG;
   _prefs.path_hash_mode = DEFAULT_PATH_HASH_MODE;
 #ifdef RADIO_FEM_TXGAIN
@@ -2434,6 +2981,7 @@ void MyMesh::begin(bool has_display, bool radio_available,
   initializeOfflineQueue();
   BaseChatMesh::begin();
   _radio_profiles.begin(_store->getPrimaryFS(), _radio, getRTCClock());
+  mesh::loadMorseSettings(_store->getPrimaryFS());
 #if defined(ENABLE_OTA)
   mesh::ota::beginSpeedConfig(_store->getPrimaryFS());
 #endif
@@ -2536,6 +3084,42 @@ void MyMesh::begin(bool has_display, bool radio_available,
   // load persisted prefs
   const bool prefs_ready =
       _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
+#if MESH_HIL_COMPANION_STARTUP_FREQ_MHZ
+  // A role transition can expose old Companion preferences independently of
+  // the Repeater's saved radio. Keep this private image on its bench channel
+  // before saved parameters or automatic traffic can consume that frequency.
+  mesh::companion::applyHilStartupFrequency(_prefs.freq);
+#endif
+  FILESYSTEM* battery_calibration_fs = _store->getPrimaryFS();
+#if defined(NRF52_PLATFORM)
+  if (_store->isVolatilePrimaryFS()) battery_calibration_fs = nullptr;
+#endif
+  if (!mesh::power::beginBatteryCalibrationStore(board, battery_calibration_fs)) {
+    MESH_DEBUG_PRINTLN("Battery calibration could not be restored; using board default");
+  }
+#if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
+#ifdef ADMIN_PASSWORD
+  const char* management_default = ADMIN_PASSWORD;
+#else
+  const char* management_default = "password";
+#endif
+  _management_password_ready = mesh::esp32::companionAdminPassword::load(
+      _management_password, management_default);
+  if (_management_password_ready) {
+    _management_password_ready =
+        mesh::esp32::managementPassword::publish(_management_password);
+  }
+  if (!_management_password_ready) {
+    mesh::usbLoggingPort().println(
+        "Management password unavailable; use password <new-password> on USB to repair");
+  }
+#endif
+#if defined(RAK_4631)
+  // Only a verified image (or a fresh missing file) may permit GPS-only power.
+  // A failed load never replaces a stored shared policy with an unsafe cut.
+  if (!prefs_ready) _prefs.peripherals_shared = 1;
+  sensors.configureSharedPeripheralMode(_prefs.peripherals_shared != 0);
+#endif
 
 #if defined(NRF52_PLATFORM)
   // A volatile primary filesystem is the final recovery mode after the
@@ -2671,6 +3255,12 @@ void MyMesh::begin(bool has_display, bool radio_available,
   _prefs.radio_fem_txgain = constrain(_prefs.radio_fem_txgain, 0, 1);
   _prefs.rx_powersaving_enabled = constrain(_prefs.rx_powersaving_enabled, 0, 1);
   _prefs.powersaving_enabled = constrain(_prefs.powersaving_enabled, 0, 1);
+#if defined(ESP32_PLATFORM)
+  if (!mesh::esp32::cpuclock::validSelection(_prefs.cpu_freq_mhz)
+      || (_prefs.cpu_freq_mhz && !board.supportsCpuFrequencyMHz(_prefs.cpu_freq_mhz)))
+    _prefs.cpu_freq_mhz = 0;
+  board.setCpuFrequencyRequest(_prefs.cpu_freq_mhz, _prefs.powersaving_enabled != 0);
+#endif
   _prefs.wifi_enabled = constrain(_prefs.wifi_enabled, 0, 1);
   _prefs.usb_logging_enabled = constrain(_prefs.usb_logging_enabled, 0, 2);
   _prefs.usb_debug_enabled = _prefs.usb_debug_enabled == 1 ? 1 : 0;
@@ -2724,6 +3314,7 @@ void MyMesh::begin(bool has_display, bool radio_available,
 
   resetContacts();
   _store->loadContacts(this);
+  _store->recoverContacts(this);
   if (_store->hasPendingContactWrites()) {
     dirty_contacts_expiry = mesh::nonzeroLazyPersistenceDeadline(
         futureMillis(LAZY_CONTACTS_WRITE_DELAY));
@@ -2748,6 +3339,15 @@ void MyMesh::begin(bool has_display, bool radio_available,
 #endif
 
   configureRadioFromPrefs();
+#if MESH_ENABLE_TX_BEACONS
+  beginBeacons();
+#endif
+#if MESH_ENABLE_ETHERNET_TUNNEL
+  beginEthernetTunnel();
+#endif
+#if MESH_ENABLE_MESHTEXT_CHAT
+  beginMeshtext();
+#endif
 
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP32_PLATFORM) && defined(WIFI_SSID)
   _mqtt_enabled = CompanionMqttSetupPortal::loadEnabled();
@@ -2808,6 +3408,13 @@ void MyMesh::begin(bool has_display, bool radio_available,
 
 void MyMesh::configureRadioFromPrefs() {
   board.attachDynamicPrefs(_prefs.getCustom());
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  // The reserved preference byte keeps the existing image and filesystem size.
+  _prefs.leds_quiet = _prefs.leds_quiet == 1 ? 1 : 0;
+  mesh::leds::setEnabled(!_prefs.leds_quiet);
+  board.applyLedPolicy();
+  mesh::leds::applyStatusPolicy();
+#endif
 
   if (!_radio_available) {
     saved_radio_apply_pending = false;
@@ -3062,9 +3669,8 @@ bool MyMesh::handleCadCommand(const char* command, char* reply,
     } else {
       snprintf(maximum, sizeof(maximum), "%u", (unsigned)_prefs.cad_max_duration_ms);
     }
-    snprintf(reply, reply_size,
-             "radio.cad %s, scan=%s ms, retry=%s ms, max=%s ms",
-             _prefs.cad_enabled ? "on" : "off", scan, retry, maximum);
+    mesh::companion::formatCadDiagnostics(reply, reply_size,
+        _prefs.cad_enabled != 0, scan, retry, maximum, board.n_cad_busy);
     return true;
   }
 
@@ -3089,7 +3695,7 @@ bool MyMesh::handleCadCommand(const char* command, char* reply,
     if (!savePrefs()) {
       _prefs.cad_enabled = previous;
       if (_radio_available) _radio->setCADEnabled(previous != 0);
-      snprintf(reply, reply_size, "Error: CAD changed but save failed");
+      mesh::cli::formatError(reply, reply_size, "CAD changed but save failed");
     } else {
       snprintf(reply, reply_size, "OK - radio.cad %s", value);
     }
@@ -3115,8 +3721,7 @@ bool MyMesh::handleCadCommand(const char* command, char* reply,
               mesh::CAD_SCAN_MAX_TIMEOUT_MS, scan_ms)
         || !parseCadTimingMillis(tokens[1], 1, 60000, retry_ms)
         || !parseCadTimingMillis(tokens[2], 1, 60000, max_ms)) {
-      snprintf(reply, reply_size,
-               "Error: use set radio.cad timings <auto|100-3500> <auto|1-60000> <auto|1-60000>");
+      mesh::cli::formatError(reply, reply_size, "use set radio.cad timings <auto|100-3500> <auto|1-60000> <auto|1-60000>");
       return true;
     }
 
@@ -3124,7 +3729,7 @@ bool MyMesh::handleCadCommand(const char* command, char* reply,
     const uint16_t previous_retry = _prefs.cad_retry_delay_ms;
     const uint16_t previous_max = _prefs.cad_max_duration_ms;
     if (_radio_available && !radio_driver.setCADScanTimeoutMillis(scan_ms)) {
-      snprintf(reply, reply_size, "Error: CAD scan timing is unsupported");
+      mesh::cli::formatError(reply, reply_size, "CAD scan timing is unsupported");
       return true;
     }
     _prefs.cad_scan_timeout_ms = scan_ms;
@@ -3135,16 +3740,69 @@ bool MyMesh::handleCadCommand(const char* command, char* reply,
       _prefs.cad_retry_delay_ms = previous_retry;
       _prefs.cad_max_duration_ms = previous_max;
       if (_radio_available) radio_driver.setCADScanTimeoutMillis(previous_scan);
-      snprintf(reply, reply_size, "Error: CAD timings changed but save failed");
+      mesh::cli::formatError(reply, reply_size, "CAD timings changed but save failed");
     } else {
       snprintf(reply, reply_size, "OK - radio.cad timings saved");
     }
     return true;
   }
 
-  snprintf(reply, reply_size,
-           "Error: use set radio.cad <on|off> or set radio.cad timings <scan_ms|auto> <retry_ms|auto> <max_ms|auto>");
+  mesh::cli::formatError(reply, reply_size, "use set radio.cad <on|off> or set radio.cad timings <scan_ms|auto> <retry_ms|auto> <max_ms|auto>");
   return true;
+}
+
+bool MyMesh::handleTrafficRoutingCommand(const char* command, char* reply, size_t reply_size) {
+  if (!reply || !reply_size) return false;
+  const auto parsed = mesh::companion::parseTrafficRouteCommand(command);
+  if (!parsed.matched) return false;
+  const char* kind = parsed.kind == mesh::companion::TrafficKind::Media ? "media" : "ssh";
+  if (!parsed.valid) {
+    snprintf(reply, reply_size, "Error: use get tx.%s or set tx.%s auto|radio|radio2|both|off", kind, kind);
+    return true;
+  }
+  uint8_t& policy = parsed.kind == mesh::companion::TrafficKind::Media ? _prefs.tx_media : _prefs.tx_ssh;
+  if (parsed.set) {
+    const uint8_t previous = policy;
+    policy = parsed.policy;
+    // Even an unchanged value must have durable storage before we say saved.
+    if (!savePrefs()) {
+      policy = previous;
+      snprintf(reply, reply_size, "Error: tx.%s was not saved", kind);
+      return true;
+    }
+  }
+  const uint8_t effective = mesh::companion::trafficPolicy(parsed.kind,
+      _prefs.tx_media, _prefs.tx_ssh, _radio->profiles());
+  const uint8_t mask = mesh::companion::trafficTransmitMask(effective, _radio->profiles());
+  snprintf(reply, reply_size, "%s tx.%s %s; active=%s%s", parsed.set ? "OK -" : ">", kind,
+      mesh::radioTxPolicyName(policy), effective == mesh::RADIO_TX_AUTO ? "channel/global"
+          : mask ? mesh::radioTxPolicyName(mask) : "off",
+      (policy == mesh::RADIO_TX_SECONDARY || policy == mesh::RADIO_TX_BOTH) && !(mask & 2)
+          ? " (radio2 unavailable for TX)" : "");
+  return true;
+}
+
+bool MyMesh::sendClientGroupData(mesh::GroupChannel& channel, uint8_t* path, uint8_t path_len,
+                                uint16_t data_type, const uint8_t* data, int data_len) {
+  if (data_len < 0 || data_len > MAX_GROUP_DATA_LENGTH || (data_len && !data)) return false;
+  const uint8_t policy = mesh::companion::trafficPolicy(mesh::companion::groupTrafficKind(data_type),
+      _prefs.tx_media, _prefs.tx_ssh, _radio->profiles());
+  if (policy == mesh::RADIO_TX_AUTO) return sendGroupData(channel, path, path_len, data_type, data, data_len);
+  // Override only this datagram, not the saved channel, PSK, alias or text route.
+  mesh::GroupChannel routed = channel;
+  routed.tx_radio = policy;
+  return sendGroupData(routed, path, path_len, data_type, data, data_len);
+}
+
+bool MyMesh::sendClientRawData(const uint8_t* data, size_t data_len, uint8_t* path, uint8_t path_len) {
+  if (!data || data_len < 4) return false;
+  auto pkt = createRawData(data, data_len);
+  if (!pkt) return false;
+  const uint8_t policy = mesh::companion::trafficPolicy(mesh::companion::rawTrafficKind(data, data_len),
+      _prefs.tx_media, _prefs.tx_ssh, _radio->profiles());
+  if (policy != mesh::RADIO_TX_AUTO) pkt->tx_radio = policy;
+  // sendDirect owns/releases the packet on either success or failure.
+  return sendDirect(pkt, path, path_len);
 }
 
 bool MyMesh::handleTxRoutingCommand(const char* command, char* reply, size_t reply_size) {
@@ -3156,8 +3814,9 @@ bool MyMesh::handleTxRoutingCommand(const char* command, char* reply, size_t rep
         kind, parsed.channel ? "index" : "key:hex");
     return true;
   }
-  if (parsed.set && !canMutateContacts()) {
-    snprintf(reply, reply_size, "Error: contact/channel storage unavailable");
+  if (parsed.set && (!canMutateContacts()
+      || (parsed.channel && _store->hasIncompleteChannelLoad()))) {
+    mesh::cli::formatError(reply, reply_size, "storage unavailable; TX routing not saved");
     return true;
   }
 
@@ -3180,7 +3839,7 @@ bool MyMesh::handleTxRoutingCommand(const char* command, char* reply, size_t rep
     uint8_t key[32]; size_t key_bytes = 0;
     const bool by_key = !parsed.quoted && !strncmp(parsed.target, "key:", 4);
     if (by_key && !mesh::companion::parseTxRouteKey(parsed.target + 4, key, key_bytes)) {
-      snprintf(reply, reply_size, "Error: key: needs 12-64 hexadecimal digits (whole bytes)");
+      mesh::cli::formatError(reply, reply_size, "key: needs 12-64 hexadecimal digits (whole bytes)");
       return true;
     }
     for (int i = MAX_ANON_CONTACTS; i < getTotalContactSlots(); ++i) {
@@ -3203,9 +3862,21 @@ bool MyMesh::handleTxRoutingCommand(const char* command, char* reply, size_t rep
     return true;
   }
   uint8_t policy = parsed.channel ? channel.channel.tx_radio : contact->tx_radio;
-  if (parsed.set && policy != parsed.policy) {
-    bool saved;
-    if (parsed.channel) {
+  if (parsed.set) {
+    bool saved = true;
+    if (policy == parsed.policy) {
+      // A prior recovery may have restored older disk data. Save the raw
+      // table without mutating a resolved alias or its runtime generation.
+      if (parsed.channel) saved = saveChannels();
+    } else if (parsed.channel) {
+      const auto alias = parseCompanionChannelAlias(channel.name);
+      if (isAliasRadio2Defined()
+          && (alias.kind == CompanionChannelKind::Radio2 || alias.kind == CompanionChannelKind::Meshtext)) {
+        mesh::cli::formatError(reply, reply_size, "prefix controls routing; rename channel");
+        return true;
+      }
+      // Persist the app PSK, not the resolved wire-key copy used for reporting.
+      getChannelForSave(channel_index, channel);
       const ChannelDetails previous = channel;
       channel.channel.tx_radio = parsed.policy;
       saved = setChannel(channel_index, channel) && saveChannels();
@@ -3219,7 +3890,7 @@ bool MyMesh::handleTxRoutingCommand(const char* command, char* reply, size_t rep
       }
     }
     if (!saved) {
-      snprintf(reply, reply_size, "Error: TX routing was not saved");
+      mesh::cli::formatError(reply, reply_size, "storage unavailable; TX routing not saved");
       return true;
     }
     policy = parsed.policy;
@@ -3245,6 +3916,68 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
                                        size_t reply_size) {
   if (!command || !reply || reply_size == 0) return false;
   while (*command == ' ') command++;
+#if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
+  if (strncmp(command, "password", 8) == 0
+      && (command[8] == 0 || command[8] == ' ' || command[8] == '\t')) {
+    const char* value = command + 8;
+    // Consume the command separator only. Extra spaces belong to the secret,
+    // exactly as in infrastructure CLI and browser password forms.
+    if (*value == ' ' || *value == '\t') ++value;
+    if (!mesh::esp32::managementPassword::validPassword(value)) {
+      mesh::cli::formatError(reply, reply_size, "password must be 1-15 bytes, no line breaks; use 8-15 ASCII for setup WiFi");
+      return true;
+    }
+    mesh::esp32::managementPassword::ChangeGuard change;
+    if (!change.acquired()) {
+      mesh::cli::formatError(reply, reply_size, "OTA upload or password change busy; retry");
+      return true;
+    }
+    if (!mesh::esp32::companionAdminPassword::save(value)) {
+      mesh::cli::formatError(reply, reply_size, "password save unconfirmed; reboot may differ");
+      return true;
+    }
+    memcpy(_management_password, value, strlen(value) + 1);
+    _management_password_ready = change.publish(_management_password);
+    if (!_management_password_ready) {
+      mesh::cli::formatError(reply, reply_size, "password saved; management unavailable, reboot required");
+    } else {
+      // The browser batch recognizes this established success prefix and
+      // removes the secret before publishing its result.
+      snprintf(reply, reply_size, "password now: %s", value);
+    }
+    return true;
+  }
+#endif
+  if (mesh::powerdiag::handleCommand(command, reply, reply_size, millis())) return true;
+  if (mesh::companion::handlePowerDiagnosticsCommand(board, command, reply, reply_size)) return true;
+#if defined(ESP32_PLATFORM)
+  if (mesh::esp32::cpuclock::handleCommand(board, _prefs.cpu_freq_mhz,
+          _prefs.powersaving_enabled != 0, command, reply, reply_size,
+          [this]() { return savePrefs(); })) return true;
+  if (mesh::esp32::handlePowerTestCommand(command, reply, reply_size, true)) return true;
+#endif
+#if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+  if (mesh::cli::handleSdCardCommand(_sdcard_cli, board, command, reply, reply_size)) return true;
+#endif
+#if defined(OTA_RAK15002_SD_STORE) && defined(ETHERNET_USE_RAK13800)
+  if (handleRak4631PeripheralCommand(command, reply, reply_size)) return true;
+#endif
+#if defined(MESH_HIL_TX_FREQ_MHZ)
+  if (mesh::handleHilTxFrequencyCommand(command, reply, reply_size)) return true;
+#endif
+#if defined(RAK_4631)
+  // This helper is also reached only after normal remote-admin admission.
+  if (mesh::peripherals::handleCommand(_prefs.peripherals_shared, command,
+          reply, reply_size, sensors.supportsSharedPeripheralMode(),
+          [this]() { return savePrefs(); })) return true;
+#else
+  if (strcmp(command, "get peripherals.mode") == 0
+      || (strncmp(command, "set peripherals.mode", 20) == 0
+          && (command[20] == 0 || command[20] == ' ' || command[20] == '\t'))) {
+    mesh::cli::formatError(reply, reply_size, "unsupported");
+    return true;
+  }
+#endif
 
   if (strcmp(command, "get public.key") == 0) {
     char public_key_hex[PUB_KEY_SIZE * 2 + 1];
@@ -3253,7 +3986,17 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     return true;
   }
 
+#if MESH_ENABLE_ETHERNET_TUNNEL
+  if (handleEthernetTunnelCommand(command, reply, reply_size)) return true;
+#endif
+  if (handleTrafficRoutingCommand(command, reply, reply_size)) return true;
   if (handleTxRoutingCommand(command, reply, reply_size)) return true;
+#if MESH_ENABLE_TX_BEACONS
+  if (handleBeaconCommand(command, reply, reply_size)) return true;
+#endif
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (handleMeshtextCommand(command, reply, reply_size)) return true;
+#endif
   if (mesh::handleUsbLoggingWatchdogCommand(command, reply, reply_size)) return true;
 #if COMPANION_FEATURE_OTA_CLI
   const auto* ota_context = mesh::ota::ota_context_if_active();
@@ -3263,6 +4006,13 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
 #endif
   if (handleCompanionBluetoothCommand(command, reply, reply_size)) return true;
   if (handleCompanionWirelessCommand(command, reply, reply_size)) return true;
+  if (handleRxPowerSavingGetCommand(command, reply, reply_size)) return true;
+  if (mesh::companion::handleRadioDiagnosticsCommand(
+          radio_driver, _radio_available, command, reply, reply_size, [this]() {
+            radio_driver.resetStats();
+            this->resetStats();
+            static_cast<SimpleMeshTables*>(getTables())->resetStats();
+          })) return true;
 
   if (strcmp(command, "get powersaving") == 0 || strcmp(command, "powersaving") == 0) {
     snprintf(reply, reply_size, "> %s", _prefs.powersaving_enabled ? "on" : "off");
@@ -3282,7 +4032,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   if (strcmp(command, "get gps.sync.interval") == 0) {
     auto* provider = sensors.getLocationProvider();
     if (provider == nullptr) {
-      snprintf(reply, reply_size, "Error: GPS unavailable");
+      mesh::cli::formatError(reply, reply_size, "GPS unavailable");
     } else {
       const uint16_t hours = provider->getTimeSyncIntervalHours();
       if (hours == 0) snprintf(reply, reply_size, "> default (board GPS sync policy)");
@@ -3299,11 +4049,11 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   if (gps_sync_value) {
     uint16_t hours = 0;
     if (!mesh::gps::parseSyncIntervalHours(gps_sync_value, hours)) {
-      snprintf(reply, reply_size, "Error: GPS sync interval must be 1..336 hours");
+      mesh::cli::formatError(reply, reply_size, "GPS sync interval must be 1..336 hours");
     } else if (sensors.getLocationProvider() == nullptr) {
-      snprintf(reply, reply_size, "Error: GPS unavailable");
+      mesh::cli::formatError(reply, reply_size, "GPS unavailable");
     } else if (!savePreference(_prefs.gps_sync_interval_hours, hours)) {
-      snprintf(reply, reply_size, "Error: GPS sync interval could not be saved");
+      mesh::cli::formatError(reply, reply_size, "GPS sync interval could not be saved");
     } else {
       sensors.applyGpsTimeSyncInterval(hours);
       snprintf(reply, reply_size, "OK - GPS sync interval %u hours (saved)", (unsigned)hours);
@@ -3320,17 +4070,17 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   if (strncmp(command, "set gps ", 8) == 0) gps_value = command + 8;
   if (gps_value) {
     if (strcmp(gps_value, "on") != 0 && strcmp(gps_value, "off") != 0) {
-      snprintf(reply, reply_size, "Error: use set gps on|off");
+      mesh::cli::formatError(reply, reply_size, "use set gps on|off");
       return true;
     }
     const bool enabled = strcmp(gps_value, "on") == 0;
     if (sensors.getSettingByKey("gps") == nullptr) {
-      snprintf(reply, reply_size, "Error: GPS unavailable");
+      mesh::cli::formatError(reply, reply_size, "GPS unavailable");
     } else {
       if (setGpsEnabled(enabled)) {
         snprintf(reply, reply_size, "OK - GPS %s (saved)", enabled ? "on" : "off");
       } else {
-        snprintf(reply, reply_size, "Error: GPS could not be saved");
+        mesh::cli::formatError(reply, reply_size, "GPS could not be saved");
       }
     }
     return true;
@@ -3351,6 +4101,13 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     // Binary Companion callers may supply a shorter buffer.
     char ota_reply[160] = {0};
     bool webconfig_stopped = false;
+#if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
+    if (!_management_password_ready
+        || !mesh::esp32::managementPassword::publish(_management_password)) {
+      mesh::cli::formatError(reply, reply_size, "management password unavailable; set password on USB");
+      return true;
+    }
+#endif
 #ifdef WITH_WEBCONFIG
     if (isWebConfigActiveOrStopping()) {
       if (!_webconfig->stopForOTA(ota_reply)) {
@@ -3399,11 +4156,11 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     const char* value = command + 13;
     while (*value == ' ' || *value == '\t') value++;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      snprintf(reply, reply_size, "Error: use set usb.debug <on|off>");
+      mesh::cli::formatError(reply, reply_size, "use set usb.debug <on|off>");
     } else {
       const uint8_t enabled = strcmp(value, "on") == 0 ? 1 : 0;
       if (!savePreference(_prefs.usb_debug_enabled, enabled)) {
-        snprintf(reply, reply_size, "Error: USB debug setting could not be saved");
+        mesh::cli::formatError(reply, reply_size, "USB debug setting could not be saved");
       } else {
         snprintf(reply, reply_size, "OK - USB debug %s (saved)%s",
                  enabled ? "on" : "off",
@@ -3443,14 +4200,14 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     }
     if (!packet_stream
         && !mesh::cli::parseLoggingToggle(value, enabled, reboot_if_needed)) {
-      snprintf(reply, reply_size, "Error: use set usb.logging <on|off|stream> [reboot]");
+      mesh::cli::formatError(reply, reply_size, "use set usb.logging <on|off|stream> [reboot]");
     } else {
       _prefs.usb_logging_enabled = enabled ? (packet_stream ? 2 : 1) : 0;
       applyUsbLoggingState(enabled);
       if (!savePrefs()) {
-        snprintf(reply, reply_size, "Error: USB logging changed for this boot but save failed");
+        mesh::cli::formatError(reply, reply_size, "USB logging changed for this boot but save failed");
       } else if (!mesh::saveUsbLoggingBootPreference(enabled)) {
-        snprintf(reply, reply_size, "Error: setting saved, but next-boot USB interface state could not be saved");
+        mesh::cli::formatError(reply, reply_size, "setting saved, but next-boot USB interface state could not be saved");
       } else if (mesh::usbLoggingInterfaceRestartRequired()
           || (enabled && packet_stream != mesh::isUsbLoggingPacketStream())) {
         if (reboot_if_needed) {
@@ -3458,6 +4215,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
               "OK - USB logging %s (saved); rebooting to change USB interfaces",
               enabled ? (packet_stream ? "stream" : "on") : "off");
           _scheduled_reboot_at = futureMillis(1000);
+          if (_scheduled_reboot_at == 0) _scheduled_reboot_at = 1;
         } else {
           snprintf(reply, reply_size,
               "OK - USB logging %s (saved); reboot required to change USB interfaces",
@@ -3474,6 +4232,19 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
 
   if (strcmp(command, "get role") == 0) {
     snprintf(reply, reply_size, "> companion");
+    return true;
+  }
+  if (strcmp(command, "get bootloader.ver") == 0) {
+#if defined(NRF52_PLATFORM)
+    char version[128];  // Preserve the bootloader's preview/fork/build suffix.
+    if (board.getBootloaderVersion(version, sizeof(version))) {
+      snprintf(reply, reply_size, "> %s", version);
+    } else {
+      snprintf(reply, reply_size, "> unknown");
+    }
+#else
+    mesh::cli::formatError(reply, reply_size, "unsupported");
+#endif
     return true;
   }
   if (strcmp(command, "get lat") == 0 || strcmp(command, "get lon") == 0) {
@@ -3509,7 +4280,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   if (strcmp(command, "get pwrmgt.bootreason") == 0
       || strcmp(command, "powerlog") == 0) {
     if (!board.isPowerManagementInitialized()) {
-      snprintf(reply, reply_size, "Error: power management unsupported");
+      mesh::cli::formatError(reply, reply_size, "power management unsupported");
     } else {
       snprintf(reply, reply_size, "> Reset: %s; Shutdown: %s",
                board.getResetReasonString(board.getResetReason()),
@@ -3563,7 +4334,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
 
   if (strcmp(command, "get radio.rxgain") == 0) {
     if (!radio_driver.supportsRxBoostedGainMode()) {
-      snprintf(reply, reply_size, "Error: unsupported");
+      mesh::cli::formatError(reply, reply_size, "unsupported");
     } else {
       snprintf(reply, reply_size, "> %s",
                _prefs.rx_boosted_gain ? "on" : "off");
@@ -3574,12 +4345,11 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   if (strncmp(command, "set radio.rxgain ", 17) == 0) {
     const char* value = command + 17;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      snprintf(reply, reply_size,
-               "Error: use set radio.rxgain on|off");
+      mesh::cli::formatError(reply, reply_size, "use set radio.rxgain on|off");
     } else if (!radio_driver.supportsRxBoostedGainMode()) {
-      snprintf(reply, reply_size, "Error: unsupported");
+      mesh::cli::formatError(reply, reply_size, "unsupported");
     } else if (!applyAndSaveRxBoostedGain(strcmp(value, "on") == 0)) {
-      snprintf(reply, reply_size, "Error: radio busy or save failed");
+      mesh::cli::formatError(reply, reply_size, "radio busy or save failed");
     } else {
       snprintf(reply, reply_size, "OK - radio.rxgain %s", value);
     }
@@ -3588,7 +4358,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
 
   if (strcmp(command, "get radio.fem.rxgain") == 0) {
     if (!board.canControlLoRaFemLna()) {
-      snprintf(reply, reply_size, "Error: unsupported");
+      mesh::cli::formatError(reply, reply_size, "unsupported");
     } else {
       snprintf(reply, reply_size, "> %s",
                board.isLoRaFemLnaEnabled() ? "on" : "off");
@@ -3599,12 +4369,13 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   if (strncmp(command, "set radio.fem.rxgain ", 21) == 0) {
     const char* value = command + 21;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      snprintf(reply, reply_size,
-               "Error: use set radio.fem.rxgain on|off");
+      mesh::cli::formatError(reply, reply_size, "use set radio.fem.rxgain on|off");
+    } else if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) {
+      mesh::cli::formatError(reply, reply_size, "stop Morse before changing LoRa FEM gain");
     } else if (!board.canControlLoRaFemLna()) {
-      snprintf(reply, reply_size, "Error: unsupported");
+      mesh::cli::formatError(reply, reply_size, "unsupported");
     } else if (!applyAndSaveFemRxGain(strcmp(value, "on") == 0)) {
-      snprintf(reply, reply_size, "Error: failed to apply or save FEM RX gain");
+      mesh::cli::formatError(reply, reply_size, "failed to apply or save FEM RX gain");
     } else {
       snprintf(reply, reply_size, "OK - radio.fem.rxgain %s", value);
     }
@@ -3616,7 +4387,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
       if (board.isLoRaFemPaGainEnabled()) {
         snprintf(reply, reply_size, "> on (fixed TX PA)");
       } else {
-        snprintf(reply, reply_size, "Error: unsupported");
+        mesh::cli::formatError(reply, reply_size, "unsupported");
       }
     } else {
       snprintf(reply, reply_size, "> %s",
@@ -3628,14 +4399,15 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   if (strncmp(command, "set radio.fem.txgain ", 21) == 0) {
     const char* value = command + 21;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      snprintf(reply, reply_size,
-               "Error: use set radio.fem.txgain on|off");
+      mesh::cli::formatError(reply, reply_size, "use set radio.fem.txgain on|off");
+    } else if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) {
+      mesh::cli::formatError(reply, reply_size, "stop Morse before changing LoRa FEM gain");
     } else if (!board.canControlLoRaFemPaGain()) {
       snprintf(reply, reply_size, "%s", board.isLoRaFemPaGainEnabled()
           ? "Error: TX PA is fixed on; use set tx to adjust power"
           : "Error: unsupported");
     } else if (!applyAndSaveFemTxGain(strcmp(value, "on") == 0)) {
-      snprintf(reply, reply_size, "Error: failed to apply or save FEM TX gain");
+      mesh::cli::formatError(reply, reply_size, "failed to apply or save FEM TX gain");
     } else {
       snprintf(reply, reply_size, "OK - radio.fem.txgain %s", value);
     }
@@ -3650,7 +4422,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
 
   if (strcmp(command, "get display.touch") == 0) {
     if (_ui == NULL || !_ui->supportsTouchDebug()) {
-      snprintf(reply, reply_size, "Error: touchscreen diagnostics unsupported");
+      mesh::cli::formatError(reply, reply_size, "touchscreen diagnostics unsupported");
     } else {
       snprintf(reply, reply_size, "display.touch %s (off after reboot)",
                _ui->isTouchDebugEnabled() ? "on" : "off");
@@ -3662,20 +4434,26 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     const char* value = command + 17;
     while (*value == ' ' || *value == '\t') value++;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      snprintf(reply, reply_size, "Error: use set display.touch on|off");
+      mesh::cli::formatError(reply, reply_size, "use set display.touch on|off");
     } else if (_ui == NULL || !_ui->supportsTouchDebug()) {
-      snprintf(reply, reply_size, "Error: touchscreen diagnostics unsupported");
+      mesh::cli::formatError(reply, reply_size, "touchscreen diagnostics unsupported");
     } else if (!_ui->setTouchDebugEnabled(strcmp(value, "on") == 0)) {
-      snprintf(reply, reply_size, "Error: touchscreen diagnostics unavailable");
+      mesh::cli::formatError(reply, reply_size, "touchscreen diagnostics unavailable");
     } else {
       snprintf(reply, reply_size, "OK - display.touch %s (off after reboot)", value);
     }
     return true;
   }
 
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT && defined(DISPLAY_CLASS)
+  if (mesh::ui::handleOLEDControllerCommand(command, reply, reply_size, true)) {
+    return true;
+  }
+#endif
+
   if (strcmp(command, "get display.rotation") == 0) {
     if (_ui == NULL || !_ui->supportsDisplayRotation()) {
-      snprintf(reply, reply_size, "Error: display rotation is unsupported");
+      mesh::cli::formatError(reply, reply_size, "display rotation is unsupported");
     } else if (_prefs.display_rotation_degrees == 0) {
       snprintf(reply, reply_size, "display.rotation default");
     } else {
@@ -3697,21 +4475,19 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
         && (degrees == 0 || degrees == 90 || degrees == 180
             || degrees == 270);
     if (!valid) {
-      snprintf(reply, reply_size,
-               "Error: use set display.rotation <0|90|180|270>");
+      mesh::cli::formatError(reply, reply_size, "use set display.rotation <0|90|180|270>");
     } else if (_ui == NULL || !_ui->supportsDisplayRotation()) {
-      snprintf(reply, reply_size, "Error: display rotation is unsupported");
+      mesh::cli::formatError(reply, reply_size, "display rotation is unsupported");
     } else {
       const uint16_t previous = _prefs.display_rotation_degrees;
       if (!_ui->setDisplayRotationDegrees((uint16_t)degrees)) {
-        snprintf(reply, reply_size, "Error: display rotation failed");
+        mesh::cli::formatError(reply, reply_size, "display rotation failed");
       } else {
         _prefs.display_rotation_degrees = (uint16_t)degrees;
         if (!savePrefs()) {
           _prefs.display_rotation_degrees = previous;
           _ui->setDisplayRotationDegrees(previous);
-          snprintf(reply, reply_size,
-                   "Error: display rotation changed but save failed");
+          mesh::cli::formatError(reply, reply_size, "display rotation changed but save failed");
         } else if (degrees == 0) {
           snprintf(reply, reply_size,
                    "OK - display rotation reset to board default");
@@ -3745,8 +4521,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
       bluetooth_name_value++;
     }
     if (bluetooth_name_value[0] == 0) {
-      snprintf(reply, reply_size,
-               "Error: use set bluetooth.name <name|default>");
+      mesh::cli::formatError(reply, reply_size, "use set bluetooth.name <name|default>");
     } else {
       const bool clear_override = strcmp(bluetooth_name_value, "default") == 0
           || strcmp(bluetooth_name_value, "clear") == 0;
@@ -3802,8 +4577,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
       bluetooth_mac_value++;
     }
     if (bluetooth_mac_value[0] == 0) {
-      snprintf(reply, reply_size,
-               "Error: use set bluetooth.mac <address|random|random-every-boot|random-after-connect|default>");
+      mesh::cli::formatError(reply, reply_size, "use set bluetooth.mac <address|random|random-every-boot|random-after-connect|default>");
     } else {
       applyAndSaveBluetoothMac(bluetooth_mac_value, reply, reply_size);
     }
@@ -3819,13 +4593,13 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     int32_t parsed = 0;
     if (!mesh::cli::parseIntegerStrict(value, parsed)
         || parsed < 0 || parsed > 999999) {
-      snprintf(reply, reply_size, "Error: pin must be 0-999999");
+      mesh::cli::formatError(reply, reply_size, "pin must be 0-999999");
     } else {
       const uint32_t previous = _prefs.ble_pin;
       _prefs.ble_pin = static_cast<uint32_t>(parsed);
       if (!savePrefs()) {
         _prefs.ble_pin = previous;
-        snprintf(reply, reply_size, "Error: pin changed but save failed");
+        mesh::cli::formatError(reply, reply_size, "pin changed but save failed");
       } else {
         snprintf(reply, reply_size, "> pin is now %06lu",
                  (unsigned long)_prefs.ble_pin);
@@ -3851,6 +4625,9 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
 #endif
 
 #if defined(ESP32) && defined(WIFI_SSID)
+  if (handleCompanionWiFiCompatibilityCommand(command, reply, reply_size)) {
+    return true;
+  }
   if (strcmp(command, "get wifi.ip") == 0) {
     char ip[16] = {};
 #ifdef WITH_WEBCONFIG
@@ -3867,13 +4644,17 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     snprintf(reply, reply_size, "> %u", (unsigned)_prefs.wifi_enabled);
     return true;
   }
+  if (strcmp(command, "get wifi.tcp") == 0) {
+    formatCompanionWiFiTcpStatus(reply, reply_size);
+    return true;
+  }
   if (strncmp(command, "set wifi.enabled ", 17) == 0) {
     int32_t enabled;
     if (!mesh::cli::parseIntegerStrict(command + 17, enabled)
         || enabled < 0 || enabled > 1) {
-      snprintf(reply, reply_size, "Error: WiFi enabled must be 0 or 1");
+      mesh::cli::formatError(reply, reply_size, "WiFi enabled must be 0 or 1");
     } else if (!setCompanionWiFiEnabled(enabled != 0)) {
-      snprintf(reply, reply_size, "Error: WiFi setting could not be saved");
+      mesh::cli::formatError(reply, reply_size, "WiFi setting could not be saved");
     } else {
 #if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
       snprintf(reply, reply_size, "OK - reboot to apply WiFi settings");
@@ -3907,13 +4688,11 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     } else if (strcmp(value, "ble") == 0) {
       selected = CompanionTransportMode::Bluetooth;
     } else {
-      snprintf(reply, reply_size,
-               "Error: use set companion.transport <wifi|ble>");
+      mesh::cli::formatError(reply, reply_size, "use set companion.transport <wifi|ble>");
       return true;
     }
     if (!selectCompanionTransportMode(selected)) {
-      snprintf(reply, reply_size,
-               "Error: failed to save companion transport");
+      mesh::cli::formatError(reply, reply_size, "failed to save companion transport");
     } else {
       snprintf(reply, reply_size,
                "OK - companion transport %s saved; reboot required", value);
@@ -3938,9 +4717,9 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   if (strncmp(command, "set mqtt.enabled ", 17) == 0) mqtt_value = command + 17;
   if (mqtt_value) {
     if (strcmp(mqtt_value, "on") != 0 && strcmp(mqtt_value, "off") != 0) {
-      snprintf(reply, reply_size, "Error: use set mqtt.enabled on|off");
+      mesh::cli::formatError(reply, reply_size, "use set mqtt.enabled on|off");
     } else if (!CompanionMqttSetupPortal::saveEnabled(strcmp(mqtt_value, "on") == 0)) {
-      snprintf(reply, reply_size, "Error: failed to save MQTT setting");
+      mesh::cli::formatError(reply, reply_size, "failed to save MQTT setting");
     } else {
       _mqtt_enabled = strcmp(mqtt_value, "on") == 0;
       if (!_mqtt_enabled) stopMQTT();
@@ -3958,9 +4737,9 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   if (strncmp(command, "set logging.output ", 19) == 0) {
     bool usb = false, wifi = false;
     if (!mesh::cli::parseLoggingOutput(command + 19, usb, wifi)) {
-      snprintf(reply, reply_size, "Error: use set logging.output off|usb|wifi|both");
+      mesh::cli::formatError(reply, reply_size, "use set logging.output off|usb|wifi|both");
     } else if (!CompanionMqttSetupPortal::saveEnabled(wifi)) {
-      snprintf(reply, reply_size, "Error: failed to save MQTT setting");
+      mesh::cli::formatError(reply, reply_size, "failed to save MQTT setting");
     } else {
       _mqtt_enabled = wifi;
       if (!wifi) stopMQTT();
@@ -3968,7 +4747,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
           ? (_prefs.usb_logging_enabled == 2 ? 2 : 1) : 0;
       applyUsbLoggingState(usb);
       if (!savePrefs() || !mesh::saveUsbLoggingBootPreference(usb)) {
-        snprintf(reply, reply_size, "Error: logging output changed but USB setting could not be saved");
+        mesh::cli::formatError(reply, reply_size, "logging output changed but USB setting could not be saved");
       } else {
         // USB ownership changes can clear the terminal's input buffer while
         // this command is executing. Use parsed values, not that borrowed text.
@@ -3985,7 +4764,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
           || strncmp(command + 4, "timezone", 8) == 0)) {
     char copy[160], result[160] = {};
     if (strlen(command) >= sizeof(copy)) {
-      snprintf(reply, reply_size, "Error: command too long");
+      mesh::cli::formatError(reply, reply_size, "command too long");
       return true;
     }
     strcpy(copy, command);
@@ -4096,7 +4875,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
       || strcmp(command, "set webui off") == 0) {
     const bool enabled = command[10] == 'o' && command[11] == 'n';
     if (!WebConfigServer::saveEnabled(enabled)) {
-      snprintf(reply, reply_size, "Error: failed to save webui setting");
+      mesh::cli::formatError(reply, reply_size, "failed to save webui setting");
     } else if (!enabled) {
       if (_webconfig && _webconfig->isRunning()) _webconfig->requestStop();
       snprintf(reply, reply_size, "OK - webui off");
@@ -4117,7 +4896,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
 
   if (strncmp(command, "set webui", 9) == 0
       && (command[9] == 0 || command[9] == ' ' || command[9] == '\t')) {
-    snprintf(reply, reply_size, "Error: usage set webui on|off");
+    mesh::cli::formatError(reply, reply_size, "usage set webui on|off");
     return true;
   }
 
@@ -4188,7 +4967,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     char legacy[120];
     uint16_t preamble = 0;
     if (!mesh::RadioProfileCLI::parseSuffix(command + 10, 5, legacy, sizeof(legacy), preamble)) {
-      snprintf(reply, reply_size, "Error: invalid preamble"); return true;
+      mesh::cli::formatError(reply, reply_size, "invalid preamble"); return true;
     }
     float freq = 0.0f, bw = 0.0f;
     uint8_t sf = 0, cr = 0;
@@ -4361,7 +5140,10 @@ void MyMesh::serviceMQTT(const char* wifi_ssid, const char* wifi_password) {
     }
   }
 
-  if (WiFi.status() == WL_CONNECTED && _mqtt_configured && !_mqtt_started && _mqtt_bridge
+  // Start the recovery scheduler even when the router is down at boot. The
+  // Companion still owns association; waiting for GOT_IP here would leave its
+  // failed station outside MQTT/NTP's shared power budget indefinitely.
+  if (_mqtt_configured && !_mqtt_started && _mqtt_bridge
 #ifdef WITH_WEBCONFIG
       && !isWebConfigSetupActive()
 #endif
@@ -4435,6 +5217,13 @@ static bool wcCopyValue(char* dest, size_t dest_size, const char* value) {
 
 void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
   memset(&s, 0, sizeof(s));
+  s.display_rotation_supported = _ui != NULL && _ui->supportsDisplayRotation();
+  s.display_rotation_degrees = _prefs.display_rotation_degrees;
+#if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
+  if (_management_password_ready) {
+    wcCopyValue(s.admin_password, sizeof(s.admin_password), _management_password);
+  }
+#endif
   wcCopyValue(s.name, sizeof(s.name), _prefs.node_name);
   wcCopyValue(s.bluetooth_name, sizeof(s.bluetooth_name),
               _prefs.bluetooth_name);
@@ -4455,12 +5244,25 @@ void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
   s.rx_ps_rx_us = _prefs.rx_ps_rx_us;
   s.rx_ps_sleep_us = _prefs.rx_ps_sleep_us;
   s.power_saving = _prefs.powersaving_enabled;
+#if defined(ESP32_PLATFORM)
+  s.cpu_freq_mhz = _prefs.cpu_freq_mhz;
+  s.cpu_actual_mhz = board.getCpuFrequencyMHz();
+  s.cpu_supported_mask = (board.supportsCpuFrequencyMHz(80) ? 1 : 0)
+      | (board.supportsCpuFrequencyMHz(160) ? 2 : 0)
+      | (board.supportsCpuFrequencyMHz(240) ? 4 : 0);
+#endif
+#if MESH_ENABLE_LOST_REPLY
+  s.lost_reply = _prefs.lost_reply;
+#endif
 #ifdef WITH_MQTT_BRIDGE
   s.mqtt_enabled = _mqtt_enabled;
 #endif
   s.repeat = _prefs.client_repeat != 0;
   s.capabilities = WebConfigServer::CAP_LOCATION | WebConfigServer::CAP_AIRTIME
       | WebConfigServer::CAP_RX_DELAY | WebConfigServer::CAP_POWER_SAVING;
+#if MESH_ENABLE_LOST_REPLY
+  s.capabilities |= WebConfigServer::CAP_LOST_REPLY;
+#endif
 #ifdef BLE_PIN_CODE
   s.capabilities |= WebConfigServer::CAP_BLUETOOTH_NAME
       | WebConfigServer::CAP_BLUETOOTH_MAC
@@ -4501,6 +5303,12 @@ void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
 }
 
 bool MyMesh::startWebConfig(bool force_ap, char* reply) {
+#if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
+  if (!_management_password_ready) {
+    strcpy(reply, "Err: management password unavailable; set password on USB");
+    return false;
+  }
+#endif
 #if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
   if (!isCompanionWiFiEnabled()) {
     strcpy(reply,
@@ -4561,7 +5369,7 @@ bool MyMesh::isWebConfigWiFiRecoveryActive() const {
 }
 
 void MyMesh::rebootNow() {
-  if (flushContactsBeforeReboot()) {
+  if (MyMesh::prepareForUiShutdown()) {
     board.reboot();
   } else {
     MESH_DEBUG_PRINTLN("Reboot refused: pending contacts could not be saved");
@@ -4606,21 +5414,10 @@ void MyMesh::execAdminCommand(char* cmd, char* reply) {
   // a settings batch must not capture or reset that session's stream.
   reply[0] = 0;
   if (!cmd || (strlen(cmd) > 2 && cmd[2] == '|')) {
-    strcpy(reply, "Error: enter a plain CLI command");
+    mesh::cli::formatError(reply, 160, "enter a plain CLI command");
     return;
   }
   if (handleCommand(cmd, 0, reply)) return;
-  if (strcmp(cmd, "get radio.rxps") == 0 || strcmp(cmd, "get radio.rxps.config") == 0) {
-    if (!radio_driver.supportsRxPowerSaving()) {
-      strcpy(reply, "Error: RX power saving is unsupported on this radio");
-    } else {
-      snprintf(reply, 160, "> %s,level=%u,preamble=%u,rx=%lu,sleep=%lu",
-               _prefs.rx_powersaving_enabled ? "on" : "off",
-               (unsigned)_prefs.rx_ps_level, (unsigned)_prefs.rx_ps_preamble,
-               (unsigned long)_prefs.rx_ps_rx_us, (unsigned long)_prefs.rx_ps_sleep_us);
-    }
-    return;
-  }
   // The settings form already implements the Companion's MQTT and remaining
   // configuration setters. Its batch hooks persist/restart MQTT once per batch.
   execCommand(cmd, reply);
@@ -4628,6 +5425,13 @@ void MyMesh::execAdminCommand(char* cmd, char* reply) {
 
 void MyMesh::execCommand(char* cmd, char* reply) {
   reply[0] = 0;
+#if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
+  if (cmd && strncmp(cmd, "password", 8) == 0
+      && (cmd[8] == 0 || cmd[8] == ' ' || cmd[8] == '\t')) {
+    handleLocalControlCommand(cmd, reply, 160);
+    return;
+  }
+#endif
 #ifdef WITH_MQTT_BRIDGE
   if (cmd && strncmp(cmd, "set mqtt.enabled ", 17) == 0) {
     handleLocalControlCommand(cmd, reply, 160);
@@ -4649,6 +5453,7 @@ void MyMesh::execCommand(char* cmd, char* reply) {
     else if (strcmp(key, "mqtt.packets") == 0) value = _mqtt_prefs.mqtt_packets_enabled ? "on" : "off";
     else if (strcmp(key, "mqtt.raw") == 0) value = _mqtt_prefs.mqtt_raw_enabled ? "on" : "off";
     else if (strcmp(key, "mqtt.rx") == 0) value = _mqtt_prefs.mqtt_rx_enabled ? "on" : "off";
+    else if (strcmp(key, "mqtt.advert.verify") == 0) value = _mqtt_prefs.mqtt_advert_verify ? "on" : "off";
     else if (strcmp(key, "mqtt.tx") == 0) value = _mqtt_prefs.mqtt_tx_enabled == 2 ? "advert" : _mqtt_prefs.mqtt_tx_enabled ? "on" : "off";
     else if (strcmp(key, "mqtt.ntp") == 0) value = _mqtt_prefs.mqtt_ntp_server;
     else if (strcmp(key, "mqtt.owner") == 0) value = _mqtt_prefs.mqtt_owner_public_key;
@@ -4668,6 +5473,10 @@ void MyMesh::execCommand(char* cmd, char* reply) {
                && key[4] >= '1' && key[4] <= '0' + MAX_MQTT_SLOTS && key[5] == '.') {
       const int slot = key[4] - '1';
       const char* field = key + 6;
+      if (strcmp(field, "diag") == 0) {
+        MQTTBridge::formatSlotDiagReply(reply, 160, slot);
+        return;
+      }
       if (strcmp(field, "preset") == 0) value = _mqtt_prefs.mqtt_slot_preset[slot];
       else if (strcmp(field, "server") == 0) value = _mqtt_prefs.mqtt_slot_host[slot];
       else if (strcmp(field, "username") == 0) value = _mqtt_prefs.mqtt_slot_username[slot];
@@ -4717,19 +5526,19 @@ void MyMesh::execCommand(char* cmd, char* reply) {
   }
 #endif
   if (!cmd || strncmp(cmd, "set ", 4) != 0) {
-    strcpy(reply, "Error: unsupported command");
+    mesh::cli::formatError(reply, 160, "unsupported command");
     return;
   }
   const char* start = cmd + 4;
   const char* split = strchr(start, ' ');
   if (!split) {
-    strcpy(reply, "Error: missing value");
+    mesh::cli::formatError(reply, 160, "missing value");
     return;
   }
   char key[24];
   const size_t key_len = split - start;
   if (key_len == 0 || key_len >= sizeof(key)) {
-    strcpy(reply, "Error: unsupported setting");
+    mesh::cli::formatError(reply, 160, "unsupported setting");
     return;
   }
   memcpy(key, start, key_len);
@@ -4739,7 +5548,7 @@ void MyMesh::execCommand(char* cmd, char* reply) {
   if (strcmp(key, "name") == 0) {
     char name[sizeof(_prefs.node_name)];
     if (!value[0] || !wcCopyValue(name, sizeof(name), value)) {
-      strcpy(reply, "Error: name must be 1-31 characters");
+      mesh::cli::formatError(reply, 160, "name must be 1-31 characters");
     } else {
       strcpy(reply, saveAdvertName(name) ? "OK" : "Error: name could not be saved");
     }
@@ -4786,7 +5595,7 @@ void MyMesh::execCommand(char* cmd, char* reply) {
     if (!mesh::cli::parseRadioTupleStrict(value, freq, bw, sf, cr)
         || !isfinite(freq) || !isfinite(bw) || freq < 150.0f || freq > 2500.0f
         || bw < 7.0f || bw > 500.0f || sf < 5 || sf > 12 || cr < 5 || cr > 8) {
-      strcpy(reply, "Error: radio must be freq,bw,sf,cr");
+      mesh::cli::formatError(reply, 160, "radio must be freq,bw,sf,cr");
     } else {
       const float previous_freq = _prefs.freq, previous_bw = _prefs.bw;
       const uint8_t previous_sf = _prefs.sf, previous_cr = _prefs.cr;
@@ -4808,7 +5617,7 @@ void MyMesh::execCommand(char* cmd, char* reply) {
         _prefs.cr = previous_cr;
         _prefs.rx_ps_rx_us = previous_rx_us;
         _prefs.rx_ps_sleep_us = previous_sleep_us;
-        strcpy(reply, "Error: radio could not be saved");
+        mesh::cli::formatError(reply, 160, "radio could not be saved");
       }
     }
     return;
@@ -4842,20 +5651,20 @@ void MyMesh::execCommand(char* cmd, char* reply) {
   if (strcmp(key, "radio.rxgain") == 0 || strcmp(key, "repeat") == 0) {
     bool enabled;
     if (!wcParseBool(value, enabled)) {
-      strcpy(reply, "Error: must be on or off");
+      mesh::cli::formatError(reply, 160, "must be on or off");
     } else {
       if (strcmp(key, "radio.rxgain") == 0) {
         if (!radio_driver.supportsRxBoostedGainMode()) {
-          strcpy(reply, "Error: RX boosted gain unsupported");
+          mesh::cli::formatError(reply, 160, "RX boosted gain unsupported");
           return;
         }
         if (!applyAndSaveRxBoostedGain(enabled)) {
-          strcpy(reply, "Error: radio busy; retry");
+          mesh::cli::formatError(reply, 160, "radio busy; retry");
           return;
         }
       } else {
         if (!savePreference(_prefs.client_repeat, static_cast<uint8_t>(enabled))) {
-          strcpy(reply, "Error: repeat could not be saved");
+          mesh::cli::formatError(reply, 160, "repeat could not be saved");
           return;
         }
       }
@@ -4880,11 +5689,13 @@ void MyMesh::execCommand(char* cmd, char* reply) {
   if (strcmp(key, "radio.fem.rxgain") == 0) {
     bool enabled;
     if (!wcParseBool(value, enabled)) {
-      strcpy(reply, "Error: must be on or off");
+      mesh::cli::formatError(reply, 160, "must be on or off");
+    } else if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) {
+      mesh::cli::formatError(reply, 160, "stop Morse before changing LoRa FEM gain");
     } else if (!board.canControlLoRaFemLna()) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else if (!applyAndSaveFemRxGain(enabled)) {
-      strcpy(reply, "Error: failed to apply FEM RX gain");
+      mesh::cli::formatError(reply, 160, "failed to apply FEM RX gain");
     } else {
       strcpy(reply, "OK");
     }
@@ -4893,11 +5704,13 @@ void MyMesh::execCommand(char* cmd, char* reply) {
   if (strcmp(key, "radio.fem.txgain") == 0) {
     bool enabled;
     if (!wcParseBool(value, enabled)) {
-      strcpy(reply, "Error: must be on or off");
+      mesh::cli::formatError(reply, 160, "must be on or off");
+    } else if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) {
+      mesh::cli::formatError(reply, 160, "stop Morse before changing LoRa FEM gain");
     } else if (!board.canControlLoRaFemPaGain()) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else if (!applyAndSaveFemTxGain(enabled)) {
-      strcpy(reply, "Error: failed to apply FEM TX gain");
+      mesh::cli::formatError(reply, 160, "failed to apply FEM TX gain");
     } else {
       strcpy(reply, "OK");
     }
@@ -4915,16 +5728,18 @@ void MyMesh::execCommand(char* cmd, char* reply) {
     }
   } else if (strcmp(key, "mqtt.status") == 0 || strcmp(key, "mqtt.packets") == 0
              || strcmp(key, "mqtt.raw") == 0 || strcmp(key, "mqtt.rx") == 0
+             || strcmp(key, "mqtt.advert.verify") == 0
              || strcmp(key, "snmp") == 0) {
     bool enabled;
     if (!wcParseBool(value, enabled)) {
-      strcpy(reply, "Error: must be on or off");
+      mesh::cli::formatError(reply, 160, "must be on or off");
       return;
     }
     if (strcmp(key, "mqtt.status") == 0) _mqtt_prefs.mqtt_status_enabled = enabled;
     else if (strcmp(key, "mqtt.packets") == 0) _mqtt_prefs.mqtt_packets_enabled = enabled;
     else if (strcmp(key, "mqtt.raw") == 0) _mqtt_prefs.mqtt_raw_enabled = enabled;
     else if (strcmp(key, "mqtt.rx") == 0) _mqtt_prefs.mqtt_rx_enabled = enabled;
+    else if (strcmp(key, "mqtt.advert.verify") == 0) _mqtt_prefs.mqtt_advert_verify = enabled;
     else _mqtt_prefs.snmp_enabled = enabled;
     changed = true;
   } else if (strcmp(key, "mqtt.tx") == 0) {
@@ -4932,14 +5747,14 @@ void MyMesh::execCommand(char* cmd, char* reply) {
     else if (strcmp(value, "on") == 0) _mqtt_prefs.mqtt_tx_enabled = 1;
     else if (strcmp(value, "advert") == 0) _mqtt_prefs.mqtt_tx_enabled = 2;
     else {
-      strcpy(reply, "Error: MQTT TX must be off, on, or advert");
+      mesh::cli::formatError(reply, 160, "MQTT TX must be off, on, or advert");
       return;
     }
     changed = true;
   } else if (strcmp(key, "mqtt.interval") == 0) {
     long minutes;
     if (!wcParseLong(value, 1, 60, minutes)) {
-      strcpy(reply, "Error: interval must be 1-60 minutes");
+      mesh::cli::formatError(reply, 160, "interval must be 1-60 minutes");
       return;
     }
     _mqtt_prefs.mqtt_status_interval = static_cast<uint32_t>(minutes) * 60000UL;
@@ -4967,7 +5782,7 @@ void MyMesh::execCommand(char* cmd, char* reply) {
   } else if (strcmp(key, "timezone.offset") == 0) {
     long offset;
     if (!wcParseLong(value, -12, 14, offset)) {
-      strcpy(reply, "Error: timezone offset must be -12 to 14");
+      mesh::cli::formatError(reply, 160, "timezone offset must be -12 to 14");
       return;
     }
     _mqtt_prefs.timezone_offset = static_cast<int8_t>(offset);
@@ -4984,7 +5799,7 @@ void MyMesh::execCommand(char* cmd, char* reply) {
                       || strcmp(value, MQTT_PRESET_CUSTOM) == 0
                       || strcmp(value, MQTT_PRESET_NONE) == 0;
       if (!valid) {
-        strcpy(reply, "Error: unknown MQTT preset");
+        mesh::cli::formatError(reply, 160, "unknown MQTT preset");
         return;
       }
       if (findMQTTPreset(value)) {
@@ -5003,7 +5818,7 @@ void MyMesh::execCommand(char* cmd, char* reply) {
     } else if (strcmp(field, "port") == 0) {
       uint16_t port;
       if (!mesh::cli::parseMqttPort(value, port)) {
-        strcpy(reply, "Error: port must be 0-65535 (0 uses the URI default)");
+        mesh::cli::formatError(reply, 160, "port must be 0-65535 (0 uses the URI default)");
         return;
       }
       _mqtt_prefs.mqtt_slot_port[slot] = static_cast<uint16_t>(port);
@@ -5019,7 +5834,7 @@ void MyMesh::execCommand(char* cmd, char* reply) {
                             sizeof(_mqtt_prefs.mqtt_slot_token[slot]), value);
     } else if (strcmp(field, "topic") == 0) {
       if (strcmp(_mqtt_prefs.mqtt_slot_preset[slot], MQTT_PRESET_CUSTOM) != 0) {
-        strcpy(reply, "Error: topic only applies to custom slots");
+        mesh::cli::formatError(reply, 160, "topic only applies to custom slots");
         return;
       }
       changed = wcCopyValue(_mqtt_prefs.mqtt_slot_topic[slot],
@@ -5034,10 +5849,10 @@ void MyMesh::execCommand(char* cmd, char* reply) {
     _wc_mqtt_dirty = true;
     strcpy(reply, "OK");
   } else if (reply[0] == 0) {
-    strcpy(reply, "Error: invalid or unsupported value");
+    mesh::cli::formatError(reply, 160, "invalid or unsupported value");
   }
 #else
-  strcpy(reply, "Error: unsupported setting for this companion");
+  mesh::cli::formatError(reply, 160, "unsupported setting for this companion");
 #endif
 }
 
@@ -5263,7 +6078,10 @@ void MyMesh::resetUsbHostSessionInput() {
   // CLI rescue deliberately remains active across reconnects, but no bytes
   // typed by the old host may complete a command for the new one. This is
   // especially important for the rescue shell's erase/rm commands.
-  if (_cli_rescue) memset(cli_command, 0, sizeof(cli_command));
+  if (_cli_rescue) {
+    memset(cli_command, 0, sizeof(cli_command));
+    _cli_line_overflow = false;
+  }
 }
 
 void MyMesh::handleCmdFrame(size_t len) {
@@ -5271,6 +6089,19 @@ void MyMesh::handleCmdFrame(size_t len) {
     writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     return;
   }
+
+#if defined(MESH_HIL_BLE_BENCH) && MESH_HIL_BLE_BENCH
+  if (cmd_frame[0] == mesh::companion::kBleBenchCommand) {
+    // Direct Companion transport benchmark only: no RF dispatch, settings,
+    // identity reads or persistent state. Reuse the normal reply queue and
+    // its required-frame admission/backpressure, including the source route.
+    const size_t echoed = mesh::companion::buildBleBenchEcho(
+        cmd_frame, len, out_frame, MAX_FRAME_SIZE);
+    if (echoed) _serial->writeFrame(out_frame, echoed);
+    else writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+    return;
+  }
+#endif
 
   servicePendingSerialReply();
   const bool starts_long_lived_request =
@@ -5518,7 +6349,24 @@ void MyMesh::handleCmdFrame(size_t len) {
     } else {
       ChannelDetails channel;
       bool success = getChannel(channel_idx, channel);
-      if (success && sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i)) {
+#if MESH_ENABLE_MESHTEXT_CHAT
+      if (success && isMeshtextChannel(channel)) {
+        if (sendMeshtextText(channel, text, len - i)) {
+#if UI_POCKET_GUI
+          if (_ui) _ui->channelMessageSent(channel_idx, channel.name, _prefs.node_name, text, len - i);
+#endif
+          writeOKFrame();
+        }
+        else writeErrFrame(ERR_CODE_BAD_STATE);
+      } else
+#endif
+      if (success && isAliasRadio2Defined()
+          && parseCompanionChannelAlias(channel.name).kind == CompanionChannelKind::Meshtext) {
+        writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
+      } else if (success && sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i)) {
+#if UI_POCKET_GUI
+        if (_ui) _ui->channelMessageSent(channel_idx, channel.name, _prefs.node_name, text, len - i);
+#endif
         writeOKFrame();
       } else {
         writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
@@ -5562,12 +6410,19 @@ void MyMesh::handleCmdFrame(size_t len) {
     ChannelDetails channel;
     if (!getChannel(channel_idx, channel)) {
       writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
+#if MESH_ENABLE_MESHTEXT_CHAT
+    } else if (isMeshtextChannel(channel)) {
+      writeErrFrame(ERR_CODE_UNSUPPORTED_CMD); // channel text only, never raw/admin data
+#endif
+    } else if (isAliasRadio2Defined()
+        && parseCompanionChannelAlias(channel.name).kind == CompanionChannelKind::Meshtext) {
+      writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
     } else if (data_type == DATA_TYPE_RESERVED) {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     } else if (payload_len > MAX_GROUP_DATA_LENGTH) {
       MESH_DEBUG_PRINTLN("CMD_SEND_CHANNEL_DATA payload too long: %d > %d", payload_len, MAX_GROUP_DATA_LENGTH);
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
-    } else if (sendGroupData(channel.channel, path, path_len, data_type, payload, payload_len)) {
+    } else if (sendClientGroupData(channel.channel, path, path_len, data_type, payload, payload_len)) {
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_TABLE_FULL);
@@ -5846,13 +6701,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     }
   } else if (cmd_frame[0] == CMD_SYNC_NEXT_MESSAGE) {
-    int out_len;
-    if ((out_len = getFromOfflineQueue(out_frame)) > 0) {
-      _serial->writeFrame(out_frame, out_len);
-    } else {
-      out_frame[0] = RESP_CODE_NO_MORE_MESSAGES;
-      _serial->writeFrame(out_frame, 1);
-    }
+    syncNextOfflineMessage();
   } else if (cmd_frame[0] == CMD_SET_RADIO_PARAMS) {
     if (len < 11) {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
@@ -6012,7 +6861,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       else writeErrFrame(ERR_CODE_FILE_IO_ERROR);
     }
   } else if (cmd_frame[0] == CMD_REBOOT && len >= 7 && memcmp(&cmd_frame[1], "reboot", 6) == 0) {
-    if (!flushContactsBeforeReboot()) {
+    if (!MyMesh::prepareForUiShutdown()) {
       writeErrFrame(ERR_CODE_FILE_IO_ERROR);
       return;
     }
@@ -6041,6 +6890,11 @@ void MyMesh::handleCmdFrame(size_t len) {
 #if ENABLE_PRIVATE_KEY_IMPORT
     if (!mesh::LocalIdentity::validatePrivateKey(&cmd_frame[1])) {
         writeErrFrame(ERR_CODE_ILLEGAL_ARG); // invalid key
+#if MESH_ENABLE_MESHTEXT_CHAT
+    } else if (hasForeignRadioFrame()) {
+        // Finish queued/sending MT text before changing its sender identity.
+        writeErrFrame(ERR_CODE_BAD_STATE);
+#endif
     } else if (!flushContactsBeforeReboot()) {
         // loadContacts() resets the dirty-page map, so never replace the
         // identity and reload while newer contact state exists only in RAM.
@@ -6050,6 +6904,9 @@ void MyMesh::handleCmdFrame(size_t len) {
         identity.readFrom(&cmd_frame[1], 64);
         if (_store->saveMainIdentity(identity)) {
           self_id = identity;
+#if MESH_ENABLE_MESHTEXT_CHAT
+          refreshMeshtextIdentity();
+#endif
 #if defined(ENABLE_OTA)
           mesh::ota::ota_refresh_seeder_identity(self_id.pub_key);
 #endif
@@ -6057,9 +6914,9 @@ void MyMesh::handleCmdFrame(size_t len) {
           // re-load contacts, to invalidate ecdh shared_secrets
           stopContactsIterator();
           resetContacts();
-          mesh::resetLazyPersistenceAfterSuccess(
-              dirty_contacts_expiry, dirty_contacts_failures);
+          MyMesh::onContactCacheFlushed();
           _store->loadContacts(this);
+          _store->recoverContacts(this);
           if (_store->hasPendingContactWrites()) {
             mesh::scheduleLazyPersistenceMutation(
                 dirty_contacts_expiry, dirty_contacts_failures,
@@ -6076,18 +6933,17 @@ void MyMesh::handleCmdFrame(size_t len) {
   } else if (cmd_frame[0] == CMD_SEND_RAW_DATA && len >= 6) {
     int i = 1;
     uint8_t path_len = cmd_frame[i++];
-    if (path_len >= 0 && mesh::Packet::isValidPathLen(path_len)) {
+    if (mesh::Packet::isValidPathLen(path_len)) {
       uint8_t path[MAX_PATH_SIZE];
-      i += mesh::Packet::writePath(path, &cmd_frame[i], path_len);
-      if (i + 4 > len) {  // min payload 4 bytes
+      const size_t path_bytes = static_cast<size_t>(path_len & 63) * ((path_len >> 6) + 1);
+      if (static_cast<size_t>(i) + path_bytes + 4 > len) { // min payload 4 bytes, before reading path
         writeErrFrame(ERR_CODE_ILLEGAL_ARG);
       } else {
-        auto pkt = createRawData(&cmd_frame[i], len - i);
-        if (pkt) {
-          sendDirect(pkt, path, path_len);
+        i += mesh::Packet::writePath(path, &cmd_frame[i], path_len);
+        if (sendClientRawData(&cmd_frame[i], len - i, path, path_len)) {
           writeOKFrame();
         } else {
-          writeErrFrame(ERR_CODE_TABLE_FULL);
+          writeErrFrame(ERR_CODE_BAD_STATE);
         }
       }
     } else {
@@ -6238,37 +7094,104 @@ void MyMesh::handleCmdFrame(size_t len) {
   } else if (cmd_frame[0] == CMD_GET_CHANNEL && len >= 2) {
     uint8_t channel_idx = cmd_frame[1];
     ChannelDetails channel;
-    if (getChannel(channel_idx, channel)) {
+    if (getChannelForSave(channel_idx, channel)) {
       int i = 0;
       out_frame[i++] = RESP_CODE_CHANNEL_INFO;
       out_frame[i++] = channel_idx;
-      strcpy((char *)&out_frame[i], channel.name);
+      // This fixed-width field must not retain bytes from an earlier reply.
+      strncpy((char *)&out_frame[i], channel.name, 32);
+      out_frame[i + 31] = 0;
       i += 32;
-      memcpy(&out_frame[i], channel.channel.secret, 16);
-      i += 16; // NOTE: only 128-bit supported
+      size_t key_size = 16; // Original app response remains byte-for-byte compatible.
+#if MESH_ENABLE_MESHTEXT_CHAT
+      if (len >= 3 && cmd_frame[2] == 32 && isMeshtextChannel(channel)) key_size = 32;
+#endif
+      memcpy(&out_frame[i], channel.channel.secret, key_size);
+      i += key_size;
       _serial->writeFrame(out_frame, i);
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND);
     }
   } else if (cmd_frame[0] == CMD_SET_CHANNEL && len >= 2 + 32 + 32) {
-    writeErrFrame(ERR_CODE_UNSUPPORTED_CMD); // not supported (yet)
+#if MESH_ENABLE_MESHTEXT_CHAT
+    const uint8_t channel_idx = cmd_frame[1];
+    ChannelDetails previous{}, channel{};
+    StrHelper::strncpy(channel.name, (char *)&cmd_frame[2], 32);
+    memcpy(channel.channel.secret, &cmd_frame[2 + 32], sizeof(channel.channel.secret));
+    if (parseCompanionChannelAlias(channel.name).kind != CompanionChannelKind::Meshtext) {
+      writeErrFrame(ERR_CODE_UNSUPPORTED_CMD); // MeshCore wire protocol is still AES-128.
+      return;
+    }
+    if (!validateMeshtextChannelChange(channel_idx, channel)) {
+      writeErrFrame(ERR_CODE_BAD_STATE);
+      return;
+    }
+    if (!getChannelForSave(channel_idx, previous) || !setChannel(channel_idx, channel)) {
+      writeErrFrame(ERR_CODE_NOT_FOUND);
+    } else if (!saveChannels()) {
+      setChannel(channel_idx, previous);
+      writeErrFrame(ERR_CODE_FILE_IO_ERROR);
+    } else {
+      _mt_seen.clear();
+      _mt_profile_dirty = true;
+      refreshMeshtextProfile();
+      writeOKFrame();
+    }
+#else
+    writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
+#endif
   } else if (cmd_frame[0] == CMD_SET_CHANNEL && len >= 2 + 32 + 16) {
     uint8_t channel_idx = cmd_frame[1];
-    ChannelDetails previous;
+    ChannelDetails previous{};
     ChannelDetails channel;
     StrHelper::strncpy(channel.name, (char *)&cmd_frame[2], 32);
     memset(channel.channel.secret, 0, sizeof(channel.channel.secret));
     memcpy(channel.channel.secret, &cmd_frame[2 + 32], 16); // NOTE: only 128-bit supported
-    const bool have_previous = getChannel(channel_idx, previous);
+    const auto alias = parseCompanionChannelAlias(channel.name);
+    if (alias.kind == CompanionChannelKind::Invalid) {
+      writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+      return;
+    }
+#if MESH_ENABLE_MESHTEXT_CHAT
+    // Legacy apps fetch only 16 bytes. A label-only edit must not silently
+    // truncate a provisioned MT AES-256 key to AES-128. An explicit 32-byte SET
+    // (zero upper half for AES-128) is the unambiguous way to replace that key.
+    if (alias.kind == CompanionChannelKind::Meshtext
+        && getChannelForSave(channel_idx, previous) && isMeshtextChannel(previous)
+        && !memcmp(channel.channel.secret, previous.channel.secret, 16)) {
+      memcpy(channel.channel.secret + 16, previous.channel.secret + 16, 16);
+    }
+    if (!validateMeshtextChannelChange(channel_idx, channel)) {
+      writeErrFrame(ERR_CODE_BAD_STATE); // Conflicting preset, manual RF, region or busy owner.
+      return;
+    }
+#else
+    if (alias.kind == CompanionChannelKind::Meshtext && isAliasRadio2Defined()) {
+      writeErrFrame(ERR_CODE_UNSUPPORTED_CMD); // Meshtext transport not implemented yet.
+      return;
+    }
+#endif
+    const bool have_previous = getChannelForSave(channel_idx, previous);
+    ChannelDetails wire_channel = channel;
+    ChannelDetails previous_wire_channel = previous;
+    resolveChannelAlias(wire_channel);
+    if (have_previous) resolveChannelAlias(previous_wire_channel);
     if (have_previous && channel.name[0] != 0 && previous.name[0] != 0
-        && !memcmp(channel.channel.secret, previous.channel.secret, sizeof(channel.channel.secret))) {
+        && !memcmp(wire_channel.channel.secret, previous_wire_channel.channel.secret, sizeof(channel.channel.secret))) {
       channel.channel.tx_radio = previous.channel.tx_radio;
     }
     if (!have_previous
         || !setChannel(channel_idx, channel)) {
       writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
     } else if (saveChannels()) {
+#if MESH_ENABLE_MESHTEXT_CHAT
+      _mt_seen.clear();
+      _mt_profile_dirty = true;
+      refreshMeshtextProfile();
+#endif
       writeOKFrame();
+      // Local history seed only after the durable save and its acknowledgement.
+      seedEmergencyChannelNotice(channel_idx, previous);
     } else {
       // AtomicFileWriter preserves the last complete channels file. Keep the
       // live table consistent with it when a full or failing filesystem cannot
@@ -6335,7 +7258,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint8_t path_len = len - 10;
     uint8_t flags = cmd_frame[9];
     uint8_t path_sz = flags & 0x03;  // NEW v1.11+
-    if ((path_len >> path_sz) > MAX_PATH_SIZE || (path_len % (1 << path_sz)) != 0) { // make sure is multiple of path_sz
+    if ((path_len >> path_sz) >= MAX_PATH_SIZE || (path_len % (1 << path_sz)) != 0) { // make sure is multiple of path_sz
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     } else {
       uint32_t tag, auth;
@@ -6350,7 +7273,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       if (pkt) {
         // Compute before handing ownership to sendDirect(), which releases the
         // packet itself if validation or queueing fails.
-        uint32_t t = _radio->getEstAirtimeFor(9 + path_len + 2);
+        uint32_t t = getTransmitAirtime(pkt, 2 + pkt->payload_len + path_len);
         uint32_t est_timeout = calcDirectTimeoutMillisFor(t, path_len >> path_sz);
         if (sendDirect(pkt, &cmd_frame[10], path_len)) {
           _delayed_replies.armBinaryTrace(est_timeout, _ms->getMillis());
@@ -6688,17 +7611,21 @@ void MyMesh::handleCmdFrame(size_t len) {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG); // invalid stats sub-type
     }
   } else if (cmd_frame[0] == CMD_FACTORY_RESET && len >= 6 && memcmp(&cmd_frame[1], "reset", 5) == 0) {
-    if (_serial) {
-      MESH_DEBUG_PRINTLN("Factory reset: disabling serial interface to prevent reconnects (BLE/WiFi)");
-      _serial->disable(); // Phone app disconnects before we can send OK frame so it's safe here
-    }
+    BaseSerialInterface* const reply_route = _serial->captureReplyRoute();
+    // Formatting is synchronous in the command-dispatch loop. Keep the
+    // requesting transport available if storage rejects/fails the erase.
     bool success = _store->formatFileSystem();
     if (success) {
+#if MESH_ENABLE_TX_BEACONS
+      suspendBeacons();
+#endif
+      MESH_DEBUG_PRINTLN("Factory reset: disabling interfaces before reboot");
+      _serial->disable();
       writeOKFrame();
       delay(1000);
       board.reboot();  // doesn't return
     } else {
-      writeErrFrame(ERR_CODE_FILE_IO_ERROR);
+      writeErrFrame(ERR_CODE_FILE_IO_ERROR, reply_route);
     }
   } else if (cmd_frame[0] == CMD_SET_FLOOD_SCOPE_KEY && len >= 2 && cmd_frame[1] == 0) {
     if (len >= 2 + 16) {
@@ -6793,6 +7720,19 @@ void MyMesh::handleCmdFrame(size_t len) {
     if (pkt) {
       uint8_t priority = cmd_frame[1];
       if (tryParsePacket(pkt, &cmd_frame[2], len - 2)) {
+        if (pkt->getPayloadType() == PAYLOAD_TYPE_RAW_CUSTOM) {
+          const uint8_t policy = mesh::companion::trafficPolicy(
+              mesh::companion::rawTrafficKind(pkt->payload, pkt->payload_len),
+              _prefs.tx_media, _prefs.tx_ssh, _radio->profiles());
+          if (policy != mesh::RADIO_TX_AUTO) {
+            if (!mesh::companion::trafficTransmitMask(policy, _radio->profiles())) {
+              releasePacket(pkt);
+              writeErrFrame(ERR_CODE_BAD_STATE);
+              return;
+            }
+            pkt->tx_radio = policy;
+          }
+        }
         sendPacket(pkt, priority, 0);
         writeOKFrame();
       } else {
@@ -6812,13 +7752,30 @@ static bool save_filter(const ContactInfo& c) {
   return c.type != ADV_TYPE_NONE;   // don't save the transient/anon entries
 }
 
+__attribute__((noinline))
 void MyMesh::onContactCacheFlushed() {
-  // Eviction already saved the pending mutations. Avoid writing them again
-  // when the old five-second lazy-save deadline arrives.
+  // Share the deadline reset after successful persistence or deliberate
+  // retirement of the old RAM table. Internal calls bypass virtual overrides.
   mesh::resetLazyPersistenceAfterSuccess(dirty_contacts_expiry, dirty_contacts_failures);
 }
 
+bool MyMesh::resetContactsForRecovery() {
+  // Release retained paths before resetting the table. Keep the stream owner
+  // so its changed table revision restarts a complete list on the next pass.
+#if MESH_CONTACT_CACHE
+  _iter_pending_contact = ContactInfo();
+#endif
+  _iter_contact_pending = false;
+  resetContacts();
+  MyMesh::onContactCacheFlushed();
+  return true;
+}
+
 void MyMesh::saveContacts() {
+  if (_store->contactsAreVolatile()) {
+    MyMesh::onContactCacheFlushed();
+    return;
+  }
   const bool success = _store->saveContacts(this, save_filter);
   if (!success) {
     scheduleContactWriteRetry();
@@ -6827,8 +7784,7 @@ void MyMesh::saveContacts() {
     dirty_contacts_expiry = mesh::nonzeroLazyPersistenceDeadline(
         futureMillis(CONTACT_PAGE_WRITE_GAP));
   } else {
-    mesh::resetLazyPersistenceAfterSuccess(
-        dirty_contacts_expiry, dirty_contacts_failures);
+    MyMesh::onContactCacheFlushed();
   }
 }
 
@@ -6851,6 +7807,8 @@ bool MyMesh::isContactWriteDue() const {
 }
 
 bool MyMesh::flushContactsBeforeReboot() {
+  // This helper also backs explicit durability promises such as tx.contact.
+  if (_store->contactsAreVolatile()) return false;
 #if defined(ESP32_PLATFORM)
   const uint32_t now = _ms->getMillis();
   if (_store->hasPendingAdvertWrites() && !_store->isAdvertWriteDue(now)) return false;
@@ -6863,12 +7821,12 @@ bool MyMesh::flushContactsBeforeReboot() {
     scheduleContactWriteRetry();
     return false;
   }
-  mesh::resetLazyPersistenceAfterSuccess(
-      dirty_contacts_expiry, dirty_contacts_failures);
+  MyMesh::onContactCacheFlushed();
   return true;
 }
 
 bool MyMesh::prepareForOtaReboot() {
+  if (_store->contactsAreVolatile()) return true;
   // Once a write has failed, honor its bounded retry deadline instead of
   // letting the armed OTA apply hammer the same filesystem every loop.
   if (dirty_contacts_failures != 0 && dirty_contacts_expiry != 0
@@ -6878,8 +7836,9 @@ bool MyMesh::prepareForOtaReboot() {
   return flushContactsBeforeReboot();
 }
 
+__attribute__((noinline))
 bool MyMesh::prepareForUiShutdown() {
-  return flushContactsBeforeReboot();
+  return _store->contactsAreVolatile() || flushContactsBeforeReboot();
 }
 
 bool MyMesh::scheduleContactWrite(const ContactInfo& contact) {
@@ -6887,6 +7846,7 @@ bool MyMesh::scheduleContactWrite(const ContactInfo& contact) {
   // deliberately excluded from contact storage. Never allocate a persistent
   // slot for one when a path/message callback updates its runtime state.
   if (contact.type == ADV_TYPE_NONE || isTransientContact(contact)) return true;
+  if (_store->contactsAreVolatile()) return true;
   if (!_store->markContactDirty(contact)) {
     MESH_DEBUG_PRINTLN(
         "Contact persistence scheduling failed: no persistent slot");
@@ -6910,6 +7870,7 @@ bool MyMesh::scheduleContactWriteAfterRelease(const ContactInfo& contact,
         "Contact removal scheduling failed: persistent slot was not reserved");
     return false;
   }
+  if (_store->contactsAreVolatile()) return true;
   mesh::scheduleLazyPersistenceMutation(
       dirty_contacts_expiry, dirty_contacts_failures,
       futureMillis(LAZY_CONTACTS_WRITE_DELAY));
@@ -6948,6 +7909,7 @@ void MyMesh::repairInternalExtraFS(Stream& output) {
     output.println(
         "  > internal ExtraFS repaired; rebooting to reload authoritative data");
     _scheduled_reboot_at = futureMillis(1000);
+    if (_scheduled_reboot_at == 0) _scheduled_reboot_at = 1;
     return;
   }
 
@@ -6958,16 +7920,14 @@ void MyMesh::repairInternalExtraFS(Stream& output) {
       && (capacity_kib % 4) == 0;
   if (contacts_saved && channels_saved && capacity_ready
       && !_store->hasPendingContactWrites()) {
-    mesh::resetLazyPersistenceAfterSuccess(
-        dirty_contacts_expiry, dirty_contacts_failures);
+    MyMesh::onContactCacheFlushed();
     output.printf("  > internal ExtraFS repaired (%lu KiB); contacts and channels rebuilt\n",
                   (unsigned long)_store->getStorageTotalKb());
   } else {
     if (!contacts_saved || _store->hasPendingContactWrites()) {
       scheduleContactWriteRetry();
     } else {
-      mesh::resetLazyPersistenceAfterSuccess(
-          dirty_contacts_expiry, dirty_contacts_failures);
+      MyMesh::onContactCacheFlushed();
     }
     output.println("  Error: ExtraFS is active, but data rebuild/verification failed; retry repair extrafs");
   }
@@ -7415,6 +8375,7 @@ bool MyMesh::handleExtraFsHilCommand(const char* command, char* reply,
   if (strcmp(action, "unsafe-reset CONFIRM") == 0) {
     // Intentionally bypass all persistence hooks so HIL can prove that a
     // mutation was already committed before an event-driven sleep.
+    meshRegulatorCleanReset();  // Retained marker only; no persistence flush.
     NVIC_SystemReset();
     while (true) {}
   }
@@ -7430,7 +8391,20 @@ bool MyMesh::saveAdvertName(const char* name) {
   char previous[sizeof(_prefs.node_name)];
   memcpy(previous, _prefs.node_name, sizeof(previous));
   StrHelper::strncpy(_prefs.node_name, name, sizeof(_prefs.node_name));
-  if (savePrefs()) return true;
+  if (savePrefs()) {
+#if MESH_ENABLE_MESHTEXT_CHAT
+    if (strncmp(previous, _prefs.node_name, sizeof(previous)) != 0) {
+      // NodeInfo contains the global advert name; retained ciphertext must
+      // not advertise the previous name after a successful rename. Preserve
+      // independent text retries, and wait for a new successful chat before
+      // announcing again rather than transmitting from a settings edit.
+      for (auto& frame : _mt_delivery) if (frame.nodeinfo) frame.cancelled = true;
+      memset(_mt_nodeinfo_announced, 0, sizeof(_mt_nodeinfo_announced));
+      memset(_mt_nodeinfo_pending, 0, sizeof(_mt_nodeinfo_pending));
+    }
+#endif
+    return true;
+  }
   memcpy(_prefs.node_name, previous, sizeof(previous));
   return false;
 }
@@ -7476,6 +8450,9 @@ MyMesh::RadioSettingResult MyMesh::applyAndSaveTxPower(int8_t power) {
 }
 
 bool MyMesh::applyAndSaveFemRxGain(bool enabled) {
+  // Binary Companion setters and WebConfig also enter through this helper.
+  // Do not alter an external FEM while the Morse transmitter owns it.
+  if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) return false;
   if (!board.canControlLoRaFemLna()) return false;
 
   const bool previous_hardware = board.isLoRaFemLnaEnabled();
@@ -7498,6 +8475,7 @@ bool MyMesh::applyAndSaveFemRxGain(bool enabled) {
 }
 
 bool MyMesh::applyAndSaveFemTxGain(bool enabled) {
+  if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) return false;
   if (!board.canControlLoRaFemPaGain()) return false;
   const bool previous_hardware = board.isLoRaFemPaGainEnabled();
   const uint8_t previous_pref = _prefs.radio_fem_txgain;
@@ -7563,7 +8541,7 @@ bool MyMesh::applyAndSaveBluetoothName(const char* value, char* reply,
   }
 
   if (!saveBluetoothNameOverride(use_default ? "" : value)) {
-    snprintf(reply, reply_size, "Error: Bluetooth name save failed");
+    mesh::cli::formatError(reply, reply_size, "Bluetooth name save failed");
     return false;
   }
 
@@ -7751,8 +8729,7 @@ bool MyMesh::applyAndSaveBluetoothMac(const char* value, char* reply,
                                       size_t reply_size) {
   if (reply == NULL || reply_size == 0) return false;
   if (value == NULL) {
-    snprintf(reply, reply_size,
-             "Error: use set bluetooth.mac <address|random|random-every-boot|random-after-connect|default>");
+    mesh::cli::formatError(reply, reply_size, "use set bluetooth.mac <address|random|random-every-boot|random-after-connect|default>");
     return false;
   }
 
@@ -7788,8 +8765,7 @@ bool MyMesh::applyAndSaveBluetoothMac(const char* value, char* reply,
       while (*custom_value == ' ' || *custom_value == '\t') custom_value++;
     }
     if (!mesh::companion::parseBluetoothMac(custom_value, address)) {
-      snprintf(reply, reply_size,
-               "Error: use a random-static address (first byte C0-FF), random, random-every-boot, random-after-connect, or default");
+      mesh::cli::formatError(reply, reply_size, "use a random-static address (first byte C0-FF), random, random-every-boot, random-after-connect, or default");
       return false;
     }
     mode = mesh::companion::BLUETOOTH_MAC_CUSTOM;
@@ -7797,13 +8773,13 @@ bool MyMesh::applyAndSaveBluetoothMac(const char* value, char* reply,
 
 #if defined(RP2040_PLATFORM)
   if (mode != mesh::companion::BLUETOOTH_MAC_DEFAULT) {
-    snprintf(reply, reply_size, "Error: Bluetooth address overrides are not supported on Pico W");
+    mesh::cli::formatError(reply, reply_size, "Bluetooth address overrides are not supported on Pico W");
     return false;
   }
 #endif
 
   if (!saveBluetoothMac(mode, address)) {
-    snprintf(reply, reply_size, "Error: Bluetooth MAC save failed");
+    mesh::cli::formatError(reply, reply_size, "Bluetooth MAC save failed");
     return false;
   }
 
@@ -7869,14 +8845,13 @@ bool MyMesh::applyAndSaveBluetoothStealth(const char* value, char* reply,
   if (reply == NULL || reply_size == 0) return false;
   if (value == NULL
       || (strcmp(value, "on") != 0 && strcmp(value, "off") != 0)) {
-    snprintf(reply, reply_size,
-             "Error: use set bluetooth.stealth on|off");
+    mesh::cli::formatError(reply, reply_size, "use set bluetooth.stealth on|off");
     return false;
   }
 
 #if defined(RP2040_PLATFORM)
   if (strcmp(value, "on") == 0) {
-    snprintf(reply, reply_size, "Error: Bluetooth stealth is not supported on Pico W");
+    mesh::cli::formatError(reply, reply_size, "Bluetooth stealth is not supported on Pico W");
     return false;
   }
 #endif
@@ -7890,7 +8865,7 @@ bool MyMesh::applyAndSaveBluetoothStealth(const char* value, char* reply,
     _prefs.bluetooth_stealth_mode = previous_mode;
     _prefs.bluetooth_stealth_peer_type = previous_type;
     memcpy(_prefs.bluetooth_stealth_peer, previous_peer, sizeof(previous_peer));
-    snprintf(reply, reply_size, "Error: Bluetooth stealth save failed");
+    mesh::cli::formatError(reply, reply_size, "Bluetooth stealth save failed");
     return false;
   }
 
@@ -7933,14 +8908,14 @@ bool MyMesh::applyAndSaveEspNowChannel(const char* value, char* reply,
   if (reply == NULL || reply_size == 0) return false;
   uint8_t channel = 0;
   if (!mesh::wifi::parseEspNowChannel(value, channel)) {
-    snprintf(reply, reply_size, "Error: ESP-NOW channel must be 1-13");
+    mesh::cli::formatError(reply, reply_size, "ESP-NOW channel must be 1-13");
     return false;
   }
   // Snapshot the boot channel before writing NVS so even a CLI-only image
   // cannot reinterpret the newly-saved setting as active in this boot.
   const uint8_t active = mesh::wifi::activeEspNowChannel();
   if (!mesh::wifi::saveConfiguredEspNowChannel(channel)) {
-    snprintf(reply, reply_size, "Error: failed to save ESP-NOW channel");
+    mesh::cli::formatError(reply, reply_size, "failed to save ESP-NOW channel");
     return false;
   }
 
@@ -7964,12 +8939,12 @@ bool MyMesh::applyAndSavePowerSaving(const char* value, char* reply) {
   } else if (strcmp(value, "off") == 0) {
     enabled = false;
   } else {
-    strcpy(reply, "Error: use set powersaving on|off");
+    mesh::cli::formatError(reply, 160, "use set powersaving on|off");
     return false;
   }
 
   if (!savePreference(_prefs.powersaving_enabled, static_cast<uint8_t>(enabled))) {
-    strcpy(reply, "Error: power saving could not be saved");
+    mesh::cli::formatError(reply, 160, "power saving could not be saved");
     return false;
   }
   sensors.setPowerSavingEnabled(enabled);
@@ -8004,31 +8979,32 @@ bool MyMesh::applyAndSaveWiFiPowerSaving(const char* value, char* reply,
   } else if (value && strcmp(value, "max") == 0) {
     mode = mesh::wifi::kPowerSaveMax;
   } else {
-    snprintf(reply, reply_size,
-             "Error: power save must be none, min, or max");
+    mesh::cli::formatError(reply, reply_size, "power save must be none, min, or max");
     return false;
   }
 
   const CompanionWiFiPowerSaveResult result =
       setCompanionWiFiPowerSave(mode);
   if (result == CompanionWiFiPowerSaveResult::PrimaryEspNowConflict) {
-    snprintf(reply, reply_size,
-             "Error: power save max is unavailable while ESP-NOW is the primary radio");
+    mesh::cli::formatError(reply, reply_size, "power save max is unavailable while ESP-NOW is the primary radio");
     return false;
   }
   if (result == CompanionWiFiPowerSaveResult::BluetoothConflict) {
-    snprintf(reply, reply_size,
-             "Error: power save none is unavailable while Bluetooth is active");
+    mesh::cli::formatError(reply, reply_size, "power save none is unavailable while Bluetooth is active");
     return false;
   }
   if (result == CompanionWiFiPowerSaveResult::InvalidMode) {
-    snprintf(reply, reply_size,
-             "Error: power save must be none, min, or max");
+    mesh::cli::formatError(reply, reply_size, "power save must be none, min, or max");
     return false;
   }
   if (result == CompanionWiFiPowerSaveResult::StorageError) {
-    snprintf(reply, reply_size, "Error: failed to save WiFi power save");
+    mesh::cli::formatError(reply, reply_size, "failed to save WiFi power save");
     return false;
+  }
+  if (result == CompanionWiFiPowerSaveResult::SavedForNextBoot) {
+    snprintf(reply, reply_size,
+             "OK - power save none saved for wifi-only boot; reboot required (current mode unchanged)");
+    return true;
   }
 
   syncWiFiPowerSaving();
@@ -8042,9 +9018,59 @@ bool MyMesh::applyAndSaveWiFiPowerSaving(const char* value, char* reply,
 }
 #endif
 
+bool MyMesh::handleRxPowerSavingGetCommand(const char* command, char* reply,
+                                           size_t reply_size) const {
+  if (!command || !reply || reply_size == 0) return false;
+  const bool config = strcmp(command, "get radio.rxps.config") == 0;
+  if (!config && strcmp(command, "get radio.rxps") != 0) return false;
+  if (!radio_driver.supportsRxPowerSaving()) {
+    mesh::cli::formatError(reply, reply_size, "RX power saving is unsupported on this radio");
+    return true;
+  }
+
+  uint32_t rx_us = _prefs.rx_ps_rx_us;
+  uint32_t sleep_us = _prefs.rx_ps_sleep_us;
+  uint8_t effective_level = 0;
+  uint8_t effective_preamble = 0;
+  if (!config && _prefs.rx_ps_level != 0) {
+    uint8_t sf = _prefs.sf;
+    float bw = _prefs.bw;
+#if COMPANION_FEATURE_TEMP_RADIO
+    if (isTempRadioActive()) {
+      sf = _temp_radio_sf;
+      bw = _temp_radio_bw;
+    }
+#endif
+    // Calculate into locals only. A diagnostic must not change saved timings,
+    // apply radio parameters, or create a pending preference write.
+    recalcRxPowerSavingFromLevel(_prefs.rx_ps_level, sf, bw,
+        _prefs.rx_ps_preamble, &rx_us, &sleep_us,
+        &effective_level, &effective_preamble);
+  }
+  snprintf(reply, reply_size, "> %s,level=%u,preamble=%u,rx=%lu,sleep=%lu%s",
+           _prefs.rx_powersaving_enabled ? "on" : "off",
+           (unsigned)_prefs.rx_ps_level, (unsigned)_prefs.rx_ps_preamble,
+           (unsigned long)rx_us, (unsigned long)sleep_us,
+           !config && radio_driver.isRxPowerSavingContinuousFallback()
+               ? ",mode=continuous-fast" : "");
+  size_t used = strlen(reply);
+  if (!config && effective_level != 0 && effective_level != _prefs.rx_ps_level
+      && used < reply_size - 1) {
+    snprintf(reply + used, reply_size - used, ",effective-level=%u",
+             (unsigned)effective_level);
+  }
+  used = strlen(reply);
+  if (!config && effective_preamble != 0 && effective_preamble != _prefs.rx_ps_preamble
+      && used < reply_size - 1) {
+    snprintf(reply + used, reply_size - used, ",effective-preamble=%u",
+             (unsigned)effective_preamble);
+  }
+  return true;
+}
+
 bool MyMesh::applyAndSaveRxPowerSaving(const char* value, char* reply) {
   if (!radio_driver.supportsRxPowerSaving()) {
-    strcpy(reply, "Error: RX power saving unsupported");
+    mesh::cli::formatError(reply, 160, "RX power saving unsupported");
     return false;
   }
 
@@ -8058,7 +9084,7 @@ bool MyMesh::applyAndSaveRxPowerSaving(const char* value, char* reply) {
 
   mesh::cli::RxPowerSavingArguments parsed = {};
   if (!mesh::cli::parseRxPowerSavingArgumentsStrict(value, parsed)) {
-    strcpy(reply, "Error: use off, level 1-10, or RX/SLEEP microseconds");
+    mesh::cli::formatError(reply, 160, "use off, level 1-10, or RX/SLEEP microseconds");
     return false;
   }
 
@@ -8084,7 +9110,7 @@ bool MyMesh::applyAndSaveRxPowerSaving(const char* value, char* reply) {
     }
     if (parsed.preamble != 0
         && parsed.preamble != 16 && parsed.preamble != 32) {
-      strcpy(reply, "Error: level must be 1-10; preamble must be 16 or 32");
+      mesh::cli::formatError(reply, 160, "level must be 1-10; preamble must be 16 or 32");
       return false;
     }
     enabled = 1;
@@ -8114,7 +9140,7 @@ bool MyMesh::applyAndSaveRxPowerSaving(const char* value, char* reply) {
         || (preamble != 0 && preamble != 16 && preamble != 32)
         || !recalcRxPowerSavingFromLevel(level, _prefs.sf, _prefs.bw, preamble,
                                          &rx_us, &sleep_us)) {
-      strcpy(reply, "Error: level must be 1-10; preamble must be auto, 16, or 32");
+      mesh::cli::formatError(reply, 160, "level must be 1-10; preamble must be auto, 16, or 32");
       return false;
     }
   }
@@ -8129,7 +9155,7 @@ bool MyMesh::applyAndSaveRxPowerSaving(const char* value, char* reply) {
 
   if (_radio_available
       && !radio_driver.setRxPowerSaving(enabled != 0, rx_us, sleep_us)) {
-    strcpy(reply, "Error: radio busy; retry");
+    mesh::cli::formatError(reply, 160, "radio busy; retry");
     return false;
   }
 
@@ -8154,7 +9180,7 @@ bool MyMesh::applyAndSaveRxPowerSaving(const char* value, char* reply) {
       radio_apply_retry_at = 0;
       radio_apply_failures = 0;
     }
-    strcpy(reply, "Error: RX power saving could not be saved");
+    mesh::cli::formatError(reply, 160, "RX power saving could not be saved");
     return false;
   }
   snprintf(reply, 160, "OK - %s,%lu,%lu",
@@ -8210,6 +9236,13 @@ Stream& MyMesh::terminalOutput() {
 }
 
 void MyMesh::resetTerminalSession() {
+#if COMPANION_FEATURE_READER
+  mesh::cancelReaderCommand();
+#endif
+  _terminal_input_editing = false;
+  _morse_terminal_owner = nullptr;
+  _morse_terminal_pending_chars = 0;
+  _morse_terminal_was_receiving = false;
   _terminal_recipient_set = false;
   memset(_terminal_recipient_key, 0, sizeof(_terminal_recipient_key));
   clearTerminalLogin();
@@ -8221,6 +9254,81 @@ void MyMesh::resetTerminalSession() {
   // Binary Companion interface, but remove its old text-terminal ownership.
   for (int i = 0; i < EXPECTED_ACK_TABLE_SIZE; i++) {
     expected_ack_table[i].terminal_origin = false;
+  }
+}
+
+void MyMesh::serviceMorseTerminal() {
+  // Only an explicitly owned ASCII terminal receives spontaneous text.
+  // Never use terminalOutput()'s Serial fallback or append to BLE/USB frames.
+  if (!_radio || !hasTerminalOutput()) {
+    _morse_terminal_owner = nullptr;
+    _morse_terminal_pending_chars = 0;
+    _morse_terminal_was_receiving = false;
+    return;
+  }
+  // A temporarily silent/paused terminal still owns its cursor. Resuming
+  // must not replay the capture or reset a pending partial line.
+  if (!_terminal_morse_atomic || isTerminalWaitingForInput()
+      || _terminal_input_editing || _terminal_output->available() > 0
+      || _terminal_login_pending || _terminal_trace_pending
+      || _terminal_command.isPending()) return;
+#if COMPANION_FEATURE_READER
+  // A chapter cursor owns its entire logical output, including pauses under
+  // backpressure. Progress must not split a header, verse or final prompt.
+  if (mesh::readerCommandActive(_terminal_output)) return;
+#endif
+  // The existing USB facade owns all queued suffixes, including replies and
+  // echo. Never append progress in the middle of an earlier text producer.
+  if (_terminal_mode && _terminal_output == &mesh::usbTerminalPort()
+      && mesh::hasPendingUsbTerminalOutput()) return;
+  const bool receiving = _radio->isMorseRxActive();
+  const uint32_t generation = _radio->morseCaptureGeneration();
+  const size_t total = _radio->morseCaptureLength();
+  const uint32_t now = _ms->getMillis();
+  if (_morse_terminal_owner != _terminal_output || _morse_terminal_generation != generation) {
+    _morse_terminal_owner = _terminal_output;
+    _morse_terminal_generation = generation;
+    _morse_terminal_offset = receiving ? 0 : total;
+    _morse_terminal_pending_chars = 0;
+    _morse_terminal_was_receiving = receiving;
+    _morse_terminal_next_at = now;
+  }
+  if (receiving) _morse_terminal_was_receiving = true;
+  if (!_morse_terminal_was_receiving) return;
+  if (!_morse_terminal_pending_chars) {
+    if (_morse_terminal_offset >= total) {
+      if (!receiving) _morse_terminal_was_receiving = false;
+      return;
+    }
+    if (int32_t(now - _morse_terminal_next_at) < 0) return;
+    const size_t pending = total - _morse_terminal_offset;
+    _morse_terminal_pending_chars = pending < 48 ? pending : 48;
+  }
+  // Admit one complete record to an explicitly atomic stream. Its existing
+  // queue handles hardware short writes in chronological order with replies;
+  // Morse never retains an application-level suffix that can overtake input.
+  char text[49], line[80];
+  const size_t copied = _radio->readMorseCapture(_morse_terminal_offset, text,
+      size_t(_morse_terminal_pending_chars) + 1);
+  if (copied != _morse_terminal_pending_chars) {
+    _morse_terminal_pending_chars = 0;
+    return;
+  }
+  const int length = snprintf(line, sizeof(line), "\r\n[Morse RX] %s\r\n> ", text);
+  if (length <= 0 || size_t(length) >= sizeof(line)) return;
+  const int available = _terminal_output->availableForWrite();
+  if (available < length) return;
+  const size_t written = _terminal_output->write(
+      reinterpret_cast<const uint8_t*>(line), length);
+  if (written == size_t(length)) {
+    _morse_terminal_offset += _morse_terminal_pending_chars;
+    _morse_terminal_pending_chars = 0;
+    _morse_terminal_next_at = now + 250;
+  } else if (written) {
+    // A stream that violates its atomic admission contract is no longer safe
+    // for unsolicited progress. Keep the full capture available via CLI.
+    _terminal_morse_atomic = false;
+    _morse_terminal_pending_chars = 0;
   }
 }
 
@@ -8247,6 +9355,12 @@ void MyMesh::enterTerminalMode(bool show_banner) {
   _terminal_mode = true;
   _terminal_usb_silent = !show_banner;
   _terminal_output = &mesh::usbTerminalPort();
+#if MESH_ESP32_TINYUSB_NONBLOCKING \
+    || (defined(NRF52_PLATFORM) && (defined(ENABLE_USB_INTERFACE) || defined(USE_TINYUSB)))
+  _terminal_morse_atomic = true;
+#else
+  _terminal_morse_atomic = false;
+#endif
   resetTerminalSession();
   if (show_banner) printTerminalBanner(true);
 }
@@ -8254,14 +9368,16 @@ void MyMesh::enterTerminalMode(bool show_banner) {
 void MyMesh::exitTerminalMode() {
   _terminal_mode = false;
   _terminal_usb_silent = false;
+  _terminal_morse_atomic = false;
   resetTerminalSession();
   if (_terminal_output == &mesh::usbTerminalPort()) _terminal_output = NULL;
 }
 
 #if COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG)
-bool MyMesh::enterNetworkTerminalMode(Stream& output) {
+bool MyMesh::enterNetworkTerminalMode(Stream& output, bool atomic_output) {
   if (_terminal_mode || (_terminal_output != NULL && _terminal_output != &output)) return false;
   _terminal_output = &output;
+  _terminal_morse_atomic = atomic_output;
   resetTerminalSession();
   printTerminalBanner(false);
   return true;
@@ -8270,6 +9386,7 @@ bool MyMesh::enterNetworkTerminalMode(Stream& output) {
 void MyMesh::exitNetworkTerminalMode(Stream& output) {
   if (_terminal_mode || _terminal_output != &output) return;
   resetTerminalSession();
+  _terminal_morse_atomic = false;
   _terminal_output = NULL;
 }
 
@@ -8486,6 +9603,21 @@ void MyMesh::handleTerminalDisplayCommand(const char* arguments) {
 
 void MyMesh::sendTerminalChannelMessage(ChannelDetails& channel,
                                         const char* text) {
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (isMeshtextChannel(channel)) {
+    if (text && sendMeshtextText(channel, text, strlen(text))) {
+      terminalOutput().printf("  Queued to %s (Meshtext).\r\n", channel.name);
+    } else {
+      terminalOutput().printf("  ERROR: %s; use get mt.status\r\n", _mt_status);
+    }
+    return;
+  }
+#endif
+  if (isAliasRadio2Defined()
+      && parseCompanionChannelAlias(channel.name).kind == CompanionChannelKind::Meshtext) {
+    terminalOutput().print("  ERROR: Meshtext channel transport is not available\r\n");
+    return;
+  }
   const size_t prefix_len = strlen(_prefs.node_name) + 2;  // "name: "
   const size_t max_text_len = prefix_len < MAX_TEXT_LEN
       ? MAX_TEXT_LEN - prefix_len : 0;
@@ -8751,8 +9883,15 @@ void MyMesh::sendTerminalTraceRoute(const uint8_t* route, uint8_t hash_size,
     return;
   }
 
-  const uint32_t airtime = _radio->getEstAirtimeFor(9 + route_byte_len + 2);
+  mesh::Packet* packet = createTrace(0, 0, flags);
+  if (packet == NULL) {
+    terminalOutput().print("  ERROR: unable to allocate trace packet\r\n");
+    return;
+  }
+  const uint32_t airtime =
+      getTransmitAirtime(packet, 2 + packet->payload_len + route_byte_len);
   if (airtime == 0) {
+    releasePacket(packet);
     terminalOutput().print("  ERROR: unable to estimate trace timeout\r\n");
     return;
   }
@@ -8763,6 +9902,7 @@ void MyMesh::sendTerminalTraceRoute(const uint8_t* route, uint8_t hash_size,
                                                  trace_timeout)
       || trace_timeout > 0x7FFFFFFFU
           - mesh::CompanionDelayedReplies::DELIVERY_GRACE_MS) {
+    releasePacket(packet);
     terminalOutput().print("  ERROR: trace timeout is out of range\r\n");
     return;
   }
@@ -8771,18 +9911,14 @@ void MyMesh::sendTerminalTraceRoute(const uint8_t* route, uint8_t hash_size,
   uint32_t auth = 0;
   getRNG()->random((uint8_t*)&tag, sizeof(tag));
   getRNG()->random((uint8_t*)&auth, sizeof(auth));
+  memcpy(packet->payload, &tag, sizeof(tag));
+  memcpy(&packet->payload[4], &auth, sizeof(auth));
   const uint8_t history = _delayed_replies.reserveTrace(tag, auth, _ms->getMillis());
   if (history == mesh::CompanionDelayedReplies::NO_HISTORY) {
+    releasePacket(packet);
     terminalOutput().print("  ERROR: trace tag is quarantined or reply history is full\r\n");
     return;
   }
-  mesh::Packet* packet = createTrace(tag, auth, flags);
-  if (packet == NULL) {
-    _delayed_replies.abandonTrace(history);
-    terminalOutput().print("  ERROR: unable to allocate trace packet\r\n");
-    return;
-  }
-
   if (!sendDirect(packet, route, static_cast<uint8_t>(route_byte_len))) {
     _delayed_replies.abandonTrace(history);
     terminalOutput().print("  ERROR: unable to send trace\r\n");
@@ -8864,18 +10000,39 @@ void MyMesh::sendTerminalRawTrace(const char* arguments) {
                          target);
 }
 
-void MyMesh::handleTerminalCommand(char* command) {
+#if defined(WITH_WEBCONFIG) && COMPANION_FEATURE_READER
+bool MyMesh::streamTerminalBusy() const {
+  return mesh::readerCommandActive(_terminal_output);
+}
+#endif
+
+void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
+                                   mesh::ReaderTryWrite reader_try_write) {
   while (*command == ' ' || *command == '\t') command++;
   if (*command == 0) return;
   mesh::cli::normalizeCommandVerb(command);
 
 #if COMPANION_FEATURE_READER
-  if (mesh::handleReaderCommand(command, terminalOutput())) return;
+  if (mesh::morseTimingActive(_radio) && isCompanionReaderRequest(command)) {
+    mesh::cancelReaderCommand();
+    terminalOutput().print("  ERROR: Reader unavailable during Morse\r\n");
+    return;
+  }
+  if (mesh::handleReaderCommand(command, terminalOutput(), reader_prompt,
+                                reader_try_write)) return;
 #endif
 
   // Match the repeater ASCII reply envelope so unmodified serial packet
   // bridges can query this role. Framed/BLE replies retain their payloads.
   char local_reply[160];
+  if (handleRxPowerSavingGetCommand(command, local_reply, sizeof(local_reply))) {
+    if (local_reply[0] == '>') {
+      terminalOutput().printf("  %s %s\r\n", command + 4, local_reply + 2);
+    } else {
+      terminalOutput().printf("  ERROR: %s\r\n", local_reply + 7);
+    }
+    return;
+  }
   if (handleCompanionWirelessCommand(command, local_reply, sizeof(local_reply),
                                      _terminal_mode ? CompanionWirelessSource::Usb : CompanionWirelessSource::Network)
       || handleCompanionBluetoothCommand(command, local_reply, sizeof(local_reply),
@@ -9135,66 +10292,6 @@ void MyMesh::handleTerminalCommand(char* command) {
     char reply[160];
     applyAndSavePowerSaving(command + 12, reply);
     terminalOutput().printf("  -> %s\r\n", reply);
-  } else if (strcmp(command, "get radio.rxps.config") == 0) {
-    if (!radio_driver.supportsRxPowerSaving()) {
-      terminalOutput().print("  ERROR: RX power saving is unsupported on this radio\r\n");
-    } else {
-      terminalOutput().printf(
-          "  radio.rxps.config %s,level=%u,preamble=%u,rx=%lu,sleep=%lu\r\n",
-          _prefs.rx_powersaving_enabled ? "on" : "off",
-          (unsigned)_prefs.rx_ps_level,
-          (unsigned)_prefs.rx_ps_preamble,
-          (unsigned long)_prefs.rx_ps_rx_us,
-          (unsigned long)_prefs.rx_ps_sleep_us);
-    }
-  } else if (strcmp(command, "get radio.rxps") == 0) {
-    if (!radio_driver.supportsRxPowerSaving()) {
-      terminalOutput().print("  ERROR: RX power saving is unsupported on this radio\r\n");
-    } else {
-      uint8_t effective_level = 0;
-      uint8_t effective_preamble = 0;
-      uint32_t effective_rx_us = _prefs.rx_ps_rx_us;
-      uint32_t effective_sleep_us = _prefs.rx_ps_sleep_us;
-      uint8_t active_sf = _prefs.sf;
-      float active_bw = _prefs.bw;
-#if COMPANION_FEATURE_TEMP_RADIO
-      if (isTempRadioActive()) {
-        active_sf = _temp_radio_sf;
-        active_bw = _temp_radio_bw;
-      }
-#endif
-      if (_prefs.rx_ps_level != 0) {
-        recalcRxPowerSavingFromLevel(
-            _prefs.rx_ps_level, active_sf, active_bw,
-            _prefs.rx_ps_preamble, &effective_rx_us, &effective_sleep_us,
-            &effective_level, &effective_preamble);
-      }
-      char effective_suffix[48] = {};
-      const bool adjusted_level = effective_level != 0
-          && effective_level != _prefs.rx_ps_level;
-      const bool adjusted_preamble = effective_preamble != 0
-          && effective_preamble != _prefs.rx_ps_preamble;
-      if (adjusted_level && adjusted_preamble) {
-        snprintf(effective_suffix, sizeof(effective_suffix),
-                 ",effective-level=%u,effective-preamble=%u",
-                 (unsigned)effective_level, (unsigned)effective_preamble);
-      } else if (adjusted_level) {
-        snprintf(effective_suffix, sizeof(effective_suffix),
-                 ",effective-level=%u", (unsigned)effective_level);
-      } else if (adjusted_preamble) {
-        snprintf(effective_suffix, sizeof(effective_suffix),
-                 ",effective-preamble=%u", (unsigned)effective_preamble);
-      }
-      terminalOutput().printf("  radio.rxps %s,level=%u,preamble=%u,rx=%lu,sleep=%lu%s%s\r\n",
-                    _prefs.rx_powersaving_enabled ? "on" : "off",
-                    (unsigned)_prefs.rx_ps_level,
-                    (unsigned)_prefs.rx_ps_preamble,
-                    (unsigned long)effective_rx_us,
-                    (unsigned long)effective_sleep_us,
-                    radio_driver.isRxPowerSavingContinuousFallback()
-                        ? ",mode=continuous-fast" : "",
-                    effective_suffix);
-    }
 #if defined(ESP32) && defined(WIFI_SSID)
   } else if (strcmp(command, "get wifi.powersave") == 0) {
     char reply[160];
@@ -9303,6 +10400,8 @@ void MyMesh::handleTerminalCommand(char* command) {
       while (*value == ' ' || *value == '\t') value++;
       if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
         terminalOutput().print("  ERROR: use set radio.fem.rxgain <on|off>\r\n");
+      } else if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) {
+        terminalOutput().print("  ERROR: stop Morse before changing LoRa FEM gain\r\n");
       } else if (!board.canControlLoRaFemLna()) {
         terminalOutput().print("  ERROR: FEM RX gain control is unsupported on this board\r\n");
       } else if (!applyAndSaveFemRxGain(strcmp(value, "on") == 0)) {
@@ -9317,6 +10416,8 @@ void MyMesh::handleTerminalCommand(char* command) {
       while (*value == ' ' || *value == '\t') value++;
       if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
         terminalOutput().print("  ERROR: use set radio.fem.txgain <on|off>\r\n");
+      } else if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) {
+        terminalOutput().print("  ERROR: stop Morse before changing LoRa FEM gain\r\n");
       } else if (!board.canControlLoRaFemPaGain()) {
         terminalOutput().print(board.isLoRaFemPaGainEnabled()
             ? "  ERROR: TX PA is fixed on; use set tx to adjust power\r\n"
@@ -9342,6 +10443,7 @@ void MyMesh::handleTerminalCommand(char* command) {
   } else if (strcmp(command, "reboot") == 0) {
     terminalOutput().print("  OK - rebooting in 1 second\r\n");
     _scheduled_reboot_at = futureMillis(1000);
+    if (_scheduled_reboot_at == 0) _scheduled_reboot_at = 1;
 #if defined(NRF52_PLATFORM) && defined(EXTRAFS) && !defined(QSPIFLASH)
   } else if (strcmp(command, "repair extrafs") == 0) {
     repairInternalExtraFS(terminalOutput());
@@ -9352,158 +10454,25 @@ void MyMesh::handleTerminalCommand(char* command) {
     terminalOutput().printf("  -> Companion %s (protocol %u, build %s)\r\n",
                   FIRMWARE_VERSION, (unsigned)FIRMWARE_VER_CODE, FIRMWARE_BUILD_DATE);
   } else if (strcmp(command, "help") == 0) {
-    terminalOutput().print(
-        "Commands:\r\n"
-        "  stats-core / stats-radio / stats-radio-diag / stats-packets\r\n"
-        "  get prv.key (when private key export is enabled)\r\n"
-        "  get password (this role has no admin password)\r\n"
-        "  erase (erase stored settings and identity)\r\n");
-    terminalOutput().print("  board\r\n");
-    terminalOutput().print("  version\r\n");
-    terminalOutput().print("  get storage.layout\r\n");
-#if defined(NRF52_PLATFORM) && defined(EXTRAFS) && !defined(QSPIFLASH)
-    terminalOutput().print("  get flash.health\r\n");
-#endif
-#if COMPANION_FEATURE_READER
-    terminalOutput().print("  get reader <chapter>:<verse> (World English Bible, offline)\r\n");
-#endif
-    terminalOutput().print("  get pwrmgt.bootreason\r\n");
-#if COMPANION_FEATURE_MEMORY_DIAGNOSTICS
-    terminalOutput().print("  memory\r\n");
-#endif
-    terminalOutput().print("  get display.rotation\r\n");
-  #if COMPANION_FEATURE_NOTIFICATIONS
-    terminalOutput().print("  get notify / get notify.rules / get notify.gpio.pins\r\n");
-    terminalOutput().print("  set notify.{sound|vibration|led|screen|gpio} on|off\r\n");
-    terminalOutput().print("  set notify.<output> <all|contact:key|room:key|channel:slot> <pattern>\r\n");
-    terminalOutput().print("  set notify.remote <contact:key|room:key> on|off (!notify, max 15s, no GPIO)\r\n");
-    terminalOutput().print("  notify.test <target> / notify.stop / notify.delete <target>\r\n");
-  #endif
-    terminalOutput().print(
-        "  get display.inbox\r\n"
-        "  set display.inbox <history|pending|unread>\r\n"
-        "  set display.rotation <0|90|180|270>\r\n"
-        "  get display.touch\r\n"
-        "  set display.touch <on|off> (this boot only)\r\n");
-    terminalOutput().print("  get public.key\r\n");
-    terminalOutput().print(
-        "  set {name|lat|lon|freq|tx|af} {value}\r\n"
-        "  get wifi|espnow|2.4ghz\r\n"
-        "  set wifi|espnow on|off [force] (force only with off)\r\n"
-        "  set 2.4ghz on [all|force]|off [force] (this boot)\r\n"
-        "  get bluetooth.name\r\n"
-        "  set bluetooth.name <name|default>\r\n");
-#if defined(BLE_PIN_CODE)
-    terminalOutput().print("  get bluetooth (alias: get ble)\r\n");
-    terminalOutput().print("  set bluetooth <on|off> [force] (saved; force only with off)\r\n");
-    terminalOutput().print("  get bluetooth.mac\r\n");
-    terminalOutput().print(
-        "  set bluetooth.mac <address|random|random-every-boot|random-after-connect|default>\r\n");
-    terminalOutput().print("  get bluetooth.stealth\r\n");
-    terminalOutput().print("  set bluetooth.stealth on|off\r\n");
-#endif
-    terminalOutput().print("  set pin <0-999999>\r\n");
-    terminalOutput().print("  powersaving [on|off]\r\n");
-#if MESH_USB_LOGGING_AVAILABLE
-    terminalOutput().print(
-        "  get usb.logging\r\n"
-        "  set usb.logging <on|off|stream> [reboot]\r\n"
-        "  get usb.debug\r\n"
-        "  set usb.debug <on|off>\r\n"
-#if MESH_USB_CONSOLE_COOPERATIVE
-        "  get usb.watchdog\r\n"
-        "  get usb.watchdog.last\r\n"
-        "  set usb.watchdog <off|on|auto> (saved; default auto)\r\n"
-#endif
-        );
-#endif
-#if defined(ESP32) && defined(WIFI_SSID)
-#if defined(COMPANION_RADIO_FULL)
-    terminalOutput().print("  start ota [ap] (WiFi firmware update on port 8080)\r\n");
-    terminalOutput().print("  stop ota\r\n");
-#endif
-#if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
-    terminalOutput().print("  get companion.transport\r\n");
-    terminalOutput().print("  set companion.transport <wifi|ble>\r\n");
-#endif
-    terminalOutput().print("  get wifi.powersave\r\n");
-    terminalOutput().print("  set wifi.powersave <none|min|max>\r\n");
-#ifdef WITH_WEBCONFIG
-    terminalOutput().print("  get wifi.{ssid|pwd|status}\r\n");
-    terminalOutput().print("  set wifi.ssid <network name>\r\n");
-    terminalOutput().print("  set wifi.pwd <password>\r\n");
-    terminalOutput().print("  get webui\r\n");
-    terminalOutput().print("  set webui <on|off>\r\n");
-    terminalOutput().print("  start webconfig [ap]\r\n");
-    terminalOutput().print("  stop webconfig\r\n");
-#endif
-#endif
-#if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
-    terminalOutput().print("  get espnow.channel\r\n");
-    terminalOutput().print("  set espnow.channel <1-13>\r\n");
-#endif
-    // Keep identical help text in bounded chunks. Fewer virtual Print calls
-    // leave room for USB controls on small-flash boards without cutting CLI.
-    terminalOutput().print(
-        "  get radio.rxps\r\n"
-        "  get radio.rxps.config\r\n"
-        "  set radio.rxps <off|on|level 1-10 [preamble 16|32]|rx_us sleep_us>\r\n"
-        "  get radio.cad\r\n"
-        "  set radio.cad <on|off>\r\n"
-        "  set radio.cad timings <scan_ms|auto> <retry_ms|auto> <max_ms|auto>\r\n");
-    terminalOutput().print(
-        "  get radio.rxgain\r\n"
-        "  set radio.rxgain <on|off>\r\n"
-        "  get radio.fem.rxgain\r\n"
-        "  set radio.fem.rxgain <on|off>\r\n"
-        "  get radio.fem.txgain\r\n"
-        "  set radio.fem.txgain <on|off>\r\n");
-    terminalOutput().print(
-        "  get/set flood.retry.count <0-15>\r\n"
-        "  get/set flood.retry.path <0-63|off>\r\n"
-        "  get/set flood.retry.group.path <0-63|off>\r\n"
-        "  get/set flood.retry.advert <on|off>\r\n"
-        "  card\r\n"
-        "  import <meshcore://card>\r\n"
-        "  clock\r\n"
-        "  time <epoch-seconds>\r\n");
-    terminalOutput().print(
-        "  list [n]\r\n"
-        "  show [adverts|channels|emergency] [on|off]\r\n"
-        "  to [recipient name or prefix]\r\n"
-        "  path [direct|clear|hops separated by spaces or commas]\r\n"
-        "  send <text>\r\n"
-        "  login <admin-password>\r\n"
-        "  cmd <remote-command>\r\n");
-    terminalOutput().print(
-        "  trace [recipient name or prefix]\r\n"
-        "  trace path <1|2|4> <prefixes...>\r\n"
-        "  advert\r\n"
-        "  reset path\r\n"
-        "  public <text>\r\n"
-        "  channels\r\n"
-        "  channel <name-or-slot> <text>\r\n");
-#if defined(NRF52_PLATFORM) && defined(EXTRAFS) && !defined(QSPIFLASH)
-    terminalOutput().print("  repair extrafs (erases/rebuilds internal ExtraFS)\r\n");
-    terminalOutput().print("  scan extrafs erase (USB only; reboot for destructive page test)\r\n");
-#endif
-#if COMPANION_FEATURE_TEMP_RADIO || COMPANION_FEATURE_OTA_CLI
-#if COMPANION_FEATURE_TEMP_RADIO
-    terminalOutput().print("  tempradio [freq,bw,sf,cr,minutes]\r\n");
-    terminalOutput().print("  normalradio\r\n");
-#endif
-#if COMPANION_FEATURE_OTA_CLI
-    terminalOutput().print("  ota {status|ls|announce|folder|config|...}\r\n");
-#endif
-#endif
-    terminalOutput().print("  reboot\r\n" "  ver\r\n");
-#if defined(NRF52_PLATFORM)
-    terminalOutput().println("  uf2reset");
+    auto& output = terminalOutput();
+#if defined(RAK_4631) && defined(COMPANION_RADIO_FULL) \
+    || (defined(STM32_PLATFORM) && defined(STM32WLxx) && COMPANION_FEATURE_TEXT_TERMINAL)
+    mesh::companion::writePackedCompanionHelp(output);
+#else
+#define MESH_COMPANION_HELP_BEGIN output.print(
+#define MESH_COMPANION_HELP_END );
+#define MESH_COMPANION_HELP_LINE_BEGIN output.println(
+#define MESH_COMPANION_HELP_LINE_END );
+#include "CompanionHelp.inc"
+#undef MESH_COMPANION_HELP_BEGIN
+#undef MESH_COMPANION_HELP_END
+#undef MESH_COMPANION_HELP_LINE_BEGIN
+#undef MESH_COMPANION_HELP_LINE_END
 #endif
     if (_terminal_mode) {
-      terminalOutput().print("  +++MESHCORE-TERM-STOP\r\n");
+      output.print("  +++MESHCORE-TERM-STOP\r\n");
     } else {
-      terminalOutput().print("  disconnect (closes the network terminal)\r\n");
+      output.print("  disconnect (network terminal)\r\n");
     }
   } else if (handleCommand(command, 0, local_reply)) {
     // Fill the same safe shared-command surface for getters (`get name`,
@@ -9517,8 +10486,12 @@ void MyMesh::handleTerminalCommand(char* command) {
 #endif
 
 void MyMesh::enterCLIRescue() {
+#if COMPANION_FEATURE_READER
+  mesh::cancelReaderCommand();
+#endif
   _cli_rescue = true;
   cli_command[0] = 0;
+  _cli_line_overflow = false;
   mesh::usbTerminalPort().println("========= CLI Rescue =========");
 }
 
@@ -9528,7 +10501,8 @@ static bool isCompanionRadioPrefsCommand(const char* command) {
   static const char* const exact_commands[] = {
     "get radio", "get freq", "get af", "get dutycycle", "get tx",
     "get rxdelay", "get path.hash.mode", "get multi.acks",
-    "get txdelay", "get direct.txdelay", "get int.thresh", "get agc.reset.interval"
+    "get txdelay", "get direct.txdelay", "get int.thresh", "get agc.reset.interval",
+    "get radio.rxps.status"
   };
   for (const char* candidate : exact_commands) {
     if (strcmp(command, candidate) == 0) return true;
@@ -9548,12 +10522,21 @@ static bool isCompanionRadioPrefsCommand(const char* command) {
 // Called only for directly attached USB/BLE/TCP/browser clients. Commands
 // received over LoRa use handleCommand() with a nonzero sender timestamp.
 bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_size) {
+  if (mesh::power::handleStoredBatteryCalibrationCommand(
+          board, command, reply, reply_size)) return true;
+#if MESH_ENABLE_LOST_REPLY
+  if (mesh::companion::handleLostReplyCommand(
+          _prefs, command, reply, reply_size, [this]() { return savePrefs(); })) return true;
+#endif
 #ifdef MESH_BUTTON_AUDIO_HIL
   // Present only in an explicitly instrumented physical-test build.
   if (_ui && _ui->handleButtonAudioTest(command, reply, reply_size)) return true;
 #endif
 #if defined(MESH_SOAK_DIAGNOSTICS)
   if (mesh::hil::handleSoakCommand(command, reply, reply_size)) return true;
+#endif
+#if defined(ESP32_PLATFORM) && defined(MESH_HIL_RADIO_TRACE) && MESH_HIL_RADIO_TRACE
+  if (mesh::radiotrace::handleTraceCommand(command, reply, reply_size)) return true;
 #endif
 #if MESH_ENABLE_ONE_KEY_DM
   if (strcmp(command, "get dm.one_key") == 0) {
@@ -9567,14 +10550,14 @@ bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_
   if (strncmp(command, "set dm.one_key ", 15) == 0) {
     const char* value = command + 15;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      snprintf(reply, reply_size, "Error: use on or off");
+      mesh::cli::formatError(reply, reply_size, "use on or off");
       return true;
     }
     const uint8_t old_value = _prefs.one_key_dm_enabled;
     _prefs.one_key_dm_enabled = strcmp(value, "on") == 0 ? 1 : 0;
     if (!savePrefs()) {
       _prefs.one_key_dm_enabled = old_value;
-      snprintf(reply, reply_size, "Error: could not save DM setting");
+      mesh::cli::formatError(reply, reply_size, "could not save DM setting");
     } else {
       snprintf(reply, reply_size, "> dm.one_key %s", value);
     }
@@ -9583,7 +10566,7 @@ bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_
 #else
   if (strcmp(command, "get dm.one_key") == 0 || strcmp(command, "get dm.held") == 0 ||
       strncmp(command, "set dm.one_key ", 15) == 0) {
-    snprintf(reply, reply_size, "Error: one-key DMs unsupported on this build");
+    mesh::cli::formatError(reply, reply_size, "one-key DMs unsupported on this build");
     return true;
   }
 #endif
@@ -9592,7 +10575,15 @@ bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_
     return true;
   }
   if (strcmp(command, "get password") == 0) {
+#if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
+    // Binary Companion and its legacy TCP transports have no admin-login
+    // handshake. Report status there, never disclose the management secret.
+    snprintf(reply, reply_size, _management_password_ready
+        ? "> (management password set; use password <new-password> to change)"
+        : "Error: management password unavailable; set password on USB");
+#else
     snprintf(reply, reply_size, "> (no admin password on Companion)");
+#endif
     return true;
   }
   if (strcmp(command, "get prv.key") == 0) {
@@ -9605,15 +10596,30 @@ bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_
     memset(key, 0, sizeof(key));
     memset(hex, 0, sizeof(hex));
 #else
-    snprintf(reply, reply_size, "Error: private key export disabled in this build");
+    mesh::cli::formatError(reply, reply_size, "private key export disabled in this build");
 #endif
     return true;
   }
   if (strcmp(command, "erase") == 0) {
+#if MESH_ENABLE_TX_BEACONS
+    suspendBeacons();
+#endif
     if (_store->formatFileSystem()) {
       stopContactsIterator();
       resetContacts();
-      mesh::resetLazyPersistenceAfterSuccess(dirty_contacts_expiry, dirty_contacts_failures);
+      MyMesh::onContactCacheFlushed();
+#if MESH_ENABLE_ETHERNET_TUNNEL
+      if (!eraseEthernetSettings()) {
+        snprintf(reply, reply_size, "File system erased; Error: Ethernet settings erase failed");
+        return true;
+      }
+#endif
+#if MESH_ENABLE_MESHTEXT_CHAT
+      if (!eraseMeshtextSettings()) {
+        snprintf(reply, reply_size, "File system erased; Error: MT settings erase failed");
+        return true;
+      }
+#endif
       snprintf(reply, reply_size, "File system erase: OK");
     } else {
       snprintf(reply, reply_size, "File system erase: Err");
@@ -9689,11 +10695,34 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
     while (*command == ' ' || *command == '\t') command++;
   }
 
+#if defined(ESP32_PLATFORM)
+  // Catch remote requests before the direct-transport router below. That
+  // router is also used by USB/BLE/browser commands without a timestamp.
+  if (mesh::esp32::handlePowerTestCommand(command, reply, reply_capacity,
+                                         sender_timestamp == 0)) return true;
+#endif
+  if (mesh::power::handleRegulatorCommand(command, reply, reply_capacity)) return true;
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  if (handleCompactLedCommand(command, reply, reply_capacity)) return true;
+#else
+  if (mesh::leds::handleCommand(command, reply, reply_capacity)) return true;
+#endif
+#if defined(PIN_BUZZER) || defined(PIN_VIBRATION) || defined(HAS_DRV2605)
+  if (handleAlertCommand(command, reply, reply_capacity)) return true;
+#endif
+
 #if COMPANION_FEATURE_READER
+  if (sender_timestamp == 0 && mesh::morseTimingActive(_radio)
+      && isCompanionReaderRequest(command)) {
+    mesh::cli::formatError(reply, reply_capacity, "Reader unavailable during Morse");
+    return true;
+  }
   if (sender_timestamp == 0
       && mesh::handleReaderReply(command, reply, reply_capacity)) return true;
 #endif
 
+  if (mesh::power::handleStoredBatteryCalibrationCommand(
+          board, command, reply, reply_capacity)) return true;
 #if defined(NRF52_POWER_MANAGEMENT)
   if (mesh::power::handleVoltagePolicyCommand(command, reply,
                                                reply_capacity)) return true;
@@ -9704,6 +10733,105 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
       && meshBleTraceCommand(command, reply, reply_capacity)) return true;
 #endif
 
+#if MESH_ENABLE_FLEET_CONTROL
+  if (!strncmp(command, "fleet", 5)
+      && (command[5] == 0 || command[5] == ' ' || command[5] == '\t')) {
+    // Only the attached Companion client can originate multicast management.
+    // A remote CLI peer must not borrow this Companion's signing identity.
+    if (sender_timestamp != 0) {
+      mesh::cli::formatError(reply, reply_capacity, "fleet send requires local Companion access");
+      return true;
+    }
+    const char* text = command + 5;
+    while (*text == ' ' || *text == '\t') ++text;
+    if (strncmp(text, "send", 4)
+        || (text[4] != ' ' && text[4] != '\t')) {
+      mesh::cli::formatError(reply, reply_capacity, "use fleet send <channel> [all|key|region:name|home:name|gps:lat,lon:km[;target...]] <command>");
+      return true;
+    }
+    text += 4;
+    while (*text == ' ' || *text == '\t') ++text;
+    uint32_t channel_index = 0;
+    bool have_index = false;
+    while (*text >= '0' && *text <= '9') {
+      have_index = true;
+      const uint8_t digit = *text++ - '0';
+      if (channel_index > (0xFFFFFFFFUL - digit) / 10UL) {
+        mesh::cli::formatError(reply, reply_capacity, "invalid fleet channel index");
+        return true;
+      }
+      channel_index = channel_index * 10UL + digit;
+    }
+    if (!have_index || channel_index >= MAX_GROUP_CHANNELS
+        || (*text != ' ' && *text != '\t')) {
+      mesh::cli::formatError(reply, reply_capacity, "invalid fleet channel index");
+      return true;
+    }
+    while (*text == ' ' || *text == '\t') ++text;
+    mesh::FleetCommand::Targets targets{};  // No target means the whole fleet.
+    // Only a complete permitted command can omit its target. An invalid key
+    // or list must never silently broaden a request to the whole fleet.
+    if (!mesh::FleetCommand::commandAllowed(text)) {
+      const size_t target_length = strcspn(text, " \t");
+      // A target list is one signed request; never admit a partial list.
+      if (text[target_length] == 0
+          || !mesh::FleetCommand::parseTargets(text, target_length, targets)) {
+        mesh::cli::formatError(reply, reply_capacity, "targets: all, 8/12/64-hex keys, region names, home:name or gps:lat,lon:km; semicolon-separated");
+        return true;
+      }
+      text += target_length;
+      while (*text == ' ' || *text == '\t') ++text;
+    }
+    if (!mesh::FleetCommand::commandAllowed(text)) {
+      mesh::cli::formatError(reply, reply_capacity, "command is not permitted for fleet management");
+      return true;
+    }
+    ChannelDetails channel;
+    if (!getChannel((int)channel_index, channel) || !channel.name[0]) {
+      mesh::cli::formatError(reply, reply_capacity, "fleet channel is not configured");
+      return true;
+    }
+    bool padded_key = true;
+    for (size_t i = mesh::FleetCommand::KeySize;
+         i < sizeof(channel.channel.secret); ++i)
+      padded_key = padded_key && channel.channel.secret[i] == 0;
+    if (!padded_key || !mesh::FleetCommand::privateKeyAllowed(channel.channel.secret)) {
+      mesh::cli::formatError(reply, reply_capacity, "fleet requires a private 128-bit channel key");
+      return true;
+    }
+    const uint32_t sequence = getRTCClock()->getCurrentTime();
+    static uint32_t last_fleet_sequence = 0;
+    if (sequence < mesh::FleetCommand::MinEpoch
+        || sequence > 0xFFFFFFFFUL - mesh::FleetCommand::MaxLifetime) {
+      mesh::cli::formatError(reply, reply_capacity, "set the Companion clock before fleet send");
+      return true;
+    }
+    if (sequence <= last_fleet_sequence) {
+      mesh::cli::formatError(reply, reply_capacity, "wait for the next clock second before fleet send");
+      return true;
+    }
+    uint8_t payload[mesh::FleetCommand::MaxEnvelopeLength];
+    const size_t length = mesh::FleetCommand::encode(
+        self_id, channel.channel.secret, sequence,
+        sequence + mesh::FleetCommand::MaxLifetime, targets, text,
+        payload, sizeof(payload));
+    if (!length) {
+      mesh::cli::formatError(reply, reply_capacity, "fleet targets and command exceed two packets; use fewer targets");
+    } else if (!sendFleetCommandData(channel.channel, payload, length)) {
+      mesh::cli::formatError(reply, reply_capacity, "could not queue fleet command");
+    } else {
+      last_fleet_sequence = sequence;
+      snprintf(reply, reply_capacity, "OK - fleet command queued; seq=%lu",
+               (unsigned long)sequence);
+    }
+    memset(payload, 0, sizeof(payload));
+    return true;
+  }
+
+#endif
+  if (mesh::handleMorseReplyCommand(_morse_reply, _radio, command, reply,
+                                    reply_capacity, millis())) return true;
+  if (mesh::handleMorseCommand(_radio, command, reply, reply_capacity)) return true;
   if (_radio_profiles.handle(command, reply, reply_capacity, sender_timestamp != 0)) return true;
   if (!strncmp(command, "set tempradio ", 14)) command += 4;
   if (!strcmp(command, "get tempradio")) command += 4;
@@ -9716,10 +10844,10 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
     float f, bw; uint8_t sf, cr;
     if (!mesh::RadioProfileCLI::parseSuffix(command + 10, 4, legacy, sizeof(legacy), preamble)
         || !mesh::cli::parseRadioTupleStrict(legacy, f, bw, sf, cr)) {
-      snprintf(reply, reply_capacity, "Error: invalid radio params"); return true;
+      mesh::cli::formatError(reply, reply_capacity, "invalid radio params"); return true;
     }
     if (!_radio_profiles.acceptsPrimary(f, bw, sf, cr, preamble)) {
-      snprintf(reply, reply_capacity, "Error: radio params unsupported"); return true;
+      mesh::cli::formatError(reply, reply_capacity, "radio params unsupported"); return true;
     }
     requested_primary_preamble = preamble;
     snprintf(profile_command, sizeof(profile_command), "set radio %s", legacy);
@@ -9752,7 +10880,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
     float frequency;
     if (!mesh::cli::parseDecimalStrict(command + 9, frequency)
         || frequency < 150.0f || frequency > 2500.0f) {
-      snprintf(reply, reply_capacity, "Error: frequency must be 150-2500 MHz");
+      mesh::cli::formatError(reply, reply_capacity, "frequency must be 150-2500 MHz");
     } else {
       const float previous = _prefs.freq;
       _prefs.freq = frequency;
@@ -9760,7 +10888,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
         snprintf(reply, reply_capacity, "OK - reboot to apply");
       } else {
         _prefs.freq = previous;
-        snprintf(reply, reply_capacity, "Error: frequency could not be saved");
+        mesh::cli::formatError(reply, reply_capacity, "frequency could not be saved");
       }
     }
     return true;
@@ -9771,7 +10899,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
   if (strncmp(command, "set tx ", 7) == 0) {
     int32_t parsed = 0;
     if (!mesh::cli::parseIntegerStrict(command + 7, parsed)) {
-      strcpy(reply, "Error: invalid TX power");
+      mesh::cli::formatError(reply, reply_capacity, "invalid TX power");
     } else if (parsed < -9 || parsed > MAX_LORA_TX_POWER) {
       snprintf(reply, reply_capacity, "Error: TX power must be -9 to %d",
                MAX_LORA_TX_POWER);
@@ -9779,9 +10907,9 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
       const int8_t requested = static_cast<int8_t>(parsed);
       const auto result = applyAndSaveTxPower(requested);
       if (result == RadioSettingResult::RadioRejected) {
-        strcpy(reply, "Error: radio busy or TX power rejected");
+        mesh::cli::formatError(reply, reply_capacity, "radio busy or TX power rejected");
       } else if (result == RadioSettingResult::SaveFailed) {
-        strcpy(reply, "Error: TX power could not be saved");
+        mesh::cli::formatError(reply, reply_capacity, "TX power could not be saved");
       } else {
         strcpy(reply, "OK");
       }
@@ -9838,12 +10966,12 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
         _prefs.rx_ps_sleep_us = previous_sleep_us;
         _prefs.clearDirty();
         if (!preamble_saved) {
-          strcpy(reply, "Error: preamble could not be saved");
+          mesh::cli::formatError(reply, reply_capacity, "preamble could not be saved");
         } else if (primary_radio_command
             && !_radio_profiles.savePrimaryPreamble(previous_primary_preamble)) {
-          strcpy(reply, "Error: radio save failed; preamble rollback failed");
+          mesh::cli::formatError(reply, reply_capacity, "radio save failed; preamble rollback failed");
         } else {
-          strcpy(reply, "Error: setting changed but save failed");
+          mesh::cli::formatError(reply, reply_capacity, "setting changed but save failed");
         }
       }
     }
@@ -9864,7 +10992,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
   // runtime-aware FEM handlers above.
   if (board.handleCommand(command, sender_timestamp, reply)) {
     if (_prefs.isDirty() && !savePrefs()) {
-      strcpy(reply, "Error: board setting changed but save failed");
+      mesh::cli::formatError(reply, reply_capacity, "board setting changed but save failed");
     }
     return true;
   }
@@ -9930,7 +11058,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
     if ((set_ssid && strlen(value) >= sizeof(_prefs.wifi_ssid))
         || (set_pwd && strlen(value) >= sizeof(_prefs.wifi_pwd))
         || (set_enabled && (!mesh::cli::parseIntegerStrict(value, enabled) || enabled < 0 || enabled > 1))) {
-      strcpy(reply, "Error: invalid WiFi setting");
+      mesh::cli::formatError(reply, reply_capacity, "invalid WiFi setting");
       return true;
     }
     if (set_ssid) strcpy(_prefs.wifi_ssid, value);
@@ -9942,7 +11070,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
       memcpy(_prefs.wifi_ssid, old_ssid, sizeof(old_ssid));
       memcpy(_prefs.wifi_pwd, old_pwd, sizeof(old_pwd));
       _prefs.wifi_enabled = old_enabled;
-      strcpy(reply, "Error: WiFi setting could not be saved");
+      mesh::cli::formatError(reply, reply_capacity, "WiFi setting could not be saved");
     }
     memset(old_pwd, 0, sizeof(old_pwd));
     return true;
@@ -9950,21 +11078,17 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
 #endif
 
   if (strcmp(command, "get tz.offset") == 0) {
-    sprintf(reply, "> %d", _prefs.tz_offset);
+    sprintf(reply, "> %.9g", static_cast<double>(_prefs.tz_offset));
     return true;
   }
   if (strncmp(command, "set tz.offset ", 14) == 0) {
-    int32_t tz;
-    if (!mesh::cli::parseIntegerStrict(command + 14, tz) || tz < -12 || tz > 14) {
+    float tz;
+    if (!mesh::cli::parseDecimalStrict(command + 14, tz)
+        || !mesh::companion::timezone::valid(tz)) {
       strcpy(reply, "Error, must be from -12 to +14");
     } else {
-      const int8_t previous = _prefs.tz_offset;
-      _prefs.tz_offset = tz;
-      if (savePrefs()) strcpy(reply, "OK");
-      else {
-        _prefs.tz_offset = previous;
-        strcpy(reply, "Error: timezone could not be saved");
-      }
+      strcpy(reply, savePreference<float>(_prefs.tz_offset, tz)
+          ? "OK" : "Error: setting could not be saved");
     }
     return true;
   }
@@ -9975,34 +11099,49 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
 void MyMesh::checkCLIRescueCmd() {
   Stream& output = mesh::usbTerminalPort();
   Stream& input = mesh::usbCompanionPort();
-  int len = strlen(cli_command);
-  // `cli_command` must stay NUL-terminated within its bounds. If it ever isn't,
-  // strlen() above can return >= sizeof(cli_command) and the loop below would
-  // then index past the buffer, so clamp defensively.
-  if (len >= (int)sizeof(cli_command)) {
+  size_t len = strnlen(cli_command, sizeof(cli_command));
+  if (len == sizeof(cli_command)) {
     cli_command[0] = 0;
     len = 0;
+    _cli_line_overflow = true;
   }
-  while (input.available() && len < sizeof(cli_command)-1) {
+  unsigned budget = sizeof(cli_command);
+  while (budget-- && input.available()) {
     char c = input.read();
-    if (c != '\n') {
-      cli_command[len++] = c;
-      cli_command[len] = 0;
-    }
     output.print(c);  // echo
-  }
-  if (len == sizeof(cli_command)-1) {  // buffer full: treat as a completed line
-    cli_command[sizeof(cli_command)-2] = '\r';  // place end-of-line marker inside the buffer
-    cli_command[sizeof(cli_command)-1] = 0;     // keep the buffer NUL-terminated
+    if (c == '\r' || c == '\n') {
+      if (_cli_line_overflow) {
+        _cli_line_overflow = false;
+#if defined(STM32_PLATFORM)
+        output.println("  Error: unknown command");
+#else
+        output.print("ERR: too long\r\n");
+#endif
+      } else if (len) goto complete_line;
+      return;
+    }
+    if (_cli_line_overflow) continue;
+    if (len == sizeof(cli_command)-1) {
+      _cli_line_overflow = true;
+      cli_command[0] = 0;
+      len = 0;
+      continue;
+    }
+    cli_command[len++] = c;
+    cli_command[len] = 0;
   }
 
-  if (len > 0 && cli_command[len - 1] == '\r') {  // received complete line
-    cli_command[len - 1] = 0;  // replace newline with C string null terminator
+  return;
 
+complete_line:
+  {
     reply_buf[0] = 0;
 #if COMPANION_FEATURE_READER
-    if (mesh::handleReaderCommand(cli_command, output)) {
-      // USB rescue is a text stream and can print the complete verse.
+    if (mesh::morseTimingActive(_radio) && isCompanionReaderRequest(cli_command)) {
+      mesh::cancelReaderCommand();
+      output.print("  ERROR: Reader unavailable during Morse\r\n");
+    } else if (mesh::handleReaderCommand(cli_command, output)) {
+      // USB rescue streams chapters/ranges cooperatively like the terminal.
     } else
 #endif
     if (handleCommand(cli_command, 0, reply_buf)) {
@@ -10015,6 +11154,9 @@ void MyMesh::checkCLIRescueCmd() {
       scanInternalExtraFS(output);
 #endif
     } else if (strcmp(cli_command, "rebuild") == 0) {
+#if MESH_ENABLE_TX_BEACONS
+      suspendBeacons();
+#endif
       bool success = _store->formatFileSystem();
       if (success) {
         const bool identity_saved = _store->saveMainIdentity(self_id);
@@ -10025,8 +11167,7 @@ void MyMesh::checkCLIRescueCmd() {
             contacts_saved && !_store->hasPendingContactWrites();
 
         if (contacts_complete) {
-          mesh::resetLazyPersistenceAfterSuccess(
-              dirty_contacts_expiry, dirty_contacts_failures);
+          MyMesh::onContactCacheFlushed();
         } else {
           scheduleContactWriteRetry();
         }
@@ -10041,7 +11182,22 @@ void MyMesh::checkCLIRescueCmd() {
         output.println("  Error: erase failed");
       }
     } else if (strcmp(cli_command, "erase") == 0) {
+#if MESH_ENABLE_TX_BEACONS
+      suspendBeacons();
+#endif
       bool success = _store->formatFileSystem();
+#if MESH_ENABLE_ETHERNET_TUNNEL
+      if (success && !eraseEthernetSettings()) {
+        output.println("  Error: file system erased, but Ethernet settings erase failed");
+        return;
+      }
+#endif
+#if MESH_ENABLE_MESHTEXT_CHAT
+      if (success && !eraseMeshtextSettings()) {
+        output.println("  Error: file system erased, but MT settings erase failed");
+        return;
+      }
+#endif
       if (success) {
         output.println("  > erase done");
       } else {
@@ -10182,7 +11338,7 @@ void MyMesh::checkCLIRescueCmd() {
       }
 
     } else if (strcmp(cli_command, "reboot") == 0) {
-      if (flushContactsBeforeReboot()) {
+      if (MyMesh::prepareForUiShutdown()) {
         board.reboot();  // doesn't return
       } else {
         output.println("  Error: pending contacts could not be saved; reboot cancelled");
@@ -10274,6 +11430,24 @@ void MyMesh::checkSerialInterface() {
 }
 
 void MyMesh::loop() {
+  // Storage callbacks can request recovery while holding ContactInfo/path
+  // references. Retire those references only here, between callbacks.
+  if (_store->contactRecoveryPending() && !mesh::morseTimingActive(_radio)) {
+    _store->recoverContacts(this);
+    updateGpsTelemetryPolicy();
+    if (!dirty_contacts_expiry && _store->hasPendingContactWrites()) {
+      dirty_contacts_expiry = mesh::nonzeroLazyPersistenceDeadline(
+          futureMillis(LAZY_CONTACTS_WRITE_DELAY));
+    }
+  }
+#if MESH_ENABLE_MORSE_RX
+  if (_morse_reply.pending()) {
+    const ContactInfo* actor = lookupContactByPubKey(_morse_reply.actor(), PUB_KEY_SIZE);
+    const auto& settings = mesh::morseSettings();
+    _morse_reply.service(_radio, millis(), actor && actor->isRemoteCLIAllowed(),
+        mesh::morseSettingsUsable(), settings.frequency_khz, settings.wpm);
+  }
+#endif
 #if COMPANION_FEATURE_NOTIFICATIONS
   _notifications.loop(millis(), _serial->isConnected());
 #if defined(PIN_USER_BTN) && defined(USER_BTN_PRESSED)
@@ -10283,15 +11457,25 @@ void MyMesh::loop() {
 #endif
 #endif
 
-  _radio_profiles.loop();
+  if (!mesh::morseTimingActive(_radio)) _radio_profiles.loop();
+#if MESH_ENABLE_TX_BEACONS
+  if (!mesh::morseTimingActive(_radio)) loopBeacons();
+#endif
+#if MESH_ENABLE_MESHTEXT_CHAT
+  refreshMeshtextProfile();
+  if (!mesh::morseTimingActive(_radio)) loopMeshtextDelivery();
+#endif
+#if MESH_ENABLE_ETHERNET_TUNNEL
+  if (!mesh::morseTimingActive(_radio)) loopEthernetTunnel();
+#endif
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP32_PLATFORM) && defined(WIFI_SSID)
   if (_mqtt_bridge) _mqtt_bridge->servicePendingClockCorrection();
 #endif
-  if (_scheduled_reboot_at != 0
+  if (!mesh::morseTimingActive(_radio) && _scheduled_reboot_at != 0
       && (_scheduled_reboot_at == _ms->getMillis()
           || millisHasNowPassed(_scheduled_reboot_at))) {
     _scheduled_reboot_at = 0;
-    if (flushContactsBeforeReboot()) {
+    if (MyMesh::prepareForUiShutdown()) {
       board.reboot();
     } else {
       MESH_DEBUG_PRINTLN("Scheduled reboot cancelled: pending contacts could not be saved");
@@ -10299,7 +11483,7 @@ void MyMesh::loop() {
     return;
   }
 #if COMPANION_FEATURE_TEMP_RADIO
-  serviceTempRadio();
+  if (!mesh::morseTimingActive(_radio)) serviceTempRadio();
 #endif
 #if defined(OTA_SHARED_COMPANION_QUEUE)
   mesh::ota::ota_release_context_if_idle(isAnyTempRadioActive() || _temp_radio_set_at != 0);
@@ -10312,17 +11496,24 @@ void MyMesh::loop() {
 #endif
   BaseChatMesh::loop();
 #ifdef COMPANION_MESH_CLOCK_SYNC
-  _clock_sync.loop();
+  if (!mesh::morseTimingActive(_radio)) _clock_sync.loop();
 #endif
 #if COMPANION_FEATURE_TEXT_TERMINAL
   serviceTerminalLogin();
   serviceTerminalCommand();
   serviceTerminalTrace();
+  serviceMorseTerminal();
 #endif
   servicePendingSerialReply();
+#if COMPANION_FEATURE_READER
+  // Every verse chunk reinflates its 4 KiB flash block. Retain the cursor but
+  // defer that optional decode/output work until envelope timing is finished.
+  if (!mesh::morseTimingActive(_radio)) mesh::serviceReaderCommand();
+#endif
   serviceBinaryTraceReply();
-  serviceSigningSession();
+  if (!mesh::morseTimingActive(_radio)) serviceSigningSession();
   if (!command_radio_apply_pending && saved_radio_apply_pending && !hasOutbound()
+      && _radio_available
 #if COMPANION_FEATURE_TEMP_RADIO
       && !_temp_radio_applied && _temp_radio_set_at == 0
       && _temp_radio_revert_at == 0
@@ -10369,12 +11560,13 @@ void MyMesh::loop() {
 #if MESH_ENABLE_ONE_KEY_DM
   if (held_dm_count != 0 || verified_pending_count != 0) releaseHeldOneKeyDMs();
 #endif
+  if (!mesh::morseTimingActive(_radio)) servicePendingChannelNotices();
 
 #if defined(ESP32_PLATFORM)
   servicePersistence();
 #else
   // is there are pending dirty contacts write needed?
-  if (isContactWriteDue()) {
+  if (!mesh::morseTimingActive(_radio) && isContactWriteDue()) {
     const bool success = _store->serviceContactWrites(this, save_filter);
     if (!success) {
       scheduleContactWriteRetry();
@@ -10383,8 +11575,7 @@ void MyMesh::loop() {
       dirty_contacts_expiry = mesh::nonzeroLazyPersistenceDeadline(
           futureMillis(CONTACT_PAGE_WRITE_GAP));
     } else {
-      mesh::resetLazyPersistenceAfterSuccess(
-          dirty_contacts_expiry, dirty_contacts_failures);
+      MyMesh::onContactCacheFlushed();
     }
   }
 #endif
@@ -10404,6 +11595,7 @@ void MyMesh::loop() {
 
 #if defined(ESP32_PLATFORM)
 void MyMesh::servicePersistence() {
+  if (mesh::morseTimingActive(_radio)) return;
   // Advert crypto runs before serial service. Defer its cache I/O until here,
   // and alternate with due contact work so neither job can starve the other.
   // Only one persistence job is serviced in a loop pass.
@@ -10427,8 +11619,7 @@ void MyMesh::servicePersistence() {
       dirty_contacts_expiry = mesh::nonzeroLazyPersistenceDeadline(
           futureMillis(CONTACT_PAGE_WRITE_GAP));
     } else {
-      mesh::resetLazyPersistenceAfterSuccess(
-          dirty_contacts_expiry, dirty_contacts_failures);
+      MyMesh::onContactCacheFlushed();
     }
   }
 }
@@ -10470,13 +11661,23 @@ bool MyMesh::canRecoverUsbLogging() const {
 }
 
 bool MyMesh::hasPendingWork() const {
-#if COMPANION_FEATURE_NOTIFICATIONS
-  if (_notifications.active()) return true;
+  return pendingWorkReason() != 0;
+}
+
+mesh::powerdiag::Mask MyMesh::pendingWorkReason() const {
+  using mesh::powerdiag::Reason;
+  using mesh::powerdiag::mask;
+#if COMPANION_FEATURE_READER
+  if (mesh::readerCommandActive()) return mask(Reason::Mesh);
 #endif
-  if (isDualRadioActive()) return true;
-  if (_radio_available
-      && (radio_driver.isWatchdogObserving()
-          || radio_driver.isCalibratingNoiseFloor())) return true;
+#if COMPANION_FEATURE_NOTIFICATIONS
+  if (_notifications.active()) return mask(Reason::Mesh);
+#endif
+  if (!canIdleDualRadio()) return mask(Reason::DualRadio);
+  if (_radio_available && radio_driver.isWatchdogObserving()) return mask(Reason::RadioWatchdog);
+  uint32_t noise_floor_delay_ms;
+  if (getNextNoiseFloorWakeDelay(noise_floor_delay_ms) && noise_floor_delay_ms == 0)
+    return mask(Reason::Calibration);
 #if defined(NRF52_PLATFORM)
   // nRF52 sleep is event-driven, so a future lazy-write deadline has no
   // guaranteed interrupt to wake the loop when it becomes due. Keep polling
@@ -10489,37 +11690,36 @@ bool MyMesh::hasPendingWork() const {
 #else
   const bool contact_write_needs_polling = isContactWriteDue();
 #endif
-  return (_serial != NULL && _serial->hasPendingIO())
-      || (_iter_started && _serial != NULL
-          && _serial->isReplyRouteAvailable(_iter_reply_route))
-      || hasPendingOtaApply()
-      || command_radio_apply_pending
-      || _scheduled_reboot_at != 0
-      || hasPendingReqs()
-      || _delayed_replies.hasBinaryTrace()
+  if (_serial != NULL && _serial->hasPendingIO()) return mask(Reason::SerialIO);
+  if (_iter_started && _serial != NULL
+      && _serial->isReplyRouteAvailable(_iter_reply_route)) return mask(Reason::SerialIO);
+  if (hasPendingOtaApply()) return mask(Reason::Ota);
+  if (command_radio_apply_pending || _scheduled_reboot_at != 0) return mask(Reason::Scheduled);
+  if (hasPendingReqs() || _delayed_replies.hasBinaryTrace()) return mask(Reason::Mesh);
 #if COMPANION_FEATURE_TEXT_TERMINAL
-      || _terminal_trace_pending
+  if (_terminal_trace_pending) return mask(Reason::Mesh);
 #endif
-      || sign_data != NULL
-      || hasQueuedWorkDue() || hasRetryWorkDue()
-      || (saved_radio_apply_pending
+  if (sign_data != NULL) return mask(Reason::Mesh);
+  if (hasQueuedWorkDue()) return mask(Reason::Queue);
+  if (hasRetryWorkDue()) return mask(Reason::Retry);
+  if (saved_radio_apply_pending && _radio_available
 #if COMPANION_FEATURE_TEMP_RADIO
           // Match loop()'s restore gate: a lease-blocked rollback is not
           // runnable work. The lease's own timers below wake it when due.
           && !_temp_radio_applied && _temp_radio_set_at == 0
           && _temp_radio_revert_at == 0
 #endif
-          && (!radio_apply_retry_at || millisHasNowPassed(radio_apply_retry_at)))
-      || contact_write_needs_polling
+      && (!radio_apply_retry_at || millisHasNowPassed(radio_apply_retry_at))) return mask(Reason::Scheduled);
+  if (contact_write_needs_polling || _store->contactRecoveryPending()) return mask(Reason::Mesh);
 #if defined(ESP32_PLATFORM)
-      || _store->hasPendingAdvertWrites()
+  if (_store->hasPendingAdvertWrites()) return mask(Reason::Mesh);
 #endif
-      || (emergency_client_repeat_packet != NULL
-          && millisHasNowPassed(emergency_client_repeat_send_at))
+  if (emergency_client_repeat_packet != NULL
+      && millisHasNowPassed(emergency_client_repeat_send_at)) return mask(Reason::Queue);
 #if COMPANION_FEATURE_TEMP_RADIO
-      || (_temp_radio_set_at != 0 && millisHasNowPassed(_temp_radio_set_at))
+  if ((_temp_radio_set_at != 0 && millisHasNowPassed(_temp_radio_set_at))
       || (_temp_radio_revert_at != 0 && millisHasNowPassed(_temp_radio_revert_at))
-      || (_temp_radio_retry_at != 0 && millisHasNowPassed(_temp_radio_retry_at))
+      || (_temp_radio_retry_at != 0 && millisHasNowPassed(_temp_radio_retry_at))) return mask(Reason::Scheduled);
 #endif
-      ;
+  return 0;
 }

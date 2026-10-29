@@ -5,6 +5,13 @@
 #include <math.h>
 #include "helpers/UsbLogging.h"
 #include "helpers/BatteryChargeSupport.h"
+#include "helpers/BatteryCalibration.h"
+#include "helpers/RegulatorMode.h"
+#include "helpers/PowerSavingDiagnostics.h"
+#include "helpers/LedPolicy.h"
+#if defined(ARDUINO) && (defined(RP2040_PLATFORM) || defined(STM32_PLATFORM))
+#include <Arduino.h>
+#endif
 
 #define MAX_HASH_SIZE        8
 #define PUB_KEY_SIZE        32
@@ -28,7 +35,8 @@
     (defined(NRF52_PLATFORM) || MESH_ESP32_USB_CONSOLE_COOPERATIVE) && \
     ((defined(MESH_DEBUG) && MESH_DEBUG) || \
      (defined(BRIDGE_DEBUG) && BRIDGE_DEBUG) || \
-     (defined(POWERSAVING_DEBUG) && POWERSAVING_DEBUG))
+     (defined(POWERSAVING_DEBUG) && POWERSAVING_DEBUG) || \
+     defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE) || defined(WITH_UDP_BRIDGE))
   #include <Arduino.h>
   #include <atomic>
   #include <stdarg.h>
@@ -130,17 +138,54 @@ namespace mesh {
 
 class MainBoard {
   bool _radio_test_active = false;
+  float _battery_calibration_factor = 1.0f;
+protected:
+  uint16_t calibrateBatteryMillivolts(uint16_t raw_mv) const {
+    return mesh::power::scaleBatteryMillivolts(raw_mv, _battery_calibration_factor);
+  }
 public:
   void setRadioTestActive(bool active) { _radio_test_active = active; }
   bool isRadioTestActive() const { return _radio_test_active; }
   virtual uint16_t getBattMilliVolts() = 0;
   virtual float getMCUTemperature() { return NAN; }
-  virtual bool setAdcMultiplier(float multiplier) { return false; };
-  virtual float getAdcMultiplier() const { return 0.0f; }
+  virtual bool supportsBatteryCalibration() const { return false; }
+  // Relative to the board's built-in ADC conversion; zero restores its scale.
+  // Boards with an existing absolute ADC coefficient retain their overrides.
+  virtual bool setAdcMultiplier(float multiplier) {
+    if (!supportsBatteryCalibration()
+        || !mesh::power::validRelativeBatteryMultiplier(multiplier)) return false;
+    _battery_calibration_factor = multiplier == 0.0f ? 1.0f : multiplier;
+    return true;
+  }
+  virtual float getAdcMultiplier() const {
+    return supportsBatteryCalibration() ? _battery_calibration_factor : 0.0f;
+  }
   virtual const char* getManufacturerName() const = 0;
   virtual void onBeforeTransmit() { }
   virtual void onAfterTransmit() { }
+  // Update only indicator outputs; transmit hooks may also control RF hardware.
+  virtual void applyLedPolicy() { }
+#if defined(ESP32_PLATFORM)
+  // CPU clock selection is ESP32-only; other platforms retain their current
+  // preference layout and board vtable. Zero selects the role's Auto policy.
+  virtual uint16_t getCpuFrequencyMHz() const { return 0; }
+  virtual bool supportsCpuFrequencyMHz(uint16_t) const { return false; }
+  virtual void setCpuFrequencyRequest(uint16_t, bool) { }
+  virtual bool applyCpuFrequencyMHz(uint16_t, bool) { return false; }
+  virtual bool prepareRadioProfileCpuClock(bool, bool& changed) {
+    changed = false;
+    return true;
+  }
+#endif
   virtual void reboot() = 0;
+  MESH_REGULATOR_VIRTUAL uint8_t mcuRegulatorModes() const { return 0; }
+  MESH_REGULATOR_VIRTUAL power::RegulatorMode defaultMcuRegulatorMode() const {
+    return power::RegulatorMode::Default;
+  }
+  MESH_REGULATOR_VIRTUAL bool applyMcuRegulator(power::RegulatorMode) { return false; }
+  MESH_REGULATOR_VIRTUAL power::RegulatorMode activeMcuRegulatorMode() const {
+    return power::RegulatorMode::Default;
+  }
   // Reboot into a UF2-capable bootloader when the platform supports the
   // retained reset request. Returns false only when unsupported or rejected;
   // a successful implementation resets and does not return.
@@ -150,6 +195,12 @@ public:
   // internally bounded operations can use this while retaining their own
   // timeout. Boards without an explicit watchdog need no implementation.
   virtual void serviceWatchdog() { /* no op */ }
+  // Query the actual hardware state without starting, feeding or stopping a
+  // watchdog. False means this board has no shared runtime status reader.
+  virtual bool getSystemWatchdogRunning(bool& running) const {
+    (void)running;
+    return false;
+  }
   virtual void enterDeepSleep(uint32_t secs) { (void)secs; }
   // Called by example setup() functions to signal that boot is complete.
   // Boards may override to stop a boot-indicator LED sequence or similar.
@@ -157,13 +208,36 @@ public:
   virtual void onBootComplete() { /* no op */ }
   virtual uint32_t getIRQGpio() { return -1; } // not supported. Returns DIO1 (SX1262) and DIO0 (SX127x)
   virtual void sleep(uint32_t secs)  {
-    if (isRadioTestActive()) return;
+    if (isRadioTestActive()) {
+#if defined(ARDUINO) && (defined(RP2040_PLATFORM) || defined(STM32_PLATFORM))
+      if (powerdiag::enabled()) powerdiag::boardVeto(powerdiag::Reason::Board, millis(), 2);
+#endif
+      return;
+    }
     (void)secs;
 #if defined(RP2040_PLATFORM) || defined(STM32_PLATFORM)
     // These platforms have no shared deep-sleep board implementation. WFI is
     // still a real CPU idle state and preserves all configured interrupt wake
     // sources, including the radio and USB.
+#if defined(ARDUINO)
+    if (powerdiag::enabled()) powerdiag::sleepBegin(micros());
+#endif
     __asm volatile("wfi");
+#if defined(ARDUINO)
+    if (powerdiag::enabled()) powerdiag::sleepEnd(micros());
+#endif
+#endif
+  }
+  // Bounded MCU idle without changing the radio's receive mode. Interrupt-idle
+  // ports keep their existing periodic-clock wake contract; timed sleepers
+  // override this to provide a real sub-second timer. An unknown timed port
+  // must not round a short deadline up and sleep past it.
+  virtual void sleepMilliseconds(uint32_t millisecs) {
+    if (millisecs == 0) return;
+#if defined(NRF52_PLATFORM) || defined(RP2040_PLATFORM) || defined(STM32_PLATFORM)
+    sleep(0);
+#else
+    if (millisecs >= 1000UL) sleep(millisecs / 1000UL);
 #endif
   }
   virtual uint32_t getGpio() { return 0; }
@@ -230,6 +304,7 @@ public:
 #endif
 
   // Power management interface (boards with power management override these)
+  virtual bool supportsPowerManagement() const { return false; }
   virtual bool isPwrMgtInitialised() const { return false; }
   virtual bool isExternalPowered() { return false; }
   virtual bool isUsbDataConnected() { return false; }

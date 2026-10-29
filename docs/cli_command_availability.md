@@ -19,6 +19,15 @@ Infrastructure `get password` is available locally in every profile; LoRa
 requests cannot read it. `get acl` and stored packet `log` are infrastructure
 features, not Companion contact or live USB-logging commands.
 
+Room users also have an owner-only command set described in
+[Personal mailboxes](room_services.md#personal-mailboxes): `mail settings`,
+`mail mode`, `mail allow`, `mail deny`, `mail delivery`, `mail check`,
+`mail inbox`/`mail list`, `mail read`, `mail ack`, and `mail delete`.
+Authenticated room writers can use `mail send`; readers cannot send.
+These work as encrypted CLI requests or ordinary direct `!mail ...` messages
+to the room. Regular users can also read `get room.board` and
+`get room.board.read`; board publishing and deletion remain administrative.
+
 Build columns mean:
 
 - **Standard** - the ordinary non-MQTT artifact, without an explicit `ota`
@@ -74,6 +83,12 @@ fix, no WiFi connection, an inactive bridge, or an nRF52 bootloader without
 
 ## Companion framed CLI
 
+GPS-equipped Sensor builds also provide the local-only
+[dog tracker settings](sensor_tracker.md): `get tracker`,
+`get/set tracker.owner`, `get/set tracker.mode`, `get/set tracker.interval`,
+`get/set tracker.lost.interval`, `get/set tracker.path`, and `tracker check`.
+They are excluded from compact STM32 defaults. LoRa CLI cannot change them.
+
 Companion builds are not represented by the role/profile matrices below. Their
 local terminal and command `0x42` (`CMD_RUN_CLI_COMMAND`) expose these settings
 over the normal binary USB, BLE, or TCP connection:
@@ -81,11 +96,19 @@ over the normal binary USB, BLE, or TCP connection:
 | Command | Availability |
 |---|---|
 | `stats-core`, `stats-radio`, `stats-radio-diag`, `stats-packets` | Local terminal and binary command `0x42` |
+| [`clear stats`, `get rxps.wd`, `get cad`](companion_radio_diagnostics.md) | Companion terminal and command `0x42`; clearing statistics also clears sticky packet error flags |
+| [`get/set radio.rxps.rfrx_disabled`](companion_radio_diagnostics.md) | Supported radio with an RXEN pin; applies for this boot and preserves radio ownership |
+| [`power`, `get pwrmgt.support`, `get pwrmgt.source`, `get pwrmgt.bootmv`](companion_power_diagnostics.md) | Board power capabilities determine available readings |
+| [`get system.watchdog`](companion_power_diagnostics.md) | Actual nRF52 hardware status; Companion does not provide a saved on/off setter |
+| [`get bootloader.ver`](cli_commands.md#view-the-bootloader-version-nrf52-only) | nRF52 Companion terminal and command `0x42`; unidentifiable metadata returns `unknown` |
+| [`get/set sdcard`](test-results/companion_cli_parity_2026-10-23.md#shared-sd-commands) | nRF52 builds with SD OTA storage; maintenance retains OTA and Ethernet ownership guards |
 | `erase` | Local terminal and binary command `0x42`; reboot after erasing stored settings |
 | `set freq <MHz>` | Local terminal, binary command `0x42`, and authorized LoRa CLI; reboot to apply |
 | [`get public.key`](cli_commands.md#view-this-nodes-public-key) | Companion text terminal and binary command `0x42`; read-only, no private-key export feature required |
 | `get prv.key` | Local terminal and binary command `0x42`; requires private key export enabled |
-| `get password` | Reports that Companion has no admin password; infrastructure returns its password locally |
+| `get password` | ESP32 WiFi Companion reports management-password status without revealing it; other Companions report no admin password; infrastructure returns its password locally |
+| `password <new-password>` | ESP32 WiFi Companion and infrastructure: change the saved admin password; ESP32 setup WiFi, WebConfig and browser OTA reuse it |
+| [`get/set lost.reply`](companion_lost_reply.md) | Local Companion CLI and framed command `0x42` when `MESH_ENABLE_LOST_REPLY` is enabled; saved `off`, `no` or `yes` private-message auto response |
 | `get wifi.pwd`, `get mqttN.password`, `get mqttN.token` | Local terminal and binary command `0x42`; corresponding WiFi/MQTT feature required |
 | [`board`](cli_commands.md#show-the-hardware-name) | Every Companion text terminal and command `0x42` |
 | [`version`](cli_commands.md#get-the-version) | Every Companion text terminal and protocol-v14 command `0x42`; returns the untruncated build identity |
@@ -193,11 +216,12 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Routing | [`get/set/del flood.channel.scope.require*`](cli_commands.md#require-valid-incoming-scopes-only-on-selected-channels) | Repeater | Yes | Yes | Yes |
 | Routing | [`get/set/del flood.rule*`; `get/set/del flood.filter*`; `get/set/del flood.filter.blacklist*`](cli_commands.md#change-persistent-flood-rules-in-the-field) | Repeater; `flood.rule`/`flood.filter` also on FULL ESP32 room server (no blacklist) | Yes | Yes | Yes |
 | Routing | [`get/set/del flood.moderation*`](cli_commands.md#moderate-flood-group-text-by-channel-sender-and-source-path) | Repeater | Yes | Yes | Yes |
-| Routing | [`get/set outpath`](halo_keymind_settings.md#direct-path-overrides) | Repeater remote-client context | Yes | Yes | Yes |
-| Routing | [`get/set altpath`](halo_keymind_settings.md#direct-path-overrides) | Repeater remote-client context | Yes | Yes | Yes |
+| Routing | [`get/set outpath`](halo_keymind_settings.md#direct-path-overrides) | Repeater or [room user](room_services.md#your-own-return-routes), own remote-client context | Yes | Yes | Yes |
+| Routing | [`get/set altpath`](halo_keymind_settings.md#direct-path-overrides) | Repeater or [room user](room_services.md#your-own-return-routes), own remote-client context | Yes | Yes | Yes |
 | ACL | [`setperm <pubkey> <permissions>`](cli_commands.md#add-update-or-remove-permissions-for-a-companion) | Repeater, room server, or sensor | Yes | Yes | Yes |
 | ACL | [`get acl [page]`](cli_commands.md#view-the-current-acl) | Repeater, room server, or sensor; admin over LoRa | Yes | Yes | Yes |
 | ACL | [`get/set allow.read.only`](cli_commands.md#view-or-change-this-room-servers-read-only-flag) | Room server | Yes | Yes | No |
+| Room | [`get/set topic`](cli_commands.md#view-or-change-the-room-topic) | Room server | Yes | Yes | No |
 | Regions | [`region load`](cli_commands.md#bulk-load-region-lists); [`region save`](cli_commands.md#save-any-changes-to-regions-made-since-reboot) | Role with region storage | Yes | Yes | Yes |
 | Regions | [`region allowf`](cli_commands.md#allow-a-region); [`region denyf`](cli_commands.md#block-a-region) | Role with region storage | Yes | Yes | Yes |
 | Regions | [`region get`](cli_commands.md#show-information-for-a-region); [`region list`](cli_commands.md#view-all-regions); [`region`](cli_commands.md#dump-all-defined-regions-and-flood-permissions) | Role with region storage | Yes | Yes | Yes |
@@ -368,11 +392,12 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Routing | [`get/set/del flood.channel.scope.require*`](cli_commands.md#require-valid-incoming-scopes-only-on-selected-channels) | Repeater role handler | Yes | Yes | Yes | Yes | Yes |
 | Routing | [`get/set/del flood.rule*`; `get/set/del flood.filter*`; `get/set/del flood.filter.blacklist*`](cli_commands.md#change-persistent-flood-rules-in-the-field) | Repeater role handler; `flood.rule`/`flood.filter` also on FULL ESP32 room server (no blacklist) | Yes | Yes | Yes | Yes | Yes |
 | Routing | [`get/set/del flood.moderation*`](cli_commands.md#moderate-flood-group-text-by-channel-sender-and-source-path) | Repeater role handler | Yes | Yes | Yes | Yes | Yes |
-| Routing | [`get/set outpath`](halo_keymind_settings.md#direct-path-overrides) | Repeater remote-client context | Yes | Yes | Yes | Yes | Yes |
-| Routing | [`get/set altpath`](halo_keymind_settings.md#direct-path-overrides) | Repeater remote-client context | Yes | Yes | Yes | Yes | Yes |
+| Routing | [`get/set outpath`](halo_keymind_settings.md#direct-path-overrides) | Repeater or [room user](room_services.md#your-own-return-routes), own remote-client context | Yes | Yes | Yes | Yes | Yes |
+| Routing | [`get/set altpath`](halo_keymind_settings.md#direct-path-overrides) | Repeater or [room user](room_services.md#your-own-return-routes), own remote-client context | Yes | Yes | Yes | Yes | Yes |
 | ACL | [`setperm <pubkey> <permissions>`](cli_commands.md#add-update-or-remove-permissions-for-a-companion) | Repeater, room server, or sensor | Yes | Yes | Yes | Yes | Yes |
 | ACL | [`get acl [page]`](cli_commands.md#view-the-current-acl) | Repeater, room server, or sensor; admin over LoRa | Yes | Yes | Yes | Yes | Yes |
 | ACL | [`get/set allow.read.only`](cli_commands.md#view-or-change-this-room-servers-read-only-flag) | Room server | Yes | Yes | No | Yes | Yes |
+| Room | [`get/set topic`](cli_commands.md#view-or-change-the-room-topic) | Room server | Yes | Yes | No | Yes | Yes |
 | Regions | [`region load`](cli_commands.md#bulk-load-region-lists); [`region save`](cli_commands.md#save-any-changes-to-regions-made-since-reboot) | Role with region storage | Yes | Yes | Yes | Yes | Yes |
 | Regions | [`region allowf`](cli_commands.md#allow-a-region); [`region denyf`](cli_commands.md#block-a-region) | Role with region storage | Yes | Yes | Yes | Yes | Yes |
 | Regions | [`region get`](cli_commands.md#show-information-for-a-region); [`region list`](cli_commands.md#view-all-regions); [`region`](cli_commands.md#dump-all-defined-regions-and-flood-permissions) | Role with region storage | Yes | Yes | Yes | Yes | Yes |
@@ -499,6 +524,15 @@ clear, set, or toggle selected bits.
 
 Prints the runtime diagnostic summary for MQTT slot N, including its connection
 state and failure history.
+
+`pub_ack` counts actual broker acknowledgments, not merely accepted writes.
+Recent firmware also shows `rec:<count>/<reason>` for transport recovery and
+`ack_wait:<seconds>s` while an accepted QoS 1 publication awaits acknowledgment.
+Reasons include `error`, `state`, `handshake`, `write`, and `puback`. `recover`
+means cleanup is pending, not that the broker is healthy. Optional fields are
+omitted if they cannot fit completely in the reply. `rec` counts completed
+client cleanup; a higher count alone does not prove the subsequent connection
+or delivery succeeded.
 
 <a id="mqtt-stats"></a>
 ### `get mqtt.stats`

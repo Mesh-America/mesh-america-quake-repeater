@@ -31,7 +31,7 @@ const errors = [];
 const type = {a: value => value, b: value => value instanceof Uint8Array,
               h() { return this; }};
 const t = new Proxy({}, {get: () => type});
-const $ = {cT: () => new Uint8Array(0), cqf() {}, dF() {}, ay() {}, fQ() {},
+const $ = {cT: () => new Uint8Array(0), cq9() {}, dF() {}, ay() {}, fQ() {},
            vI: () => ({Ia: () => 0x78563412})};
 const B = {
   e: {aN: (a, b) => a >> b, qP: (a, b) => Math.trunc(a / b)},
@@ -43,13 +43,13 @@ const B = {
 const J = {
   a3: () => ({gt: a => a.length, gap: a => a.length === 0, i: (a, i) => a[i]}),
   i2: (a, b, c) => new Uint8Array(a, b, c),
-  po: a => new Uint8Array(a), lx: (a, b, c) => new DataView(a, b, c),
-  c6: (a, b) => a.push(b), aaW: (a, predicate) => {
+  pn: a => new Uint8Array(a), lx: (a, b, c) => new DataView(a, b, c),
+  c6: (a, b) => a.push(b), aaU: (a, predicate) => {
     for (let i = a.length - 1; i >= 0; --i) if (predicate.$1(a[i])) a.splice(i, 1);
   },
   bf: a => { let i = -1; return {v: () => ++i < a.length, gM: () => a[i]}; },
-  cTH: a => a.a, kz: (a, b) => a.split(b), aA: a => a.length,
-  a1: (a, i) => a[i], p: (a, b) => a === b, cri: (a, n) => a.toFixed(n)
+  cTB: a => a.a, kz: (a, b) => a.split(b), aA: a => a.length,
+  a1: (a, i) => a[i], p: (a, b) => a === b, crc: (a, n) => a.toFixed(n)
 };
 function deferred() {
   const result = {a: 0};
@@ -79,12 +79,12 @@ const A = {
   b3: () => ({$1() {}}), b6() {},
   bF: (_, __, ___, ms) => ({a: ms * 1000}), bT: function(a) { this.a = a; },
   fh: (duration, callback) => timers.push({due: now + duration.a / 1000, callback}),
-  csH: callback => queueMicrotask(() => callback.$0()),
+  csB: callback => queueMicrotask(() => callback.$0()),
   wc: function() {}, an: () => radioConnection,
   kY: value => { const number = Number(value); assert(Number.isFinite(number)); return number; },
   cS: value => { const number = Number(value); assert(Number.isInteger(number)); return number; },
-  c: () => ({glp: () => "invalid radio fields", glb: () => "radio error"}),
-  av: (...args) => errors.push(args), L: error => error,
+  c: () => ({glo: () => "invalid radio fields", gla: () => "radio error"}),
+  au: (...args) => errors.push(args), av: (...args) => errors.push(args), L: error => error,
   aH: (_, error) => errors.push(error)
 };
 const context = vm.createContext({A, B, J, t, $, u: {AD: "tag mismatch", b1: "CLI mismatch"},
@@ -93,15 +93,15 @@ function constructor(name) {
   const code = extract(`${name}:function ${name}(`).replace(`${name}:`, `A.${name}=`);
   vm.runInContext(code, context);
 }
-for (const name of ["cZ", "d3", "fo", "ab7", "U1", "aba", "PS", "acs",
-                    "aSq", "aSp", "aSr", "aSs", "aSf", "pK", "b0Z", "b0Y",
-                    "b0X", "b1_", "b0W"]) constructor(name);
-for (const name of ["cZ", "d3", "fo", "aba", "aSq", "aSp", "aSr", "aSs", "aSf",
-                    "b0V", "b0Z", "b0Y", "b0X", "b1_", "b0W", "wc"]) {
+for (const name of ["cZ", "d3", "fo", "ab8", "U1", "ab5", "PS", "acr",
+                    "aSq", "aSp", "aSr", "aSs", "aSf", "pJ", "b0S", "b0R",
+                    "b0Q", "b0T", "b0P"]) constructor(name);
+for (const name of ["cZ", "d3", "fo", "ab5", "aSq", "aSp", "aSr", "aSs", "aSf",
+                    "b0O", "b0S", "b0R", "b0Q", "b0T", "b0P", "wc"]) {
   if (!A[name]) A[name] = function() {};
   vm.runInContext(extract(`A.${name}.prototype={`), context);
 }
-Object.assign(A, vm.runInContext(`({${extract("eD(a){")},${extract("d_f(a){")},${extract("bO(a,b){")}})`, context));
+Object.assign(A, vm.runInContext(`({${extract("\neD(a){")},${extract("\nd_9(a){")},${extract("\nbO(a,b){")}})`, context));
 
 function connection() {
   const connection = new A.wc();
@@ -111,8 +111,8 @@ function connection() {
     i: (_, key) => map.get(key), Z: (_, key) => map.has(key),
     ey: (_, fn) => { for (const [key, value] of map) fn.$2(key, value); }
   };
-  for (const name of ["eY", "N", "bCk", "bu", "dT", "W7"])
-    connection[name] = A.b0V.prototype[name];
+  for (const name of ["eY", "N", "bCk", "bu", "dT", "W6"])
+    connection[name] = A.b0O.prototype[name];
   connection.writes = [];
   connection.d6 = async bytes => { connection.writes.push(Buffer.from(bytes)); };
   return connection;

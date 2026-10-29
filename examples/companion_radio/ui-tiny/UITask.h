@@ -39,19 +39,21 @@ class UITask : public AbstractUITask {
 #elif defined(PIN_VIBRATION)
   GenericVibration vibration;
 #endif
-  unsigned long _next_refresh;
-  CompanionNodePrefs* _node_prefs;
+  uint32_t _next_refresh;
+  CompanionNodePrefs* _node_prefs = nullptr;
   char _alert[80];
-  unsigned long _alert_expiry;
+  uint32_t _alert_expiry;
   unsigned long _pairing_screen_until;
   int _msgcount;
-  unsigned long ui_started_at, next_batt_chck;
-  int next_backlight_btn_check = 0;
+  unsigned long ui_started_at;
+  uint32_t next_batt_chck;
+  uint32_t last_backlight_btn_check = 0;
   uint16_t _cached_batt_mv;
+  bool _startup_complete = false;
 #ifdef PIN_STATUS_LED
   int led_state = 0;
-  int next_led_change = 0;
-  int last_led_increment = 0;
+  uint32_t last_led_change = 0;
+  uint32_t led_phase_millis = 0;
 #endif
 
 #ifdef PIN_USER_BTN_ANA
@@ -101,7 +103,9 @@ public:
     return _display != NULL && _display->supportsRotation();
   }
   bool setDisplayRotationDegrees(uint16_t degrees) override {
-    return _display != NULL && _display->setRotationDegrees(degrees);
+    if (_display == NULL || !_display->setRotationDegrees(degrees)) return false;
+    _next_refresh = millis();
+    return true;
   }
   bool isButtonPressed() const;
   void servicePairingState() override;
@@ -133,6 +137,7 @@ public:
   void notificationVibration(bool on) override;
   void notificationMelody(const char* text) override;
   void notificationScreen(int8_t mode) override;
+  void syncAlertPreferences() override;
   void loop() override;
 
   void shutdown(bool restart = false);

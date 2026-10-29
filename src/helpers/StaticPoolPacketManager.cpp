@@ -168,7 +168,11 @@ StaticPoolPacketManager::StaticPoolPacketManager(int pool_size)
 }
 
 mesh::Packet* StaticPoolPacketManager::allocNew() {
-  return unused.removeByIdx(0);  // just get first one (returns NULL if empty)
+  auto* packet = unused.removeByIdx(0);  // NULL if empty.
+#if defined(WITH_UDP_BRIDGE)
+  if (packet) packet->udp_bridge_ingress = false;
+#endif
+  return packet;
 }
 
 void StaticPoolPacketManager::free(mesh::Packet* packet) {

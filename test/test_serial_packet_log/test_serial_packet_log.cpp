@@ -148,6 +148,33 @@ TEST_F(SerialPacketLogTest, MarksTruncatedLines) {
   EXPECT_EQ(1U, mesh::serialLogDroppedCount());
 }
 
+TEST_F(SerialPacketLogTest, CompactRxTxRetainExactBytesAndLfOnly) {
+  FakePort port;
+  const uint8_t raw[] = {0x00, 0xAB, 0xFF};
+  EXPECT_TRUE(mesh::serialLogCompactPacket(port, 'R', raw, sizeof(raw)));
+  EXPECT_TRUE(mesh::serialLogCompactPacket(port, 'T', raw, sizeof(raw)));
+  EXPECT_EQ("R00ABFF\nT00ABFF\n", port.written());
+}
+
+TEST_F(SerialPacketLogTest, CompactPacketRetainsStallBudgetAndRecoveryMarker) {
+  primePort();
+  FakePort wedged(64, 64);
+  wedged.wedgeAfter(64);
+  uint8_t raw[255];
+  memset(raw, 0xA5, sizeof(raw));
+  const uint32_t before = millis();
+  EXPECT_FALSE(mesh::serialLogCompactPacket(wedged, 'R', raw, sizeof(raw)));
+  EXPECT_GE(millis() - before, (uint32_t)SERIAL_LOG_WRITE_BUDGET_MS);
+  EXPECT_LE(millis() - before, (uint32_t)SERIAL_LOG_WRITE_BUDGET_MS + 2);
+  EXPECT_EQ(1U, mesh::serialLogDroppedCount());
+
+  FakePort recovered;
+  const uint8_t next[] = {0x00};
+  EXPECT_TRUE(mesh::serialLogCompactPacket(recovered, 'T', next, sizeof(next)));
+  EXPECT_EQ("DROP:1\r\nT00\n", recovered.written());
+  EXPECT_EQ(0U, mesh::serialLogDroppedCount());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {

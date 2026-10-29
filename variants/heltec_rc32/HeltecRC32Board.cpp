@@ -1,4 +1,5 @@
 #include "HeltecRC32Board.h"
+#include <helpers/ESP32GpioHold.h>
 
 void HeltecRC32Board::begin() {
   ESP32Board::begin();
@@ -29,8 +30,8 @@ void HeltecRC32Board::begin() {
       startup_reason = BD_STARTUP_RX_PACKET;
     }
 
-    rtc_gpio_hold_dis((gpio_num_t)P_LORA_NSS);
-    rtc_gpio_deinit((gpio_num_t)P_LORA_DIO_1);
+    mesh::esp32::releaseRtcGpioIfSupported((gpio_num_t)P_LORA_NSS);
+    mesh::esp32::deinitRtcGpioIfSupported((gpio_num_t)P_LORA_DIO_1);
   }
 }
 
@@ -55,7 +56,7 @@ void HeltecRC32Board::powerOff() {
 }
 
 void HeltecRC32Board::onBeforeTransmit() {
-  digitalWrite(P_LORA_TX_LED, HIGH);
+  if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);
 }
 
 void HeltecRC32Board::onAfterTransmit() {
@@ -78,6 +79,7 @@ uint16_t HeltecRC32Board::getBattMilliVolts() {
 }
 
 bool HeltecRC32Board::setAdcMultiplier(float multiplier) {
+    if (!isfinite(multiplier) || multiplier < 0.0f || multiplier > 10.0f) return false;
   adc_mult = multiplier == 0.0f ? ADC_MULTIPLIER : multiplier;
   return true;
 }

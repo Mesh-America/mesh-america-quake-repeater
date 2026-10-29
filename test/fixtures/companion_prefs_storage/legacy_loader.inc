@@ -1,5 +1,6 @@
 // Frozen sequential preference serializer from 54e5b0b99.
-// Independent of the new storage table; keep its historical field order.
+// Independent of the new storage table; historical fields stay unchanged.
+// New append-only tails are added explicitly to this scalar reference.
 bool DataStore::loadPrefsLegacy(const char *filename,
                              CompanionNodePrefs& _prefs, double& node_lat,
                              double& node_lon) {
@@ -13,6 +14,7 @@ bool DataStore::loadPrefsLegacy(const char *filename,
     // Older images have no independent debug preference. Never inherit a
     // runtime-on value when loading one of those images.
     loaded_prefs.usb_debug_enabled = 0;
+    loaded_prefs.lost_reply = 0;
     double loaded_lat = node_lat;
     double loaded_lon = node_lon;
     // The original image ended after ble_pin at byte 84. Later releases only
@@ -81,6 +83,13 @@ bool DataStore::loadPrefsLegacy(const char *filename,
         332,
 #else
         235,
+#endif
+#ifdef TBEAM_1W
+        243,
+#elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
+        333,
+#else
+        236,
 #endif
     };
     const uint32_t prefs_size = file.size();
@@ -200,7 +209,9 @@ bool DataStore::loadPrefsLegacy(const char *filename,
     readOptionalField(&loaded_prefs.direct_tx_delay_factor, sizeof(loaded_prefs.direct_tx_delay_factor));
     readOptionalField(&loaded_prefs.interference_threshold, sizeof(loaded_prefs.interference_threshold));
     readOptionalField(&loaded_prefs.agc_reset_interval, sizeof(loaded_prefs.agc_reset_interval));
-    readOptionalField(&loaded_prefs.tz_offset, sizeof(loaded_prefs.tz_offset));
+    // Frozen historical representation, converted numerically for the new RAM type.
+    readOptionalField(&loaded_prefs.tz_offset_legacy, 1);
+    loaded_prefs.tz_offset = loaded_prefs.tz_offset_legacy;
 #ifdef TBEAM_1W
     readOptionalField(loaded_prefs.fan_mode, sizeof(loaded_prefs.fan_mode));
     readOptionalField(&loaded_prefs.fan_lo, sizeof(loaded_prefs.fan_lo));
@@ -229,6 +240,7 @@ bool DataStore::loadPrefsLegacy(const char *filename,
                       sizeof(loaded_prefs.gps_sync_interval_hours));
     readOptionalField(&loaded_prefs.usb_debug_enabled,
                       sizeof(loaded_prefs.usb_debug_enabled));
+    readOptionalField(&loaded_prefs.lost_reply, sizeof(loaded_prefs.lost_reply));
 
     // Any bytes left over form only part of a historically appended field.
     // Preserve the file and defaults rather than treating that tail as EOF.
@@ -237,6 +249,7 @@ bool DataStore::loadPrefsLegacy(const char *filename,
     file.close();
     if (!success) return false;
     loaded_prefs.usb_debug_enabled = loaded_prefs.usb_debug_enabled == 1 ? 1 : 0;
+    loaded_prefs.lost_reply = loaded_prefs.lost_reply <= 2 ? loaded_prefs.lost_reply : 0;
     _prefs = loaded_prefs;
     node_lat = loaded_lat;
     node_lon = loaded_lon;

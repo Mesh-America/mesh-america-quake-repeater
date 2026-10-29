@@ -213,7 +213,7 @@ catalog; bytes `0x2C`-`0x31` are parked and `0x35` is unused.
 | `0x15` | `CMD_SET_TUNING_PARAMS` | Set tuning parameters. |
 | `0x16` | `CMD_DEVICE_QUERY` | Negotiate protocol support and read device information. |
 | `0x17` / `0x18` | `CMD_EXPORT_PRIVATE_KEY` / `CMD_IMPORT_PRIVATE_KEY` | Export or import identity key material when enabled. |
-| `0x19` | `CMD_SEND_RAW_DATA` | Send an application raw-data packet. |
+| `0x19` | `CMD_SEND_RAW_DATA` | Send an application raw-data packet. Known media and opt-in SSH envelopes honor [application TX routing](radio_profiles.md#companion-media-and-ssh-tx-routing); other raw bytes retain normal routing. |
 | `0x1A`-`0x1D` | `CMD_SEND_LOGIN` through `CMD_LOGOUT` | Manage a server connection. |
 | `0x1E` | `CMD_GET_CONTACT_BY_KEY` | Look up a contact by public-key prefix. |
 | `0x1F` / `0x20` | `CMD_GET_CHANNEL` / `CMD_SET_CHANNEL` | Read or write a channel slot. |
@@ -305,15 +305,27 @@ Direct USB, BLE, WiFi TCP, and Ethernet clients can also use this command for
 `stats-core`, `stats-radio`, `stats-radio-diag`, `stats-packets`, `erase`,
 and `get prv.key` (when private key export is enabled).
 WiFi/MQTT builds accept `get wifi.pwd`, `get mqttN.password`, and
-`get mqttN.token`. `get password` reports that Companion has no admin password;
-infrastructure roles return their own admin password on a local CLI connection.
-These privileges do not apply to CLI commands relayed over LoRa.
+`get mqttN.token`. On ESP32 WiFi Companion, `get password` reports whether the
+management password is available without revealing it. `password <new-password>`
+changes the saved password shared by setup WiFi, WebConfig and browser OTA.
+Other Companion builds report that they have no admin password; infrastructure
+roles return their own admin password on a local CLI connection.
+These direct-client maintenance and secret-read privileges do not apply to
+CLI commands relayed over LoRa.
+Existing trusted Companion transports and contacts explicitly granted remote
+CLI access retain their command privileges. The browser login does not add a
+password handshake to those transports.
 ESP32 WiFi Companion builds expose the official app's `get/set wifi.enabled`,
 `get/set wifi.ssid`, and `get/set wifi.pwd` controls. Credentials use the shared
 WiFi store, and enablement is saved in node preferences. WiFi/BLE builds apply
 enablement from the main loop; exclusive WiFi/BLE builds apply it after reboot.
 `get wifi.status` reports the connection state and `get wifi.ip` reports the
 station address, the setup AP address, or `(not connected)`.
+`get wifi.tcp` reports the actual app listener, interface registration, client
+connection and completed frame counters. It is read-only and available through
+the same binary CLI command over BLE or USB when TCP is unreachable. Listener
+startup failures recover automatically without resetting a healthy client or
+the WiFi connection; see [the CLI diagnostics](cli_commands.md#browser-configuration-portal-esp32-repeater-and-room-server).
 `set freq <MHz>` works through command `0x42` and authorized LoRa CLI, like
 `set radio`; it saves the frequency and requires reboot to apply. See
 [local maintenance commands](terminal_chat_cli.md#local-maintenance-commands)
@@ -545,6 +557,11 @@ Byte 1: Channel index (0 through max_channels - 1)
 
 **Response**: `PACKET_CHANNEL_INFO` (0x12) with channel details
 
+On builds with `MESH_ENABLE_MESHTEXT_CHAT=1`, a capable client can append a
+third request byte of `32` (`1F <index> 20`) to retrieve the complete 32-byte
+secret for an `mt-` channel. Ordinary two-byte requests, and requests for
+MeshCore channels, retain the original 16-byte secret response.
+
 ---
 
 ### 4. Set Channel
@@ -583,7 +600,27 @@ Bytes 34-49: Secret (16 bytes)
     [16 bytes of secret]
 ```
 
-**Note**: The 32-byte secret variant is unsupported and returns `PACKET_ERROR`.
+**Meshtext-only extension**: With `MESH_ENABLE_MESHTEXT_CHAT=1`, a 66-byte
+`SET_CHANNEL` frame can supply 32 secret bytes at offsets 34–65 for an `mt-`
+channel. Non-MT channels and feature-disabled builds reject this variant with
+`PACKET_ERROR`; the standard 50-byte MeshCore command is unchanged. The MT
+backend uses AES-256 when the upper 16 bytes are nonzero, otherwise AES-128.
+
+A legacy 50-byte SET of an existing MT channel preserves its upper 16 key
+bytes when the supplied lower half is unchanged. This permits an old client's
+GET/edit/SET round trip without silently truncating a provisioned AES-256 key.
+To explicitly replace or downgrade that key, send the full 32-byte variant
+(zero the upper half for AES-128). A client using only the legacy GET cannot
+export a complete AES-256 key. Stock app editors do not gain 256-bit
+provisioning or sharing from this firmware extension.
+
+For local CLI provisioning without implementing the binary extension, use
+`set mt.channel` with a 32- or 64-digit hexadecimal PSK; see the
+[private-channel commands](radio_profiles.md#meshtext-channel-chat).
+
+MT channel changes can also fail with a bad-state error for conflicting
+presets, an unsuitable manual radio2 profile, ambiguous region or a busy
+automatic owner. See [Meshtext channel chat](radio_profiles.md#meshtext-channel-chat).
 
 **Response**: `PACKET_OK` (0x00) on success, `PACKET_ERROR` (0x01) on failure
 
@@ -1035,7 +1072,9 @@ Bytes 2-33: Channel Name (32 bytes, null-terminated)
 Bytes 34-49: Secret (16 bytes)
 ```
 
-**Note**: The device returns the 16-byte channel secret in this response.
+**Note**: The normal response contains the 16-byte channel secret. An opt-in
+32-byte MT GET described above extends the secret through byte 65; response
+code, index and name fields remain unchanged.
 
 **PACKET_DEVICE_INFO** (0x0D):
 ```

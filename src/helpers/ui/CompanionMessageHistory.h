@@ -86,6 +86,7 @@ public:
     uint64_t heard_millis;
     int queue_index;
     bool unread;
+    bool own_sent;
     int channel_idx;
     char channel_name[32];
     char origin[62];
@@ -135,14 +136,15 @@ public:
 
   void add(uint64_t heard_millis, int channel_idx,
            const char* channel_name, const char* origin,
-           const char* message, int queue_index = -1) {
+           const char* message, int queue_index = -1, bool own_sent = false) {
     _head = (_head + 1) % Capacity;
     if (_count < Capacity) ++_count;
 
     Entry& entry = _entries[_head];
     entry.heard_millis = heard_millis;
     entry.queue_index = queue_index;
-    entry.unread = true;
+    entry.unread = !own_sent;
+    entry.own_sent = own_sent;
     entry.channel_idx = channel_idx;
     copyField(entry.channel_name, sizeof(entry.channel_name), channel_name);
     copyField(entry.origin, sizeof(entry.origin), origin);

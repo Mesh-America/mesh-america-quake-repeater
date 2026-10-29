@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "target.h"
+#include <helpers/radiolib/SX126xBufferedRadioHal.h>
 
 #include <helpers/sensors/MicroNMEALocationProvider.h>
 
@@ -7,9 +8,11 @@ HeltecV3Board board;
 
 #if defined(P_LORA_SCLK)
   static SPIClass spi;
-  RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi);
+  static SX126xBufferedRadioHal radio_hal(spi);
+  RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #else
-  RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+  static SX126xBufferedRadioHal radio_hal(SPI, MC_SX1262_SPI_HZ, true);
+  RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #endif
 
 WRAPPER_CLASS radio_driver(radio, board);
@@ -142,6 +145,10 @@ void HWTSensorManager::setPowerSavingEnabled(bool enabled) {
   if (powersaving_enabled == enabled) return;
   powersaving_enabled = enabled;
 
+  if (isTrackerGpsModeEnabled()) {
+    _location->setGPSPowerSaving(false);
+    return;
+  }
   bool gps_user_enabled = isGpsTelemetryUserEnabled();
   _location->setGPSPowerSaving(enabled && gps_user_enabled);
   if (!gps_user_enabled) return;

@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "target.h"
+#include <helpers/radiolib/TunableRadioHal.h>
 #include <helpers/ArduinoHelpers.h>
 
 RAK4631Board board;
@@ -17,7 +18,8 @@ RAK4631Board board;
   #endif
 #endif
 
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
+static TunableRadioHal radio_hal(SPI);
+RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 
 WRAPPER_CLASS radio_driver(radio, board);
 

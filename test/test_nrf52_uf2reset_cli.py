@@ -2,6 +2,7 @@
 """Pin local UF2 reset support across every nRF52 text CLI family."""
 
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +36,25 @@ assert "sender_timestamp == 0" in common
 
 assert "sender_timestamp == 0 && mesh::cli::isUf2ResetCommand(command)" in companion
 assert "board.rebootToUf2Bootloader()" in companion
-assert 'terminalOutput().println("  uf2reset");' in companion
+help_start = companion.index('  } else if (strcmp(command, "help") == 0) {')
+help_end = companion.index('  } else if (handleCommand(command, 0, local_reply))', help_start)
+help_body = companion[help_start:help_end]
+help_output = re.search(r"auto& (\w+) = terminalOutput\(\);", help_body)
+assert help_output
+# Bounded help writes use the cached selected stream; UF2 help stays nRF-only.
+assert '#include "CompanionHelp.inc"' in help_body
+assert (f'#define MESH_COMPANION_HELP_LINE_BEGIN {help_output[1]}.println('
+        in help_body)
+assert 'mesh::companion::writePackedCompanionHelp(output);' in help_body
+help_fragments = (ROOT / "examples/companion_radio/CompanionHelp.inc").read_text()
+packed_help = (ROOT / "examples/companion_radio/CompanionHelpPacked.cpp").read_text()
+assert '#include "CompanionHelp.inc"' in packed_help
+assert re.search(
+    r"#if defined\(NRF52_PLATFORM\)\s+"
+    r'MESH_COMPANION_HELP_LINE_BEGIN\s+"  uf2reset"\s+'
+    r"MESH_COMPANION_HELP_LINE_END\s+#endif",
+    help_fragments,
+)
 
 assert "mesh::cli::isUf2ResetCommand(command)" in chat
 assert "board.rebootToUf2Bootloader()" in chat

@@ -1,0 +1,37 @@
+// This is the only selected Companion source compiled as C++17. Include the
+// same feature/board context as MyMesh before testing board aliases: RAK3401
+// defines its RAK_4631 compatibility macro in the variant header.
+#include "MyMesh.h"
+
+#if defined(RAK_4631) && defined(COMPANION_RADIO_FULL) \
+    || (defined(STM32_PLATFORM) && defined(STM32WLxx))
+#include "CompanionHelpWriter.h"
+
+#if !defined(STM32_PLATFORM) || COMPANION_FEATURE_TEXT_TERMINAL
+namespace mesh { namespace companion {
+size_t writePackedCompanionHelp(Stream& output) {
+    // Constant evaluation retains only the exact-sized packed help image.
+    // The source fragments and every feature gate remain shared below.
+    static constexpr auto packed_help = []() constexpr {
+      constexpr char help_text[] =
+#define MESH_COMPANION_HELP_BEGIN
+#define MESH_COMPANION_HELP_END
+#define MESH_COMPANION_HELP_LINE_BEGIN
+#define MESH_COMPANION_HELP_LINE_END "\r\n"
+#include "CompanionHelp.inc"
+#undef MESH_COMPANION_HELP_BEGIN
+#undef MESH_COMPANION_HELP_END
+#undef MESH_COMPANION_HELP_LINE_BEGIN
+#undef MESH_COMPANION_HELP_LINE_END
+          ;
+      static_assert(mesh::companion::validHelpText(help_text),
+                    "Packed help requires ASCII without embedded NUL bytes");
+      return mesh::companion::packHelp<
+          mesh::companion::packedHelpSize(help_text)>(help_text);
+    }();
+    return mesh::companion::writePackedHelp(output, packed_help.bytes,
+                                    sizeof(packed_help.bytes));
+}
+} } // namespace mesh::companion
+#endif
+#endif

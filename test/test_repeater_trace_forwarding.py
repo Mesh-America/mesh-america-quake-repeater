@@ -1,5 +1,6 @@
 """Execute actual repeater trace gates with the production Packet definition."""
 from pathlib import Path
+from itertools import product
 import os
 import shutil
 import subprocess
@@ -8,6 +9,7 @@ import tempfile
 import unittest
 
 from test_replay_reset_integration import extract_braced
+from test_morse_tx import portable_radio_header
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,6 +19,7 @@ HARNESS = r'''
 #include <initializer_list>
 #include <Packet.h>
 #include <helpers/RoutingPolicy.h>
+#include <helpers/MorseReplyHandoff.h>
 #define LOOP_DETECT_OFF 0
 #define LOOP_DETECT_MINIMAL 1
 #define LOOP_DETECT_MODERATE 2
@@ -45,6 +48,13 @@ struct SimpleMeshTables {
   }
 };
 struct MyMesh : mesh::Mesh {
+  struct CLI {
+    mesh::MorseReplyHandoff handoff;
+    bool batteryAllowsForward(bool) const { return true; }
+    bool batteryAllowsTransmit(const mesh::Packet*) const { return true; }
+    mesh::MorseReplyHandoff& morseReply() { return handoff; }
+    const mesh::MorseReplyHandoff& morseReply() const { return handoff; }
+  } _cli;
   struct Prefs {
     uint8_t disable_fwd = 1, trace_when_repeat_off = 0;
     uint8_t flood_max = 64, flood_max_unscoped = 64, flood_max_advert = 64;
@@ -172,6 +182,48 @@ int main() {
   assert(node.allowPacketForward(&p));
   node._prefs.disable_fwd = 1;
   assert(!node.allowPacketForward(&p));
+
+  // Execute the real exact-reply handoff, not an always-false fixture stub.
+  // The listen acknowledgement and its profile copy must never retry while
+  // owned: retransmitting them can delay RX ownership and corrupt capture.
+  node._prefs.direct_retry_recent_enabled = 0;
+  node._prefs.trace_when_repeat_off = 1;
+  mesh::Packet reply, copy, unrelated;
+  reply.header = copy.header = unrelated.header =
+      ROUTE_TYPE_DIRECT | (PAYLOAD_TYPE_TRACE << PH_TYPE_SHIFT);
+  reply.path_len = copy.path_len = unrelated.path_len = 0;
+  const uint8_t actor[32] = {0x42};
+  auto& handoff = node._cli.morseReply();
+  handoff.beginCommand(actor);
+#if MESH_ENABLE_MORSE_RX
+  assert(handoff.stage(902100, 25, 60000, 100));
+  handoff.prepareReply(&reply);
+  handoff.copy(&reply, &copy);
+  handoff.armReply(&reply, true);
+  handoff.endCommand();
+  assert(handoff.pending() && handoff.ownsReply(&reply) && handoff.ownsReply(&copy));
+  assert(!node.allowDirectRetry(&reply, nullptr, 0));
+  assert(!node.allowDirectRetry(&copy, nullptr, 0));
+  assert(node.allowDirectRetry(&unrelated, nullptr, 0)); // identical content is not ownership
+  assert(node.allowDirectRetry(nullptr, nullptr, 0));
+  handoff.complete(&reply);
+  assert(!handoff.ownsReply(&reply) && handoff.ownsReply(&copy));
+  assert(node.allowDirectRetry(&reply, nullptr, 0));
+  assert(!node.allowDirectRetry(&copy, nullptr, 0));
+  handoff.fail(&copy);
+  assert(!handoff.ownsReply(&copy));
+  assert(node.allowDirectRetry(&copy, nullptr, 0));
+  handoff.cancel();
+#else
+  assert(!handoff.stage(902100, 25, 60000, 100));
+  handoff.prepareReply(&reply);
+  handoff.copy(&reply, &copy);
+  handoff.armReply(&reply, true);
+  handoff.endCommand();
+  assert(!handoff.pending() && !handoff.ownsReply(&reply) && !handoff.ownsReply(&copy));
+  assert(node.allowDirectRetry(&reply, nullptr, 0));
+  assert(node.allowDirectRetry(&copy, nullptr, 0));
+#endif
 }
 '''
 
@@ -195,14 +247,18 @@ class RepeaterTraceForwardingTest(unittest.TestCase):
             work = Path(directory)
             cpp = work / 'test.cpp'
             cpp.write_text(code, encoding='utf-8')
-            for portable in (False, True):
-                with self.subTest(portable=portable):
+            (work / 'Dispatcher.h').write_text(portable_radio_header(), encoding='utf-8')
+            for portable, morse_rx, history in product((False, True), (0, 1), (0, 1)):
+                with self.subTest(portable=portable, morse_rx=morse_rx, history=history):
                     binary = work / 'test'
                     built = subprocess.run([
                         compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
                         '-Wno-unused-parameter',
+                        f'-DMESH_ENABLE_MORSE_RX={morse_rx}',
+                        f'-DMESH_ENABLE_TELEMETRY_HISTORY={history}',
                         '-DMESH_ENABLE_FLOOD_GROUP_MODERATION=1', '-DMESH_ENABLE_CLOCK_SYNC=1',
                         *(['-DPORTABLE_MQTT_OBSERVER=1'] if portable else []), *flags,
+                        '-I' + str(work), '-I' + str(ROOT / 'test/mocks'),
                         '-I' + str(ROOT / 'src'), str(cpp), '-o', str(binary)],
                         capture_output=True, text=True, timeout=60)
                     self.assertEqual(built.returncode, 0, built.stdout + built.stderr)

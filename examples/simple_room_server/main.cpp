@@ -1,18 +1,30 @@
+#include <helpers/RegulatorSettings.h>
+#include <helpers/sensors/SolarXiaoPower.h>
+#include <helpers/LedSettings.h>
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #include <helpers/IdentityGeneration.h>
 #include <helpers/ui/StartupScreen.h>
 #include <helpers/ui/DisplayPowerSettings.h>
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+#include <helpers/ui/OLEDControllerSettings.h>
+#endif
 #include <helpers/UsbLoggingWatchdog.h>
 #include <helpers/UsbLoggingClientActivity.h>
+#include <helpers/MorseLoopPolicy.h>
+#include <helpers/PowerManagementUtils.h>
 #if MESH_PACKET_LOGGING
   #include <helpers/SerialPacketLog.h>
 #endif
 
 #include "MyMesh.h"
+#if defined(OTA_BOOTLOADER_MIGRATION)
+#include <helpers/ota/BootloaderMigration.h>
+#endif
 
 #if defined(ESP32_PLATFORM)
   #include <helpers/ESP32TrueRandom.h>
+  #include <helpers/esp32/ProfileIdleSleep.h>
   #include <helpers/esp32/BootFileSystem.h>
 #endif
 #if defined(NRF52_PLATFORM)
@@ -39,6 +51,42 @@ StdRNG fast_rng;
 SimpleMeshTables tables;
 MyMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
 #include "../InfrastructureWireless.h"
+
+#if defined(ETHERNET_ENABLED) && defined(OTA_RAK15002_SD_STORE)
+#include <helpers/ota/OtaContext.h>
+// The RAK15002 and RAK13800 occupy the same IO-slot chip select. Ethernet is
+// opt-in, and only the mesh thread may release cached sources/staging owners
+// and reserve the bus before its asynchronous DHCP worker starts.
+static bool prepareSdEthernet(void*, char* error, size_t capacity) {
+  auto* context = mesh::ota::ota_context_if_active();
+  if (!context) {
+    snprintf(error, capacity, "Error: OTA storage is not ready");
+    return false;
+  }
+  if (mesh::ota::ota_rak15002_sd_card_present()) {
+    snprintf(error, capacity, "Error: RAK15002 SD card fitted; Ethernet shares its IO slot");
+    return false;
+  }
+  if (!context->prepareRakSdForEthernet() ||
+      !mesh::ota::rak4631_try_acquire_spi(mesh::ota::RakSharedSpiOwner::Ethernet)) {
+    snprintf(error, capacity, "Error: Ethernet bus is locked by OTA activity or storage");
+    return false;
+  }
+  return true;
+}
+
+static bool canReleaseSdEthernet(void*) {
+  auto* context = mesh::ota::ota_context_if_active();
+  return context && context->canReleaseRakSdForEthernet();
+}
+
+static bool releaseSdEthernet(void*) {
+  auto* context = mesh::ota::ota_context_if_active();
+  if (!context || !context->releasedRakSdEthernet()) return false;
+  mesh::ota::rak4631_release_spi(mesh::ota::RakSharedSpiOwner::Ethernet);
+  return true;
+}
+#endif
 
 void halt() {
   while (1) ;
@@ -99,8 +147,23 @@ void setup() {
 #else
   #error "need to define filesystem"
 #endif
+  FILESYSTEM* regulator_prefs_fs = fs;
+#if defined(NRF52_PLATFORM)
+  if (volatile_primary_fs) regulator_prefs_fs = nullptr;
+#endif
+  mesh::leds::beginSettings(board, regulator_prefs_fs);
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+  mesh::solar::beginSettings(board, regulator_prefs_fs, MESH_ENABLE_TELEMETRY_HISTORY);
+#endif
+  if (!mesh::power::beginRegulatorSettings(board, radio_driver, regulator_prefs_fs)) {
+    MESH_DEBUG_PRINTLN("Regulator selection could not be applied");
+  }
+  mesh::RadioProfileCLI::configureBootTuning(regulator_prefs_fs, radio_driver);
 #ifdef DISPLAY_CLASS
   mesh::ui::loadDisplayPowerSettings(fs, false);
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+  mesh::ui::loadOLEDControllerSettings(regulator_prefs_fs);
+#endif
   mesh::ui::StartupScreen startup_screen;
   display_ready = display.begin();
   if (display_ready) {
@@ -193,6 +256,9 @@ void setup() {
   sensors.begin();
 
   the_mesh.begin(fs);
+#if defined(OTA_BOOTLOADER_MIGRATION)
+  mesh::ota::bootloader_migration_begin(volatile_primary_fs ? nullptr : fs);
+#endif
 
 #if defined(NRF52_PLATFORM)
   mesh::loadUsbLoggingWatchdog(fs, !volatile_primary_fs,
@@ -225,6 +291,14 @@ void setup() {
 #endif
 
 #ifdef ETHERNET_ENABLED
+#if defined(OTA_RAK15002_SD_STORE)
+  EthernetCliHooks hooks;
+  hooks.prepare = prepareSdEthernet;
+  hooks.can_release = canReleaseSdEthernet;
+  hooks.released = releaseSdEthernet;
+  hooks.storage_conflict = [](void*) { return mesh::ota::ota_rak15002_sd_card_present(); };
+  ethernet_configure(hooks); // Shared IO slot defaults OFF on every restart.
+#endif
   ethernet_start_task();
 #endif
 
@@ -253,6 +327,9 @@ static bool usbLoggingRecoverySafe(void*) {
 }
 
 void loop() {
+#if defined(NRF52_PLATFORM)
+  board.prepareSleepCycle();
+#endif
   mesh::serviceUsbLoggingPort();
   mesh::wireless::control().service(millis());
 #if defined(NRF52_PLATFORM)
@@ -315,7 +392,11 @@ void loop() {
 
 #ifdef ETHERNET_ENABLED
   ethernet_loop_maintain();
+#if defined(OTA_RAK15002_SD_STORE)
+  if (ethernet_take_session_reset() || !ethernet_get_enabled()) {
+#else
   if (ethernet_take_session_reset() || !ethernet_client.connected()) {
+#endif
     the_mesh.cancelLocalOutput(ethernet_client);
     ethernet_command[0] = 0;
   }
@@ -331,11 +412,16 @@ void loop() {
 #endif
 
   the_mesh.loop();
-  sensors.loop();
+  const bool morse_timing = mesh::morseTimingActive(&radio_driver);
+  if (!morse_timing) sensors.loop();
 #ifdef DISPLAY_CLASS
   if (display_ready) ui_task.loop();
 #endif
   rtc_clock.tick();
+  mesh::power::serviceRegulatorSettings();
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+  mesh::solar::service();
+#endif
   board.loop();
   if (mesh::serviceUsbLoggingWatchdog(usbLoggingRecoverySafe)) board.reboot();
 #if MESH_USB_CONSOLE_COOPERATIVE
@@ -347,32 +433,73 @@ void loop() {
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.loop();
 #endif
-  bool can_power_save = the_mesh.getNodePrefs()->powersaving_enabled
-      && !board.isUsbDataConnected()
-      && !mesh::isUsbLoggingWatchdogArmed()
-      && !mesh::wireless::control().pending();
+#if defined(NRF52_PLATFORM)
+  if (the_mesh.getNodePrefs()->powersaving_enabled && the_mesh.isDualRadioActive()
+      && !morse_timing) board.prepareProfileIdleCycle();
+#endif
+#if defined(ESP32_PLATFORM)
+  board.servicePowerTestControls();
+  mesh::esp32::serviceCpuFrequencyPolicy(board, the_mesh.getNodePrefs()->cpu_freq_mhz,
+      the_mesh.getNodePrefs()->powersaving_enabled != 0, millis(), false, the_mesh.isDualRadioActive());
+#endif
+  const auto sleep_guard = [](bool allowed, mesh::powerdiag::Reason reason) {
+    if (!allowed && mesh::powerdiag::enabled())
+      mesh::powerdiag::decision(mesh::powerdiag::mask(reason), millis());
+    return allowed;
+  };
+  bool can_power_save = sleep_guard(the_mesh.getNodePrefs()->powersaving_enabled,
+                                    mesh::powerdiag::Reason::PolicyOff)
+      && sleep_guard(!morse_timing, mesh::powerdiag::Reason::Morse)
+      && sleep_guard(!board.isUsbDataConnected(), mesh::powerdiag::Reason::UsbSession)
+      && sleep_guard(!mesh::isUsbLoggingWatchdogArmed(), mesh::powerdiag::Reason::UsbRecovery)
+      && sleep_guard(!mesh::wireless::control().pending(), mesh::powerdiag::Reason::Wireless);
 #if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
     && MOMENTARY_BUTTON_WAKE_FROM_SLEEP \
     && defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)
-  can_power_save = can_power_save && !user_btn.needsPolling();
+  can_power_save = can_power_save && sleep_guard(!user_btn.needsPolling(), mesh::powerdiag::Reason::Button);
 #endif
   if (can_power_save) {
-    uint32_t sleep_secs = the_mesh.getPowerSaveSleepSeconds(30);
+#if defined(ESP32_PLATFORM)
+    const uint32_t sleep_budget_started_us = static_cast<uint32_t>(esp_timer_get_time());
+#endif
+    uint32_t sleep_ms = the_mesh.getPowerSaveSleepMilliseconds(30000);
+    uint32_t noise_floor_delay_ms = 0;
+    const bool noise_floor_wait = the_mesh.getNextNoiseFloorWakeDelay(noise_floor_delay_ms);
+    if (noise_floor_wait && noise_floor_delay_ms < sleep_ms) sleep_ms = noise_floor_delay_ms;
+    if (noise_floor_wait && noise_floor_delay_ms == 0) {
+      if (mesh::powerdiag::enabled())
+        mesh::powerdiag::decision(mesh::powerdiag::mask(mesh::powerdiag::Reason::Calibration), millis());
+      sleep_ms = 0;
+    }
 #ifdef HAS_EXTERNAL_WATCHDOG
-    if (sleep_secs > 0) external_watchdog.feed();
+    if (sleep_ms > 0) external_watchdog.feed();
 #endif
 #if defined(NRF52_PLATFORM)
-    if (sleep_secs > 0) {
-      board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
+    if (sleep_ms > 0 && the_mesh.canIdleDualRadio()) {
+      if (mesh::powerdiag::enabled()) mesh::powerdiag::decision(0, millis());
+      if (noise_floor_wait) board.sleepMilliseconds(sleep_ms);
+      else board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
     }
 #else
-    if (sleep_secs > 0 && the_mesh.millisHasNowPassed(POWERSAVING_FIRSTSLEEP_SECS * 1000)) { // To check if it is time to sleep
-      board.sleep(sleep_secs); // Sleep. Wake up for scheduled jobs or when receiving a LoRa packet
+    if (sleep_ms > 0 && the_mesh.millisHasNowPassed(POWERSAVING_FIRSTSLEEP_SECS * 1000)) { // To check if it is time to sleep
+      if (mesh::powerdiag::enabled()) mesh::powerdiag::decision(0, millis());
+#if defined(ESP32_PLATFORM)
+      if (the_mesh.isDualRadioActive()) {
+        if (!mesh::esp32::tryProfileIdleSleep(the_mesh, board, sleep_budget_started_us, sleep_ms)
+            && mesh::powerdiag::enabled())
+          mesh::powerdiag::decision(mesh::powerdiag::mask(mesh::powerdiag::Reason::DualRadio), millis());
+      } else
+#endif
+      board.sleepMilliseconds(sleep_ms); // Wake for scheduled jobs or a LoRa packet.
+    } else if (sleep_ms > 0 && mesh::powerdiag::enabled()) {
+      mesh::powerdiag::decision(mesh::powerdiag::mask(mesh::powerdiag::Reason::Startup), millis());
     }
 #endif
   }
 #if defined(ESP32_PLATFORM)
-  if (!can_power_save && the_mesh.getNodePrefs()->powersaving_enabled) {
+  if (!morse_timing && !can_power_save && !the_mesh.isDualRadioActive()
+      && the_mesh.getNodePrefs()->powersaving_enabled) {
+    // Live radio2 needs the scanner's zero-delay polling cadence.
     delay(1); // Keep USB and the button wake interval serviced while idle.
   }
 #endif

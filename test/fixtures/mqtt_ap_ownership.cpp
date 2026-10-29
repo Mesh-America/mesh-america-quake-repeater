@@ -6,7 +6,9 @@
 #include <vector>
 #include "helpers/AlertFaultPolicy.h"
 #include "helpers/MQTTConnectionPolicy.h"
+#include "helpers/MQTTTransportHealth.h"
 #include "helpers/WiFiPowerSave.h"
+#include "helpers/WiFiNetworkPowerPolicy.h"
 #define MQTT_DEBUG_PRINTLN(...) ((void)0)
 #define pdMS_TO_TICKS(value) (value)
 using TickType_t=uint32_t;
@@ -69,6 +71,9 @@ namespace mesh{namespace wifi{
 int s_wifi_disconnect_reason=0;uint32_t s_wifi_disconnect_time=0;
 unsigned long s_wifi_connected_at=0;
 struct MQTTBridge{
+ mesh::wifi::NetworkPowerPolicy _network_power_policy;
+ std::atomic<bool>_network_suspended{false};
+ bool _network_espnow_restore_pending=false;
  bool _wifi_event_registered=false,_manage_wifi=true,_ntp_sync_pending=false;
  int _wifi_reconnect_backoff_attempt=0;
  std::atomic<bool>_ntp_synced{true},_stop_requested{false},_stop_acked{false};
@@ -78,15 +83,24 @@ struct MQTTBridge{
  void setWifiOutage(AlertFaultPolicy::OutageSnapshot value){outage=value;}
  char _wifi_ssid[8]="mesh",_wifi_password[8]="secret";
  void beginWiFiStation();
+ void applyTimezoneRules() {}
  bool _wifi_status_initialized=true;
  int _last_wifi_status=WL_DISCONNECTED;
  unsigned long _last_wifi_check=0,_last_wifi_reconnect_attempt=0;
  uint8_t _wifi_power_save=1;
  struct{bool canonical_wifi=true;}_node_info;
  struct{uint8_t wifi_power_save=1;}prefs,*_obs=&prefs;
- struct Client{void disconnect(){}};
- struct Slot{Client* client=nullptr;bool connected=false;}_slots[RUNTIME_MQTT_SLOTS];
+ struct Client{void disconnect(){}bool isStarted()const{return false;}};
+ struct Slot{
+  Client* client=nullptr;bool connected=false;
+  uint32_t connected_at_ms=0,current_outage_started_ms=0;
+  MQTTTransportHealth::State transport_health;
+ }_slots[RUNTIME_MQTT_SLOTS];
  bool _slot_attempt_pending[RUNTIME_MQTT_SLOTS]={};
+ std::atomic<bool> _slot_transport_fault_pending[RUNTIME_MQTT_SLOTS]={};
+ std::atomic<bool> _slot_health_reset_pending[RUNTIME_MQTT_SLOTS]={};
+ void updateSlotTransportDiag(int,uint32_t){}
+ void updateCachedConnectionStatus(){}
  std::vector<std::string> cleanup;
  void cancelNtpRefresh(){cleanup.push_back("ntp");}
  void teardownSlot(int index){cleanup.push_back("slot"+std::to_string(index));}
@@ -96,8 +110,11 @@ struct MQTTBridge{
  bool handleWiFiConnection(unsigned long now);
  void mqttTaskLoop(){
 @TASK_START@
+  while(true){
 @TASK_STOP@
-  ++slot_work;
+    ++slot_work;
+    break;
+  }
  }
 };
 @INITIALIZE@

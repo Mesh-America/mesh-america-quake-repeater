@@ -157,6 +157,9 @@ LEGACY_OTA_CACHE_ROUNDS = 2
 LEGACY_RELAY_REBOOT_MIN_REMAINING_SECONDS = 8 * 60
 TARGET_RXPS_RECOVERY_FILE = "target-rxps-settings.json"
 SOURCE_RXPS_RECOVERY_FILE = "source-rxps-settings.json"
+TARGET_TEMP_RECOVERY_FILE = "target-tempradio-cleanup.json"
+RELAY_TEMP_RECOVERY_PREFIX = "relay-tempradio-cleanup-"
+TARGET_TEMP_NORMAL_PROOF_SECONDS = 90
 MIN_MESHCLI_VERSION = (1, 6, 0)
 # Tested format-3 inspect/verify/serve support. Keep automatic repairs pinned;
 # neither a package nor a moving branch may choose code to install on the host.
@@ -287,6 +290,17 @@ class TargetInfo:
     def nrf_external(self) -> bool:
         """Whether nRF52 OTA staging is outside internal application flash."""
         return self.nrf_sd or self.nrf_qspi
+
+
+@dataclass(frozen=True)
+class BootloaderStatus:
+    board_id: int
+    target_id: int
+    device_name: str
+    hw_id: str
+    crc32: int
+    apply_abi: int
+    storage_flags: int
 
 
 @dataclass(frozen=True)
@@ -1560,14 +1574,11 @@ def prepare_package(
                 "--patch-type",
                 "in-place",
             ])
-            # External staging leaves the application region available as the
-            # detools workspace. 0xC6000 is safe for both S140 v7 (app starts
-            # at 0x27000) and older v6 layouts (0x26000). Internal staging
-            # retains its deliberately smaller legacy workspace.
-            inplace_memory = args.inplace_memory or (
-                "0xC6000" if target.nrf_external else "0x98000"
-            )
-            command.extend(["--inplace-memory", inplace_memory])
+            # Let motatool size the workspace from both authenticated layout
+            # records and validate the application/staging bounds. Images
+            # without those records retain motatool's conservative fallback.
+            if args.inplace_memory is not None:
+                command.extend(["--inplace-memory", args.inplace_memory])
         if args.sign_key:
             command.extend(["--sign", str(args.sign_key.resolve())])
         result = run_checked(
@@ -2241,13 +2252,19 @@ class Controller:
         clock_lines = [
             line.strip()
             for line in after.replace("\r", "").split("\n")
-            if re.fullmatch(r"[0-9]{1,10}", line.strip())
+            if re.fullmatch(r"[+-]?[0-9]+", line.strip())
         ]
-        if len(clock_lines) != 1:
+        if not clock_lines:
             raise TransmissionError(
+                f"clock query for {target} returned no epoch value"
+            )
+        if len(clock_lines) != 1:
+            raise OtaError(
                 f"clock query for {target} returned {len(clock_lines)} "
                 "unambiguous epoch values"
             )
+        if not re.fullmatch(r"[0-9]{1,10}", clock_lines[0]):
+            raise OtaError(f"clock query for {target} returned an invalid epoch value")
         epoch = int(clock_lines[0])
         if epoch <= 0 or epoch > 0xFFFFFFFF:
             raise OtaError(f"clock query for {target} returned invalid {epoch}")
@@ -2808,14 +2825,13 @@ def bind_contact_selectors(controller: Controller, args: argparse.Namespace) -> 
     args.source_contact_value = source
 
 
-def query_bootloader_target(
-    controller: Controller, target: TargetInfo,
-) -> TargetInfo:
-    reply = controller.remote_command(target.name, "ota bootloader status")
+def parse_bootloader_status(reply: str) -> BootloaderStatus:
+    """Validate the installed bootloader's complete status and identity."""
     match = re.fullmatch(
         r"BL board=([0-9A-Fa-f]{8}) target=([0-9A-Fa-f]{8}) name=(\S+) "
         r"crc=([0-9A-Fa-f]{8}) abi=(\d+) caps=([0-9A-Fa-f]{2}) "
-        r"\| staged:(?:ready|none) mid=(?:-|[0-9A-Fa-f]{8}) hash=(?:-|[0-9A-Fa-f]{16})",
+        r"\| staged:(?:none mid=- hash=-|"
+        r"ready mid=[0-9A-Fa-f]{8} hash=[0-9A-Fa-f]{16})",
         reply.strip(),
     )
     if match is None:
@@ -2823,7 +2839,7 @@ def query_bootloader_target(
             f"destination cannot stage a bootloader update: {reply}; "
             "requires exact-board ABI-3 self-update bootloader and capable application"
         )
-    board, target_id, name, _crc, abi, caps = match.groups()
+    board, target_id, name, crc, abi, caps = match.groups()
     library = bootloader_library()
     try:
         hw_id = (
@@ -2835,12 +2851,182 @@ def query_bootloader_target(
         raise OtaError(f"invalid destination bootloader identity: {exc}") from exc
     if derived_target != int(target_id, 16):
         raise OtaError("destination bootloader board/name does not match its target ID")
-    if int(abi) < 3 or int(abi) != target.bootloader_abi:
+    return BootloaderStatus(
+        int(board, 16), derived_target, name, hw_id, int(crc, 16),
+        int(abi), int(caps, 16),
+    )
+
+
+def query_bootloader_target(
+    controller: Controller, target: TargetInfo,
+) -> TargetInfo:
+    live = parse_bootloader_status(
+        controller.remote_command(target.name, "ota bootloader status")
+    )
+    if live.apply_abi < 3 or live.apply_abi != target.bootloader_abi:
         raise OtaError("destination reports inconsistent or unsupported bootloader ABI")
     return replace(
-        target, boot_target_id=derived_target, boot_hw_id=hw_id,
-        boot_storage=int(caps, 16),
+        target, boot_target_id=live.target_id, boot_hw_id=live.hw_id,
+        boot_storage=live.storage_flags,
     )
+
+
+def validate_adaptive_bootloader_status(live: BootloaderStatus, hw_id: str) -> None:
+    """Require an installed, canonical bootloader for this adaptive family."""
+    if hw_id in ("RAK_3401", "RAK4631"):
+        name = "3401" if hw_id == "RAK_3401" else "4631"
+        expected_board = 0x239A0029
+        identities = {f"{name}_DFU": 0x0A, f"{name}_AUTO_DFU": 0x1E}
+    elif hw_id == "Heltec_tower_v2":
+        expected_board = 0x239A0071
+        identities = {"TOWER_V2_OTA": 0x09}
+    else:
+        raise OtaError("adaptive destination hardware family is unverified")
+    if (
+        live.board_id != expected_board
+        or identities.get(live.device_name) != live.storage_flags
+        or not 3 <= live.apply_abi < 0xFFFF
+        or live.crc32 in (0, 0xFFFFFFFF)
+    ):
+        raise OtaError("adaptive destination bootloader identity, ABI or storage profile is unverified")
+
+
+def prepare_cold_rak_application_storage(
+    controller: Controller, target_name: str, status: str, self_status: str,
+) -> tuple[str, str, BootloaderStatus | None]:
+    """Prepare only the known idle, deferred RAK application-store selector.
+
+    Ordinary status/self getters intentionally do not probe optional storage.
+    The explicit bootloader status query enters the existing OTA media/staging
+    preparation boundary without downloading, changing preferences, or writing
+    firmware. Optional staging media may be initialized by that preparation.
+    Bind both sides of that one query to the same running application, then
+    require a complete positive storage diagnosis; preparation is never a
+    substitute for the normal package/capability checks.
+    """
+    identity_pattern = (
+        r"self body=([1-9][0-9]*) image=([1-9][0-9]*) "
+        r"base_hash=([0-9A-Fa-f]{16}) \| maxblk:(1024|2048)"
+        r"(?: abi=([0-9]+) codecs=0x([0-9A-Fa-f]+))? \| "
+    )
+    before = re.fullmatch(
+        identity_pattern + r"storage unsafe: not probed", self_status.strip(),
+    )
+    if before is None:
+        return status, self_status, None
+
+    def status_identity(reply: str) -> tuple[str, str, int]:
+        hardware = re.findall(r"\bhw=([^ |]+)", reply)
+        targets = re.findall(r"\btarget:([0-9A-Fa-f]{8})\b", reply)
+        limits = re.findall(r"\bmaxblk:(\d+)\b", reply)
+        backends = re.findall(r"\bbl:([^ |]+)", reply)
+        if (
+            not reply.startswith("OTA | ")
+            or len(hardware) != 1 or hardware[0] not in ("RAK_3401", "RAK4631")
+            or len(targets) != 1 or len(limits) != 1 or len(backends) != 1
+            or reply.split(" | ").count("no download") != 1
+            or "download:" in reply
+        ):
+            raise OtaError("cold RAK storage preparation requires a known, idle destination")
+        return hardware[0], targets[0].upper(), parse_target_max_block_size(reply, self_status)
+
+    bound_status = status_identity(status)
+    if re.findall(r"\bbl:([^ |]+)", status)[0] not in ("NONE", "storage-ERR"):
+        raise OtaError("cold RAK destination reports conflicting unprobed storage diagnostics")
+    boot_status = controller.remote_command(target_name, "ota bootloader status", retry=False)
+    live = parse_bootloader_status(boot_status)
+    validate_adaptive_bootloader_status(live, bound_status[0])
+    if not boot_status.strip().endswith("| staged:none mid=- hash=-"):
+        raise OtaError("cold RAK storage preparation requires no staged bootloader update")
+    prepared_status = controller.remote_command(target_name, "ota status", retry=False)
+    prepared_self = controller.remote_command(target_name, "ota self", retry=False)
+    after = re.fullmatch(identity_pattern + r"(.+)", prepared_self.strip())
+    if (
+        after is None
+        or before.groups() != after.groups()[:6]
+        or bound_status != status_identity(prepared_status)
+    ):
+        raise OtaError("destination firmware identity or geometry changed during cold RAK storage preparation")
+    if before.group(5) is not None and (
+        int(before.group(5)) != live.apply_abi or int(before.group(6), 16) & 0x5 != 0x5
+    ):
+        raise OtaError("cold RAK destination reports inconsistent or unsupported application capabilities")
+    tail = after.group(7)
+    if re.fullmatch(r"internal store:[1-9][0-9]*K \| bootloader: delta apply OK", tail):
+        backend = "internal"
+    elif re.fullmatch(r"QSPI store:[1-9][0-9]*K \| bootloader: QSPI apply OK", tail):
+        backend = "QSPI"
+    elif bound_status[0] == "RAK4631" and tail == "SD store | bootloader: authenticated SD apply OK":
+        backend = "SD"
+    else:
+        raise OtaError("cold RAK application storage remains unprepared, unsafe or unsupported")
+    if re.findall(r"\bbl:([^ |]+)", prepared_status) != [backend]:
+        raise OtaError("cold RAK destination reports conflicting prepared storage diagnostics")
+    print("[storage] prepared idle RAK application storage; running firmware identity unchanged")
+    return prepared_status, prepared_self, live
+
+
+def query_adaptive_bootloader_caps(
+    controller: Controller, target_name: str, status: str, self_status: str,
+    hw_id: str | None, *, verified_bootloader: BootloaderStatus | None = None,
+) -> tuple[int, int] | None:
+    """Recover only capabilities guaranteed by known adaptive firmware.
+
+    Adaptive RAK/Tower `ota self` formats were introduced in 72afac9a4 and
+    30fe0d617. Both descend from 3d78d9c84 (required FULL|INPLACE mask 0x5)
+    and fd98bc90f (status refuses invalid self-update capabilities). Thus a
+    successful strict `ota bootloader status` attests that subset, independently
+    of its `caps` field, which describes storage and is NOT a codec mask.
+    Generic legacy diagnostics predate that contract and must still fail.
+    """
+    prefix = (
+        r"self body=[1-9][0-9]* image=[1-9][0-9]* "
+        r"base_hash=[0-9A-Fa-f]{16} \| maxblk:(?:1024|2048) \| "
+    )
+    storage = None
+    if hw_id in ("RAK_3401", "RAK4631"):
+        if re.fullmatch(
+            prefix + r"internal store:[1-9][0-9]*K \| bootloader: delta apply OK",
+            self_status.strip(),
+        ):
+            storage = "internal"
+        elif re.fullmatch(
+            prefix + r"QSPI store:[1-9][0-9]*K \| bootloader: QSPI apply OK",
+            self_status.strip(),
+        ):
+            storage = "QSPI"
+        elif hw_id == "RAK4631" and re.fullmatch(
+            prefix + r"SD store \| bootloader: authenticated SD apply OK",
+            self_status.strip(),
+        ):
+            storage = "SD"
+    elif hw_id == "Heltec_tower_v2":
+        shape = re.fullmatch(
+            prefix + r"store:(SD|internal) \| bootloader:apply OK",
+            self_status.strip(),
+        )
+        if shape:
+            storage = shape.group(1)
+    else:
+        return None
+    if storage is None:
+        return None
+    if (
+        not status.startswith("OTA | ")
+        or re.findall(r"\bhw=([^ |]+)", status) != [hw_id]
+        or re.findall(r"\bbl:([^ |]+)", status) != [storage]
+    ):
+        raise OtaError("adaptive destination reports conflicting hardware/storage diagnostics")
+    live = verified_bootloader or parse_bootloader_status(
+        controller.remote_command(target_name, "ota bootloader status", retry=False)
+    )
+    validate_adaptive_bootloader_status(live, hw_id)
+    print(
+        "[bootloader] adaptive diagnostics verified through installed "
+        f"bootloader status: ABI {live.apply_abi}, guaranteed codec subset 0x5 "
+        "(storage flags are independent)"
+    )
+    return live.apply_abi, 0x5
 
 
 def query_target(
@@ -2869,6 +3055,11 @@ def query_target(
     except OtaError as exc:
         print(f"[warn] optional `get bootloader.ver` probe unavailable: {exc}")
     self_status = controller.remote_command(args.target, "ota self")
+    verified_bootloader = None
+    if getattr(args, "package_kind", "application") == "application":
+        status, self_status, verified_bootloader = prepare_cold_rak_application_storage(
+            controller, args.target, status, self_status,
+        )
     hash_match = re.search(r"base_hash=([0-9A-Fa-f]{16})", self_status)
     if not hash_match:
         raise OtaError("could not read destination base hash from `ota self`")
@@ -2932,12 +3123,36 @@ def query_target(
         bootloader_abi = int(caps_match.group(1))
         bootloader_codecs = int(caps_match.group(2), 16)
     elif platform == "nrf52":
-        version = bootloader_version or "unknown version"
-        raise OtaError(
-            f"destination nRF52 bootloader {version} does not report a "
-            "compatible mOTA ABI and codec mask in `ota self`; install the "
-            "exact-board OTAFIX bootloader first"
-        )
+        if getattr(args, "package_kind", "application") != "application":
+            raise OtaError(
+                "bootloader packages require a directly reported mOTA ABI and "
+                "codec mask; upgrade the application to expose complete "
+                "bootloader diagnostics before retrying"
+            )
+        try:
+            adaptive_caps = query_adaptive_bootloader_caps(
+                controller, args.target, status, self_status, hw_id,
+                verified_bootloader=verified_bootloader,
+            )
+        except OtaError as exc:
+            raise OtaError(
+                "cannot verify the destination's mOTA ABI and codec mask from "
+                f"adaptive diagnostics: {exc}; upgrade the application to expose "
+                "complete bootloader diagnostics before retrying"
+            ) from exc
+        if adaptive_caps is None:
+            raise OtaError(
+                "destination nRF52 application does not report a compatible "
+                "mOTA ABI and codec mask in `ota self`; upgrade the application "
+                "to expose complete bootloader diagnostics before retrying"
+            )
+        bootloader_abi, bootloader_codecs = adaptive_caps
+    if (
+        platform == "nrf52"
+        and getattr(args, "package_kind", "application") == "application"
+        and "storage unsafe:" in self_status
+    ):
+        raise OtaError("destination reports unsafe application OTA storage")
     current_version = None
     current_version_source = None
     try:
@@ -3146,12 +3361,19 @@ def prompt_for_next_125khz_sf(args: argparse.Namespace) -> bool:
     return True
 
 
+_SOURCE_TERMINAL_HEADER = re.compile(
+    r"(?m)^===== MeshCore (?:Full )?Companion Terminal =====[ \t]*$"
+)
+_SOURCE_CLI_ERROR_LINE = re.compile(
+    r"^[ \t]*(?:->[ \t]*)?(?:error|err|fail|unknown[ \t]+command)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 def parse_source_terminal_banner(value: str) -> tuple[str, str]:
     """Read one Full/Companion welcome identity, not an advert or cached name."""
     text = value.replace("\r", "")
-    headers = list(re.finditer(
-        r"(?m)^===== MeshCore (?:Full )?Companion Terminal =====[ \t]*$", text,
-    ))
+    headers = list(_SOURCE_TERMINAL_HEADER.finditer(text))
     if len(headers) != 1:
         raise OtaError("OTA source did not expose one fresh Companion terminal banner")
     tail = text[headers[0].end():]
@@ -3167,6 +3389,21 @@ def parse_source_terminal_banner(value: str) -> tuple[str, str]:
     if len(keys) != 1 or welcome != keys:
         raise OtaError("OTA source Companion banner did not expose one exact public key after WELCOME")
     return keys[0].lower(), tail[prompt.end():]
+
+
+def _source_cli_response_text(value: str) -> str:
+    """Exclude a validated welcome banner from command reply classification."""
+    text = value.replace("\r", "")
+    header = _SOURCE_TERMINAL_HEADER.search(text)
+    if header is None:
+        return text
+    _, response = parse_source_terminal_banner(text)
+    banner_end = len(text) - len(response)
+    # Preserve errors outside the welcome record and unexpected rejection
+    # lines mixed into it. A valid welcome key cannot hide a real failure.
+    banner_errors = [line for line in text[header.start():banner_end].splitlines()
+                     if _SOURCE_CLI_ERROR_LINE.search(line)]
+    return "\n".join((text[:header.start()], *banner_errors, response))
 
 
 def source_cli_command(
@@ -3319,9 +3556,9 @@ def source_cli_command(
             except OtaError as exc:
                 raise TransmissionError(f"source CLI link failed: {exc}") from exc
             output = f"{result.stdout}\n{result.stderr}".strip()
-        lowered = output.lower()
-        if ("error" in lowered or "unknown command" in lowered or "err " in lowered
-                or re.search(r"(?:^|\n)\s*(?:->\s*)?(?:err|fail)(?:\b|:)", lowered)):
+        response_output = _source_cli_response_text(output)
+        lowered = response_output.lower()
+        if _SOURCE_CLI_ERROR_LINE.search(response_output):
             raise OtaError(f"source rejected {command_text!r}: {output}")
         if full_companion_identity:
             version_output = output.replace("\r", "")
@@ -3841,16 +4078,36 @@ class SeederProcess:
                 creationflags=creationflags,
             )
         except FileNotFoundError as exc:
-            self.log_file.close()
+            self._close_log()
             raise OtaError(f"required command was not found: {self.args.motatool}") from exc
         self._wait_until_attached()
         print("[seeder] running (device COUNT confirmed)")
 
-    def _log_tail(self) -> str:
+    def _close_log(self) -> None:
+        log_file = self.log_file
+        self.log_file = None
+        if log_file is not None and not log_file.closed:
+            try:
+                log_file.close()
+            except OSError as exc:
+                print(
+                    f"WARNING: could not close seeder log {self.log_path}: {exc}",
+                    file=sys.stderr,
+                )
+
+    def _read_log(self) -> str:
         if self.log_file is not None and not self.log_file.closed:
-            self.log_file.flush()
+            try:
+                self.log_file.flush()
+            except OSError:
+                # The subprocess writes directly to this descriptor. A parent
+                # flush failure must not hide bytes already readable on disk.
+                pass
+        return self.log_path.read_text(encoding="utf-8", errors="replace")
+
+    def _log_tail(self) -> str:
         try:
-            detail = self.log_path.read_text(encoding="utf-8", errors="replace")
+            detail = self._read_log()
         except OSError as exc:
             return f"could not read seeder log: {exc}"
         return detail[-4096:].strip() or "no seeder log output"
@@ -3947,16 +4204,17 @@ class SeederProcess:
 
         ``motatool serve -v`` logs each successful random-access read. A read
         at a payload block boundary means the source has reached that block's
-        response job. This is a passive progress signal: unlike remote
-        ``ota status``, reading it consumes no LoRa airtime and cannot collide
-        with the transfer it is observing.
+        response job. Compressed transport instead names the logical block;
+        its offsets are compressed-slice offsets, not package-file offsets.
+        This run serves one package at native index zero. Count each successful
+        compressed slice/retry as activity without counting its block twice.
+        These reads are passive progress, not proof of destination completion;
+        the monitor still requires the destination's exact ready-session reply.
         """
-        if self.log_file is not None and not self.log_file.closed:
-            self.log_file.flush()
         try:
-            detail = self.log_path.read_text(encoding="utf-8", errors="replace")
+            detail = self._read_log()
         except OSError:
-            return 0, math.ceil(package.payload_size / package.block_size)
+            return 0, math.ceil(package.payload_size / package.block_size), 0
         offsets = [
             int(match)
             for match in re.findall(r"\bREAD\s+\d+\s+@(\d+)\s+OK\b", detail)
@@ -3966,26 +4224,38 @@ class SeederProcess:
             package.payload_offset + index * package.block_size
             for index in range(total)
         }
-        payload_reads = [offset for offset in offsets if offset in boundaries]
+        payload_reads = [
+            (offset - package.payload_offset) // package.block_size
+            for offset in offsets if offset in boundaries
+        ]
+        for block, offset in re.findall(
+            r"\[dev\][ \t]+DEFLATE[ \t]+0[ \t]+block=([0-9]+)"
+            r"[ \t]+@([0-9]+)[ \t]+OK(?=[ \t]*(?:\r?\n|$))", detail
+        ):
+            block_index, compressed_offset = int(block), int(offset)
+            if block_index < total and compressed_offset <= 0xFFFF:
+                payload_reads.append(block_index)
         return len(set(payload_reads)), total, len(payload_reads)
 
     def stop(self) -> None:
-        if self.process is None:
-            return
-        if self.process.poll() is None:
+        process = self.process
+        if process is not None and process.poll() is None:
             try:
                 if os.name == "nt":
-                    self.process.terminate()
+                    process.terminate()
                 else:
-                    self.process.send_signal(signal.SIGINT)
-                self.process.wait(timeout=10)
+                    process.send_signal(signal.SIGINT)
+                process.wait(timeout=10)
             except (subprocess.TimeoutExpired, ProcessLookupError):
-                self.process.kill()
-                self.process.wait(timeout=5)
-        if self.log_file is not None and not self.log_file.closed:
-            self.log_file.close()
+                process.kill()
+                process.wait(timeout=5)
+        # Keep ownership if shutdown fails: the child may still own the source
+        # serial port. Once exit is confirmed, a log-close failure must not
+        # prevent the caller from restoring radio and RXPS policies.
         self.process = None
-        print("[seeder] stopped")
+        self._close_log()
+        if process is not None:
+            print("[seeder] stopped")
 
 
 def parse_relay(value: str, default_password: str) -> tuple[str, str]:
@@ -5758,8 +6028,14 @@ def pin_remote_clock_forward(
     authenticated clock readback, never by adding another per-target lead.
     """
     timeout = float(TEMP_RADIO_PREFLIGHT_OPERATION_TIMEOUT_SECONDS)
-    before = sample_remote_clock(
-        controller, target, expected_public_key, timeout=timeout
+    # Retry the complete read sample, never the fixed clock write below. Each
+    # attempt owns a fresh marker and host interval, so a lost reply cannot
+    # contaminate the successful sample's RTT or schedule uncertainty.
+    before = retry_transmission_bounded(
+        lambda: sample_remote_clock(
+            controller, target, expected_public_key, timeout=timeout,
+        ),
+        f"initial clock read from {target}",
     )
     require_remote_clock_within_host_policy(before, target)
 
@@ -7433,112 +7709,289 @@ def request_install(
 
 
 def shorten_relay_temp_windows(
-    controller: Controller,
-    args: argparse.Namespace,
+    controller: Controller, args: argparse.Namespace,
     relay_values: list[tuple[str, str]] | None = None,
     expected_public_keys: dict[str, str] | None = None,
-) -> None:
+    *, cleanup_states: dict[str, RelayTempCleanup] | None = None,
+) -> bool:
+    """Send each relative setter once; ACKs alone never establish normal return.
+
+    Production passes durable per-participant ownership. Standalone callers
+    receive only the aggregate acknowledgement result, never a return proof.
+    """
     values = args.relay_values if relay_values is None else relay_values
-    if not values:
-        return
-    command = temp_radio_command_for_minutes(args, TEMP_RADIO_RETURN_MINUTES)
-    print(
-        f"[relays] scheduling return to the normal channel in "
-        f"{TEMP_RADIO_RETURN_MINUTES} minute"
-    )
-    errors: list[str] = []
-    interrupted: KeyboardInterrupt | None = None
-    for relay_name, relay_password in values:
+    if cleanup_states is not None:
+        for key, _ in values:
+            state = cleanup_states.get(key)
+            if (state is None or (expected_public_keys is not None
+                    and expected_public_keys.get(key) != state.key)):
+                raise OtaError("relay cleanup is missing bound durable ownership")
+    errors = []
+    interrupted = None
+    acknowledged = True
+    for key, password in values:
         try:
-            try:
-                reply = controller.remote_command(
-                    relay_name,
-                    command,
-                    password=relay_password,
-                    retry=False,
-                )
-            except TransmissionError as exc:
-                # Never replay a relative lease. Prove which authenticated
-                # relay remained reachable on this tuple; its original window
-                # is still bounded if the one-minute write did not arrive.
-                actual_key = read_remote_public_key_bounded(
-                    controller,
-                    relay_name,
-                    password=relay_password,
-                )
-                expected_key = (
-                    expected_public_keys.get(relay_name)
-                    if expected_public_keys is not None
-                    else None
-                )
-                if expected_key is not None and actual_key != expected_key:
-                    raise OtaError(
-                        f"identity changed after lost cleanup reply: expected "
-                        f"{expected_key}, got {actual_key}"
-                    )
-                print(
-                    f"[relays] {relay_name} one-minute TempRadio reply was "
-                    f"lost ({exc}); exact identity reconciled the one-shot "
-                    "request, and its original lease remains bounded"
-                )
+            if cleanup_states is None:
+                ack = shorten_remote_temp_window(controller, args, key,
+                                                 password=password, label="relay")
             else:
-                require_temp_radio_reply(
-                    relay_name, reply, TEMP_RADIO_RETURN_MINUTES
-                )
+                state = cleanup_states[key]
+                state.shorten_once(controller, args)
+                ack = state.report["shorten_acknowledged"]
+            acknowledged = acknowledged and ack
         except KeyboardInterrupt as exc:
-            # Continue through the remaining independently owned relays. The
-            # interrupt is re-raised only after each has received one attempt.
-            if interrupted is None:
-                interrupted = exc
-            errors.append(f"{relay_name}: interrupted")
+            interrupted = interrupted or exc
+            errors.append(f"{key}: interrupted")
         except (OtaError, OSError) as exc:
-            errors.append(f"{relay_name}: {exc}")
+            errors.append(f"{key}: " + redact_text(str(exc), (password,)))
+    if interrupted is not None:
+        raise interrupted
     if errors:
-        detail = "; ".join(errors)
-        if interrupted is not None:
-            print(
-                "WARNING: relay cleanup continued after interruption: "
-                + detail,
-                file=sys.stderr,
-            )
-            raise interrupted
-        raise OtaError("could not shorten every relay TempRadio lease: " + detail)
+        raise OtaError("could not shorten every relay TempRadio lease: " + "; ".join(errors))
+    return acknowledged
 
 
-def shorten_target_temp_window(
-    controller: Controller,
-    args: argparse.Namespace,
-) -> None:
+def shorten_remote_temp_window(
+    controller: Controller, args: argparse.Namespace, key: str,
+    *, password: str | None = None, label: str = "destination",
+) -> bool:
+    """Attempt one relative shortening; return whether its ACK was proven.
+
+    Reachability on the temporary tuple cannot prove that a lost setter was
+    delivered. The caller retains a separate normal-return obligation either
+    way, and must not replay this duration after a missing acknowledgement.
+    """
     command = temp_radio_command_for_minutes(args, TEMP_RADIO_RETURN_MINUTES)
     print(
-        f"[destination] scheduling return to the normal channel in "
+        f"[{label}] scheduling return to the normal channel in "
         f"{TEMP_RADIO_RETURN_MINUTES} minute"
     )
     try:
-        reply = controller.remote_command(
-            args.target, command, retry=False
-        )
+        options = {"password": password} if password is not None else {}
+        reply = controller.remote_command(key, command, retry=False, **options)
     except TransmissionError as exc:
-        identity = retry_transmission_bounded(
-            lambda: controller.remote_command(
-                args.target, "ota self", retry=False
-            ),
-            f"cleanup identity reconciliation for {args.target}",
-        )
-        if re.search(r"\bbase_hash=[0-9A-Fa-f]{16}\b", identity) is None:
-            raise OtaError(
-                "destination replied after a lost cleanup request but did not "
-                "return a valid running EndF identity"
-            )
         print(
-            "[destination] one-minute TempRadio reply was lost "
-            f"({exc}); exact identity reconciled the one-shot request, and the "
-            "original lease remains bounded"
+            f"WARNING: {label} one-minute TempRadio acknowledgement was "
+            f"lost ({redact_text(str(exc), (password,) if password else ())}); shortening is unconfirmed and was not replayed. "
+            "The original long lease may remain active; exact normal-channel "
+            "identity and inactive TempRadio must still be proven.",
+            file=sys.stderr,
         )
-        return
-    require_temp_radio_reply(
-        args.target, reply, TEMP_RADIO_RETURN_MINUTES
-    )
+        return False
+    require_temp_radio_reply(key, reply, TEMP_RADIO_RETURN_MINUTES)
+    return True
+
+
+class RemoteTempCleanup:
+    """One bound participant's durable return obligation and bounded read proof."""
+
+    def __init__(self, path: Path, args: argparse.Namespace, normal_radio: RadioSettings,
+                 key: str, role: str, password: str | None = None):
+        if path.exists() or path.is_symlink():
+            raise OtaError("existing TempRadio recovery obligation must not be overwritten: " + str(path))
+        self.path = path
+        self.normal_radio = normal_radio
+        self.key, self.role, self.password = key, role, password
+        self.sensitive_values = tuple(value for value in (password, getattr(args, "password", None)) if value)
+        self.report: dict = {
+            "schema": 1,
+            "target": key,
+            "role": role,
+            "normal_source_radio": normal_radio.meshcli_value(),
+            "temporary_radio": args.temp_radio,
+            "cleanup_required": True,
+            "shorten_attempted": False,
+            "shorten_acknowledged": False,
+            "normal_proof_attempted": False,
+            "normal_return_verified": False,
+            "proof_records": [],
+        }
+        self.persist()
+
+    def redact_error(self, exc: BaseException) -> str:
+        return redact_text(str(exc), self.sensitive_values)
+
+    def _shorten(self, controller: Controller, args: argparse.Namespace) -> bool:
+        raise NotImplementedError
+
+    def persist(self) -> None:
+        write_private_recovery_file(
+            self.path, json.dumps(self.report, indent=2, sort_keys=True) + "\n"
+        )
+
+    def require_binding(self, args: argparse.Namespace) -> None:
+        expected = self.report["target"]
+        bound = (args.target == expected if self.role == "destination" else
+                 any(key == expected for key, _ in args.relay_values))
+        if (not re.fullmatch(r"[0-9A-Fa-f]{64}", expected)
+                or self.key != expected or not bound):
+            raise OtaError("normal-return proof requires the unchanged full participant key")
+
+    def shorten_once(self, controller: Controller, args: argparse.Namespace) -> None:
+        if self.report["shorten_attempted"]:
+            return
+        self.require_binding(args)
+        self.report["shorten_attempted"] = True
+        self.persist()
+        try:
+            self.report["shorten_acknowledged"] = (
+                self._shorten(controller, args) is True
+            )
+        except BaseException as exc:
+            self.report["shorten_error"] = self.redact_error(exc)
+            raise
+        finally:
+            self.persist()
+
+    def prove_normal(self, controller: Controller, args: argparse.Namespace) -> None:
+        if not self.report["cleanup_required"]:
+            return
+        if self.report["normal_proof_attempted"]:
+            raise OtaError(f"{self.role} normal return remains unproven; inspect " + str(self.path))
+        self.require_binding(args)
+        expected = self.key
+        self.report["normal_proof_attempted"] = True
+        self.persist()
+        deadline = time.monotonic() + TARGET_TEMP_NORMAL_PROOF_SECONDS
+
+        def read(command: str) -> str:
+            remaining = deadline - time.monotonic()
+            if remaining < 1:
+                raise TransmissionError(f"{self.role} normal-return proof deadline expired")
+            record = {"command": command, "started_at": time.monotonic(),
+                      "operation_timeout": min(30.0, remaining)}
+            self.report["proof_records"].append(record)
+            self.persist()
+            try:
+                reply = controller.remote_command(
+                    expected, command, retry=False,
+                    **({"password": self.password} if self.password is not None else {}),
+                    reply_timeout=min(20, int(remaining)),
+                    operation_timeout=record["operation_timeout"],
+                )
+                record["reply"] = redact_text(reply, self.sensitive_values)
+                return reply
+            except BaseException as exc:
+                record["error"] = self.redact_error(exc)
+                raise
+            finally:
+                self.persist()
+
+        def proof() -> None:
+            remaining = deadline - time.monotonic()
+            if remaining < 1:
+                raise TransmissionError(f"{self.role} normal-return proof deadline expired")
+            if getattr(args, "source_shares_controller", False):
+                # Binary GET_RADIO reports saved preferences on a Full
+                # Companion, even while its live TempRadio override is active.
+                record = {"command": "shared source tempradio", "started_at": time.monotonic()}
+                self.report["proof_records"].append(record)
+                self.persist()
+                try:
+                    source_status = read_source_temp_radio_status(args, deadline=deadline)
+                    record["state"] = source_status[0] if source_status is not None else "unsupported"
+                except BaseException as exc:
+                    record["error"] = self.redact_error(exc)
+                    raise
+                finally:
+                    self.persist()
+                if source_status is None:
+                    raise OtaError("shared controller live TempRadio state is unavailable")
+                if source_status[0] != "inactive":
+                    raise TransmissionError("shared controller live TempRadio remains active; saved normal settings are insufficient")
+                remaining = deadline - time.monotonic()
+                if remaining < 1:
+                    raise TransmissionError("shared controller normal-return proof deadline expired")
+            require_radio_settings(
+                controller.get_radio(timeout=min(30.0, remaining)),
+                self.normal_radio, f"{self.role} cleanup normal controller",
+            )
+            public = parse_cli_public_key(read("get public.key"), f"{self.role} cleanup")
+            if public.lower() != expected.lower():
+                raise OtaError(f"{self.role} normal-return full public key changed")
+            status = read("get tempradio").strip()
+            status = status[1:].strip() if status.startswith(">") else status
+            if status == "off":
+                return
+            parts = status.split(",")
+            try:
+                active = (len(parts) == 5
+                          and all(math.isfinite(float(x)) for x in parts)
+                          and 150 <= float(parts[0]) <= 2500
+                          and float(parts[1]) > 0
+                          and 5 <= int(parts[2]) <= 12
+                          and 5 <= int(parts[3]) <= 8
+                          and 1 <= int(parts[4]) <= 65535)
+            except ValueError:
+                active = False
+            if not active:
+                raise OtaError(f"{self.role} returned malformed TempRadio state during cleanup")
+            raise TransmissionError(f"{self.role} still reports active TempRadio; normal return is unproven")
+
+        try:
+            # A confirmed one-minute lease can remain active during the first
+            # checks. Poll only replay-safe reads within one absolute bound.
+            retry_transmission_before_deadline(
+                proof, f"{self.role} normal-return proof", deadline,
+                retry_limit=12, deadline_label=f"90-second {self.role} cleanup window",
+            )
+        except BaseException as exc:
+            self.report["normal_proof_error"] = self.redact_error(exc)
+            raise
+        else:
+            self.report.update(cleanup_required=False, normal_return_verified=True)
+            print(f"[{self.role}] exact full identity and inactive TempRadio verified on the normal channel")
+        finally:
+            self.persist()
+
+
+class TargetTempCleanup(RemoteTempCleanup):
+    def __init__(self, work_dir: Path, args: argparse.Namespace, normal_radio: RadioSettings,
+                 password: str | None = None):
+        super().__init__(work_dir / TARGET_TEMP_RECOVERY_FILE, args, normal_radio,
+                         args.target, "destination", password)
+
+    def _shorten(self, controller: Controller, args: argparse.Namespace) -> bool:
+        return shorten_target_temp_window(controller, args, password=self.password)
+
+
+class RelayTempCleanup(RemoteTempCleanup):
+    def __init__(self, work_dir: Path, args: argparse.Namespace, normal_radio: RadioSettings,
+                 key: str, password: str, expected_key: str):
+        if (not re.fullmatch(r"[0-9A-Fa-f]{64}", key)
+                or key != expected_key or not any(k == key for k, _ in args.relay_values)):
+            raise OtaError("relay cleanup requires its unchanged bound full public key")
+        super().__init__(work_dir / f"{RELAY_TEMP_RECOVERY_PREFIX}{key}.json", args,
+                         normal_radio, key, "relay", password)
+
+    def _shorten(self, controller: Controller, args: argparse.Namespace) -> bool:
+        return shorten_remote_temp_window(controller, args, self.key,
+                                          password=self.password, label="relay")
+
+
+def shorten_target_temp_window(controller: Controller, args: argparse.Namespace,
+                              *, password: str | None = None) -> bool:
+    return shorten_remote_temp_window(controller, args, args.target, password=password)
+
+
+def prove_owned_temp_cleanups(controller: Controller, args: argparse.Namespace,
+                             target: TargetTempCleanup | None,
+                             relays: dict[str, RelayTempCleanup]) -> None:
+    """Attempt each independent normal-return proof even if another fails."""
+    errors = []
+    interrupted = None
+    for state in ([target] if target is not None else []) + list(relays.values()):
+        try:
+            state.prove_normal(controller, args)
+        except KeyboardInterrupt as exc:
+            interrupted = interrupted or exc
+            errors.append(f"{state.role}: interrupted; recovery {state.path}")
+        except (OtaError, OSError) as exc:
+            errors.append(f"{state.role}: {state.redact_error(exc)}; recovery {state.path}")
+    if interrupted is not None:
+        raise interrupted
+    if errors:
+        raise OtaError("normal return remains unproven: " + "; ".join(errors))
 
 
 def shorten_source_temp_window(
@@ -7907,7 +8360,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--public-key", type=Path, help="require this signer when verifying")
     parser.add_argument(
         "--inplace-memory",
-        help="nRF52 OTAFIX workspace (auto: 0x98000 internal, 0xC6000 external SD/QSPI)",
+        help=(
+            "explicit nRF52 OTAFIX workspace override; default: motatool "
+            "authenticated-layout sizing, or its conservative legacy fallback"
+        ),
     )
     parser.add_argument(
         "--platform", choices=("esp32", "nrf52"),
@@ -8958,6 +9414,8 @@ def main(
     source_rxps_changed = False
     source_rxps_recovery_path: Path | None = None
     target_temp_owned = False
+    target_temp_cleanup: TargetTempCleanup | None = None
+    relay_temp_cleanups: dict[str, RelayTempCleanup] = {}
     target_rxps_saved: RxpsSettings | None = None
     target_rxps_changed = False
     armed_relay_values: list[tuple[str, str]] = []
@@ -9323,6 +9781,14 @@ def main(
             print(f"[legacy] relay reboot fallback eligible: "
                   f"{args.relay_reboot_normal_hops} normal-channel hops")
 
+        target_temp_cleanup = TargetTempCleanup(work_dir, args, original_radio, password=password)
+        for relay_key, relay_password in args.relay_values:
+            if relay_key in relay_temp_cleanups:
+                raise OtaError("duplicate bound relay cleanup identity")
+            relay_temp_cleanups[relay_key] = RelayTempCleanup(
+                work_dir, args, original_radio, relay_key, relay_password,
+                relay_public_keys[relay_key],
+            )
         target_temp_armed_at = time.monotonic()
         target_temp_owned = True
         if args.source_shares_controller:
@@ -9452,11 +9918,11 @@ def main(
                     "--leave-controller-radio was requested"
                 )
             else:
-                # Retire one-shot ownership before the write. If its reply is
-                # lost, reconciliation is read-only and outer cleanup must not
-                # send the relative duration a second time.
-                target_temp_owned = False
-                shorten_target_temp_window(controller, args)
+                # One-shot write ownership and the outstanding normal-return
+                # obligation are separate. A missing ACK cannot retire either
+                # the durable target recovery record or the return proof.
+                assert target_temp_cleanup is not None
+                target_temp_cleanup.shorten_once(controller, args)
                 relays_to_shorten = list(armed_relay_values)
                 armed_relay_values.clear()
                 shorten_relay_temp_windows(
@@ -9464,6 +9930,7 @@ def main(
                     args,
                     relays_to_shorten,
                     relay_public_keys,
+                    cleanup_states=relay_temp_cleanups,
                 )
             if target_rxps_changed and target_rxps_saved is not None:
                 if args.leave_controller_radio:
@@ -9494,6 +9961,10 @@ def main(
                 controller_changed = False
             restore_source_rxps_once("stage-only cleanup")
             retire_local_source_rxps_recovery()
+            if not args.leave_controller_radio:
+                assert target_temp_cleanup is not None
+                prove_owned_temp_cleanups(controller, args, target_temp_cleanup, relay_temp_cleanups)
+                target_temp_owned = False
             return 0
 
         install_confirmed = request_install(controller, args, package)
@@ -9520,6 +9991,7 @@ def main(
             args,
             relays_to_shorten,
             relay_public_keys,
+            cleanup_states=relay_temp_cleanups,
         )
 
         # Seeding already stopped before policy restoration and installation.
@@ -9553,6 +10025,9 @@ def main(
                 target.base_hash,
                 identity_reply,
             )
+            if args.leave_controller_radio:
+                assert target_temp_cleanup is not None
+                prove_owned_temp_cleanups(controller, args, target_temp_cleanup, relay_temp_cleanups)
             if target_rxps_changed and target_rxps_saved is not None:
                 restore_remote_rxps(
                     controller, args.target, target_rxps_saved
@@ -9566,6 +10041,9 @@ def main(
                 controller_changed = True
         restore_source_rxps_once("successful update cleanup")
         retire_local_source_rxps_recovery()
+        if not args.leave_controller_radio:
+            assert target_temp_cleanup is not None
+            prove_owned_temp_cleanups(controller, args, target_temp_cleanup, relay_temp_cleanups)
         return 0
     except KeyboardInterrupt:
         print("\nInterrupted; any partial target download remains resumable.", file=sys.stderr)
@@ -9582,7 +10060,8 @@ def main(
             if seeder_attempted and args.source_serial:
                 source_cli_command(args, "ota folder off", check=False)
             needs_remote_cleanup = (
-                target_temp_owned
+                (target_temp_owned and target_temp_cleanup is not None
+                 and not target_temp_cleanup.report["shorten_attempted"])
                 or bool(armed_relay_values)
                 or bool(relay_timing_settings)
             )
@@ -9625,12 +10104,11 @@ def main(
                                 file=sys.stderr,
                             )
                     if target_temp_owned and not args.leave_controller_radio:
-                        # This relative cleanup write is one-shot even when its
-                        # acknowledgement is lost; retire ownership first so a
-                        # later finally path cannot extend it again.
-                        target_temp_owned = False
+                        # Persist the one-shot attempt before sending without
+                        # dropping the independent target return obligation.
+                        assert target_temp_cleanup is not None
                         try:
-                            shorten_target_temp_window(controller, args)
+                            target_temp_cleanup.shorten_once(controller, args)
                         except (OtaError, OSError) as exc:
                             print(
                                 "WARNING: could not shorten the destination "
@@ -9649,6 +10127,7 @@ def main(
                                 args,
                                 relays_to_shorten,
                                 relay_public_keys,
+                                cleanup_states=relay_temp_cleanups,
                             )
                         except (OtaError, OSError) as exc:
                             print(
@@ -9746,6 +10225,21 @@ def main(
                         "after checking the current policy and radio channel",
                         file=sys.stderr,
                     )
+            pending_temp = ([target_temp_cleanup] if target_temp_cleanup is not None else []) + list(relay_temp_cleanups.values())
+            if any(state.report["cleanup_required"] for state in pending_temp) and not args.leave_controller_radio:
+                if controller is not None and not controller_changed and not source_temp_owned:
+                    try:
+                        prove_owned_temp_cleanups(controller, args, target_temp_cleanup, relay_temp_cleanups)
+                        target_temp_owned = False
+                    except (OtaError, OSError) as exc:
+                        print(f"CRITICAL: participant normal return is unproven: {exc}", file=sys.stderr)
+                for state in pending_temp:
+                    if state.report["cleanup_required"]:
+                        print(
+                            f"CRITICAL: restoring the controller does not prove the {state.role} returned. "
+                            "Its original long TempRadio lease may remain active; no relative cleanup setter was replayed. "
+                            f"Retained recovery obligation: {state.path}", file=sys.stderr,
+                        )
             if not source_rxps_changed:
                 try:
                     retire_local_source_rxps_recovery()

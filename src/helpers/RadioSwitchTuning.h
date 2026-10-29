@@ -1,0 +1,50 @@
+#pragma once
+#include <stdint.h>
+
+// The integrated STM32WL driver has neither the cached retune paths nor a
+// tunable SPI HAL. Do not retain saved controls it cannot apply on small WL
+// images. Other radios retain every supported acceleration by default.
+#ifndef MESH_RADIO_SWITCH_TUNING
+#if defined(STM32_PLATFORM) && defined(STM32WLxx)
+#define MESH_RADIO_SWITCH_TUNING 0
+#else
+#define MESH_RADIO_SWITCH_TUNING 1
+#endif
+#endif
+
+namespace mesh {
+
+// Saved policy for one physical radio, shared by both RF profiles. SPI MHz 0
+// retains the board's default clock (which need not be an integer MHz).
+// Selection 9 is the integer label for the supported 8.888888 MHz divider.
+struct RadioSwitchTuning {
+  enum Feature : uint8_t {
+    Warm = 1, Fs = 2, Packet = 4, Iq = 8, Modem = 16,
+    Batch = 32, Buffer = 64
+  };
+  uint8_t flags = 0;
+  uint8_t spi_mhz = 0;
+  bool operator==(const RadioSwitchTuning& other) const {
+    return flags == other.flags && spi_mhz == other.spi_mhz;
+  }
+  bool operator!=(const RadioSwitchTuning& other) const { return !(*this == other); }
+};
+
+struct RadioSwitchCapabilities {
+  enum SpiClock : uint8_t { Spi9 = 1 };
+  uint8_t flags = 0;
+  // Bits 1..4 permit 2^N MHz. Bit 0 permits selection 9 (8888888 Hz).
+  uint8_t spi_clocks = 0;
+};
+
+inline bool validRadioSwitchTuning(const RadioSwitchTuning& value,
+                                  const RadioSwitchCapabilities& caps) {
+  if (value.flags & ~caps.flags) return false;
+  if (!value.spi_mhz) return true;
+  if (value.spi_mhz == 9) return caps.spi_clocks & RadioSwitchCapabilities::Spi9;
+  for (uint8_t n = 1; n <= 4; ++n)
+    if (value.spi_mhz == (1U << n)) return caps.spi_clocks & (1U << n);
+  return false;
+}
+
+}  // namespace mesh

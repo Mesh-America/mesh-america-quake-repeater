@@ -64,6 +64,41 @@ function externalPacket(epoch, channel, codes) {
   ]).toString("hex").toUpperCase();
 }
 
+function pack5(codes) {
+  const output = Buffer.alloc(Math.ceil(codes.length * 5 / 8));
+  codes.forEach((code, index) => {
+    for (let bit = 0; bit < 5; bit += 1) {
+      const offset = index * 5 + bit;
+      output[offset >> 3] |= ((code >> (4 - bit)) & 1) << (7 - (offset % 8));
+    }
+  });
+  return output;
+}
+
+function noisePageBytes(epoch, profile, codes, interval = 15) {
+  const header = Buffer.alloc(7);
+  header[0] = profile === 1 ? 0x15 : 0x16;
+  header.writeUInt32LE(epoch, 1);
+  header[5] = interval;
+  header[6] = codes.length;
+  return Buffer.concat([header, pack5(codes)]);
+}
+
+function noisePage(epoch, profile, codes, interval = 15) {
+  return `> ${noisePageBytes(epoch, profile, codes, interval).toString("base64")}`;
+}
+
+function noisePacketBytes(epoch, profile, codes, interval = 15,
+                          source = "1122334455667788") {
+  const header = Buffer.alloc(19);
+  header.write(profile === 1 ? "N1B1" : "N2B1", 0, "ascii");
+  Buffer.from(source, "hex").copy(header, 4);
+  header.writeUInt32LE(epoch, 12);
+  header.writeUInt16LE(interval, 16);
+  header[18] = codes.length;
+  return Buffer.concat([header, pack5(codes)]);
+}
+
 // Run the real browser entry point. The DOM boundary starts with the empty host
 // shipped in Markdown and exposes only controls inserted by the actual script.
 function browserFixture(readyState = "complete") {
@@ -78,6 +113,7 @@ function browserFixture(readyState = "complete") {
       tagName, value: "", checked: false, hidden: false, textContent: "", children: [],
       classList: { add() {} },
       getAttribute(name) { return attributes[name] ?? null; },
+      setAttribute(name, value) { attributes[name] = value; },
       addEventListener(name, callback) { handlers.set(name, callback); },
       emit(name, event = {}) {
         assert.ok(handlers.has(name), `Missing ${name} handler on ${tagName}`);
@@ -128,6 +164,7 @@ function browserFixture(readyState = "complete") {
     },
     document: {
       readyState, body: element("body"), createElement: element,
+      createElementNS: (_namespace, tagName) => element(tagName),
       querySelector: (selector) => selector === "[data-telemetry-decoder]" ? root : null,
       addEventListener: (name, callback) => events.set(name, callback),
     },
@@ -169,6 +206,7 @@ test("browser initialization creates the form and wires every example", () => {
   for (const [example, count] of [
     ["packetTemperature", 8], ["packetVoltage", 8],
     ["packetExternalVoltage", 8], ["externalVoltage", 48],
+    ["packetNoise", 8], ["noiseSecondary", 8],
   ]) {
     fixture.examples.get(example).emit("click");
     assert.strictEqual(fixture.fields.get("results").hidden, false,
@@ -344,7 +382,7 @@ test("retains legacy CLI Base64 decoding", () => {
 test("rejects unrelated, truncated, and ambiguous hex", () => {
   assertDecoderError(
     () => decoder.decodeRawTelemetryHex("00000000000000000000000000000000000000"),
-    /does not contain TTB1, TVB1, or IVB1/
+    /does not contain TTB1, TVB1, IVB1, N1B1, or N2B1/
   );
   assertDecoderError(
     () => decoder.decodeRawTelemetryHex(TEMPERATURE_PACKET.slice(0, -2)),
@@ -362,6 +400,155 @@ test("exports raw telemetry rows as CSV", () => {
   assert.match(csv, /Timestamp \(UTC\)/);
   assert.match(csv, /2\.86 V/);
   assert.strictEqual(csv.split("\r\n").length, 9);
+});
+
+test("all 32 noise codes agree between CLI and the existing RAW_CUSTOM header", () => {
+  const codes = Array.from({ length: 32 }, (_, index) => index);
+  for (const profile of [1, 2]) {
+    const cli = decoder.decodeTelemetry(noisePage(1704067200, profile, codes));
+    const rawBytes = noisePacketBytes(1704067200, profile, codes);
+    const raw = decoder.decodeTelemetry(`3e4212345678${rawBytes.toString("hex")}`);
+    assert.strictEqual(cli.profile, profile);
+    assert.strictEqual(raw.profile, profile);
+    assert.strictEqual(raw.sourceId, "1122334455667788");
+    assert.strictEqual(raw.payloadOffset, 6);
+    assert.strictEqual(raw.packet.hopCount, 2);
+    assert.strictEqual(raw.intervalMinutes, 15);
+    assert.strictEqual(raw.firstEpoch, 1704067200);
+    assert.strictEqual(raw.byteLength, 19 + 20);
+    assert.deepStrictEqual(raw.rows, cli.rows);
+    assert.deepStrictEqual(cli.rows.slice(0, 3).map((row) => row.noiseDbm), [-120, -119, -118]);
+    assert.deepStrictEqual(cli.rows.slice(3, 30).map((row) => row.noiseDbm),
+      Array.from({ length: 27 }, (_, index) => -116 + index * 2));
+    assert.deepStrictEqual(cli.rows.slice(30).map((row) => [row.status, row.noiseDbm]),
+      [["MAX", null], ["Missing", null]]);
+    assert.strictEqual(cli.rows[31].epoch, 1704067200 + 31 * 900);
+  }
+});
+
+test("noise pages fit the current CLI buffer and merge all eight days", () => {
+  const epoch = 1704067200;
+  const pages = [];
+  for (let first = 0; first < 768; first += 176) {
+    const count = Math.min(176, 768 - first);
+    const page = noisePage(epoch + first * 900, 1, Array(count).fill(12));
+    assert.ok(page.length + 1 <= 160, "Reply and terminating NUL fit the existing buffer.");
+    pages.unshift(page);
+  }
+  const decoded = decoder.decodeTelemetry(pages.join("\n"));
+  assert.strictEqual(decoded.pageCount, 5);
+  assert.strictEqual(decoded.count, 768);
+  assert.strictEqual(decoded.rows[0].epoch, epoch);
+  assert.strictEqual(decoded.rows[767].epoch, epoch + 767 * 900);
+  assert.strictEqual(decoder.decodeTelemetry(pages[4]).byteLength, 117);
+  const fullRaw = decoder.decodeTelemetry(
+    noisePacketBytes(epoch, 1, Array(255).fill(31)).toString("hex")
+  );
+  assert.strictEqual(fullRaw.count, 255);
+  assert.strictEqual(fullRaw.byteLength, 179);
+  assert.ok(fullRaw.rows.every((row) => row.status === "Missing"));
+});
+
+test("correlation-prefixed noise replies preserve full pages and merge by timestamp", () => {
+  const epoch = 1704067200;
+  for (const profile of [1, 2]) {
+    const page = noisePage(epoch, profile, Array(176).fill(1));
+    const bare = page.slice(2);
+    assert.strictEqual(`01|${bare}`.length + 1, 160);
+    for (const input of [`01|${bare}`, `02|>${bare}`, `03|> ${bare}`]) {
+      const decoded = decoder.decodeTelemetry(input);
+      assert.strictEqual(decoded.count, 176);
+      assert.strictEqual(decoded.profile, profile);
+      assert.ok(decoded.rows.every((row) => row.noiseDbm === -119));
+      assert.strictEqual(decoder.extractBase64(input), bare);
+    }
+    const older = noisePage(epoch - 176 * 900, profile, Array(176).fill(0)).slice(2);
+    const merged = decoder.decodeTelemetry(`01|${bare}\n02|>${older}`);
+    assert.strictEqual(merged.count, 352);
+    assert.strictEqual(merged.pageCount, 2);
+    assert.strictEqual(merged.profile, profile);
+    assert.strictEqual(merged.rows[0].noiseDbm, -120);
+    assert.strictEqual(merged.rows[351].noiseDbm, -119);
+  }
+});
+
+test("noise decoder rejects wrong interval, count, size, padding and enclosing packet", () => {
+  const epoch = 1704067200;
+  for (const interval of [0, 14, 30]) {
+    assertDecoderError(() => decoder.decodeTelemetry(noisePage(epoch, 1, [0], interval)),
+      /interval/);
+    assertDecoderError(() => decoder.decodeTelemetry(
+      noisePacketBytes(epoch, 1, [0], interval).toString("hex")), /interval/);
+  }
+  assertDecoderError(() => decoder.decodeTelemetry(noisePage(epoch, 1, [])), /count/);
+  assertDecoderError(() => decoder.decodeTelemetry(noisePage(epoch, 1, Array(177).fill(0))),
+    /between 1 and 176/);
+  const cli = noisePageBytes(epoch, 1, [0]);
+  cli[7] = 1;
+  assertDecoderError(() => decoder.decodeTelemetry(cli.toString("base64")), /padding bits/);
+  const raw = noisePacketBytes(epoch, 1, [0]);
+  raw[19] = 1;
+  assertDecoderError(() => decoder.decodeTelemetry(raw.toString("hex")), /padding bits/);
+  for (const bytes of [noisePageBytes(epoch, 1, [0]), noisePacketBytes(epoch, 1, [0])]) {
+    const encode = (value) => bytes[0] === 0x15 ? value.toString("base64") : value.toString("hex");
+    assertDecoderError(() => decoder.decodeTelemetry(encode(bytes.subarray(0, bytes.length - 1))),
+      /bytes|shorter/);
+    assertDecoderError(() => decoder.decodeTelemetry(encode(Buffer.concat([bytes, Buffer.from([0])]))),
+      /should be/);
+  }
+  assertDecoderError(() => decoder.decodeTelemetry(`3a00${noisePacketBytes(epoch, 1, [0]).toString("hex")}`),
+    /complete RAW_CUSTOM/);
+  assertDecoderError(() => decoder.decodeTelemetry(`3e01${noisePacketBytes(epoch, 1, [0]).toString("hex")}`),
+    /complete RAW_CUSTOM/);
+});
+
+test("noise merge preserves source, profile and interval boundaries", () => {
+  const epoch = 1704067200;
+  const first = noisePage(epoch, 1, [0, 1]);
+  assertDecoderError(() => decoder.decodeTelemetry(`${first}\n${noisePage(epoch, 2, [0, 1])}`),
+    /radio profile/);
+  const raw = noisePacketBytes(epoch, 1, [0, 1]).toString("hex");
+  assertDecoderError(() => decoder.decodeTelemetry(`${raw}\n${noisePacketBytes(epoch, 2, [0, 1]).toString("hex")}`),
+    /radio profile/);
+  assertDecoderError(() => decoder.decodeTelemetry(`${raw}\n${noisePacketBytes(epoch, 1, [0, 1], 15, "8877665544332211").toString("hex")}`),
+    /same type, source/);
+  const decoded = decoder.decodeTelemetry(first);
+  assertDecoderError(() => decoder.mergeDecodedTelemetry([decoded, { ...decoded, intervalMinutes: 30 }]),
+    /interval/);
+});
+
+test("noise table and CSV keep MAX and missing separate from numeric dBm", () => {
+  const decoded = decoder.decodeTelemetry(noisePage(1704067200, 2, [0, 1, 29, 30, 31]));
+  const model = decoder.tableModel(decoded, false);
+  assert.strictEqual(model.rows[3].values[3], ">-64 dBm");
+  assert.strictEqual(model.rows[4].values[2], "Missing");
+  const csv = decoder.modelToCsv(model);
+  assert.strictEqual(csv.split("\r\n")[0],
+    "sample,timestamp_utc,radio_profile,status,noise_floor_dbm,raw_code");
+  assert.match(csv, /,2,value,-120,0/);
+  assert.match(csv, /,2,value,-119,1/);
+  assert.match(csv, /,2,value,-64,29/);
+  assert.match(csv, /,2,max,,30/);
+  assert.match(csv, /,2,missing,,31/);
+  const fixture = browserFixture();
+  fixture.examples.get("noiseSecondary").emit("click");
+  assert.strictEqual(fixture.fields.get("chart").hidden, false);
+  fixture.fields.get("download").emit("click");
+  assert.strictEqual(fixture.downloads[0].filename, "meshcore-telemetry-noise-radio2.csv");
+  assert.match(fixture.downloads[0].blob.parts.join(""), /,2,max,,30/);
+  fixture.examples.get("packetVoltage").emit("click");
+  assert.strictEqual(fixture.fields.get("chart").hidden, true);
+});
+
+test("noise chart leaves MAX, missing and unrecorded time gaps", () => {
+  const decoded = decoder.decodeTelemetry(noisePage(1704067200, 1, [0, 1, 30, 29, 31, 2]));
+  decoded.rows.push({ ...decoded.rows[0], index: 6, epoch: 1704067200 + 8 * 900 });
+  const chart = decoder.noiseChartModel(decoded);
+  assert.deepStrictEqual(chart.segments.map((segment) => segment.length), [2, 1, 1, 1]);
+  assert.strictEqual(chart.segments[0][0].y, 150);
+  assert.strictEqual(chart.segments[1][0].y, 20);
+  assert.match(chart.description, /MAX and missing samples leave gaps/);
+  assert.strictEqual(decoder.noiseChartModel(decoder.decodeTelemetry(VOLTAGE_PACKET)), null);
 });
 
 process.stdout.write(`1..${passed}\n`);

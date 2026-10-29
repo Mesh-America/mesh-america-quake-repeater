@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include "PersistentStoreFormat.h"
 
 namespace mesh {
 
@@ -95,13 +96,7 @@ class ContactPathPool : public ContactPathStorage {
   bool _flushing = false;
 
   static uint32_t checksum(const uint8_t path[64]) {
-    uint32_t crc = 0xffffffff;
-    for (size_t i = 0; i < 64; ++i) {
-      crc ^= path[i];
-      for (unsigned bit = 0; bit < 8; ++bit)
-        crc = (crc >> 1) ^ ((crc & 1) ? 0xedb88320UL : 0);
-    }
-    return crc;
+    return storage::updateCRC32(0xffffffffUL, path, 64);
   }
 
   Slot* slot(uint16_t h) {
@@ -170,9 +165,20 @@ class ContactPathPool : public ContactPathStorage {
   }
 
 public:
+  // Construct the empty cache on first use instead of storing a flash load
+  // image of every slot's NONE/255 sentinels and the vtable pointer. Keep the
+  // member defaults for both initial construction and Slot() resets.
+  ContactPathPool() {}
+
   void attach(ContactPathBackend* backend) override { _backend = backend; }
   uint16_t bind(uint16_t location, const uint8_t path[64]) override {
     if (location == NONE) return NONE;
+    // The bytes are already available during reload. Keep an exactly empty
+    // path as the immutable zero value instead of rereading it from flash
+    // for every contact response. Unused nonzero tail bytes still matter.
+    bool empty = true;
+    for (size_t i = 0; i < 64; ++i) empty = empty && path[i] == 0;
+    if (empty) return 0;
     const uint16_t h = allocate();
     if (h != NONE) {
       _slots[h - 1].location = location;

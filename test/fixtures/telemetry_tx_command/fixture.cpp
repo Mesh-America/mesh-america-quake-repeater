@@ -29,6 +29,7 @@ struct Fixture {
   SharedRoute _cli;
   bool telemetry_history_tx_enabled = true;
   uint8_t telemetry_history_tx_interval_days = 7;
+  uint8_t telemetry_history_tx_types = 31;
   uint8_t telemetry_history_tx_pending = 7;
   bool telemetry_history_tx_manual = true;
   uint8_t telemetry_history_tx_external_channel = 2;
@@ -37,13 +38,14 @@ struct Fixture {
   uint64_t telemetry_history_tx_resume_uptime = 20000000000ULL;
   bool fail_save = false;
   unsigned saves = 0;
-  std::array<uint64_t, 8> persisted = state();
+  std::array<uint64_t, 9> persisted = state();
 
-  std::array<uint64_t, 8> state() const {
+  std::array<uint64_t, 9> state() const {
     return {{telemetry_history_tx_enabled, telemetry_history_tx_interval_days,
              telemetry_history_tx_pending, telemetry_history_tx_manual,
              telemetry_history_tx_external_channel, telemetry_history_tx_external_chunk,
-             telemetry_history_next_tx_uptime, telemetry_history_tx_resume_uptime}};
+             telemetry_history_next_tx_uptime, telemetry_history_tx_resume_uptime,
+             telemetry_history_tx_types}};
   }
   bool saveTelemetryHistoryTxPrefs() {
     ++saves;
@@ -63,20 +65,24 @@ struct Fixture {
 // Includes the complete actual schedule-command branch and trim helper.
 #include "production_telemetry_tx.inc"
 
-static void assertUnchanged(const Fixture& f, const std::array<uint64_t, 8>& before) {
+static void assertUnchanged(const Fixture& f, const std::array<uint64_t, 9>& before) {
   assert(f.state() == before && f.persisted == before && f.saves == 0);
 }
 
 int main() {
+  for (uint8_t types = 0; types < 32; ++types) {
   for (const std::string value : {"1", "30", "30d", " 0005d ", " 5 "}) {
     Fixture f;
+    f.telemetry_history_tx_types = types;
     const unsigned expected = value.find('3') != std::string::npos ? 30
         : value.find('5') != std::string::npos ? 5 : 1;
     assert(f.command(value) == "OK - telemetry.tx schedule=" + std::to_string(expected) + "d");
     assert(f.telemetry_history_tx_enabled && f.telemetry_history_tx_interval_days == expected);
     assert(f.saves == 1 && f.persisted == f.state());
     const auto state = f.state();
-    for (size_t i = 2; i < state.size(); ++i) assert(state[i] == 0);
+    for (size_t i = 2; i < 8; ++i) assert(state[i] == 0);
+    assert(state[8] == types); // schedule edits preserve every independent selection
+  }
   }
   {
     Fixture f;

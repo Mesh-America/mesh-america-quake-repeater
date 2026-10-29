@@ -18,6 +18,9 @@ class LR1110ProfileSwitchTests(unittest.TestCase):
             "t1000-e": "Nrf52BufferedRadioHal",
             "wio_wm1110": "Nrf52BufferedRadioHal",
             "thinknode_m3": "Nrf52BufferedRadioHal",
+            # Fast RX ownership is independent of the SPI transport. Keep M4
+            # on its prior bus until its SPIM3/BLE transfer path is qualified.
+            "thinknode_m4": "TunableRadioHal",
             "minewsemi_me25ls01": "Nrf52BufferedRadioHal",
             "thinknode_m7": "ESP32BufferedRadioHal",
             "thinknode_m9": "ESP32BufferedRadioHal",
@@ -29,14 +32,23 @@ class LR1110ProfileSwitchTests(unittest.TestCase):
                 target_source = (variant / "target.cpp").read_text()
                 self.assertIn("-D RADIO_CLASS=CustomLR1110", config)
                 self.assertIn("-D WRAPPER_CLASS=CustomLR1110Wrapper", config)
-                self.assertIn(f"{hal} radioHal(", target_source)
-                self.assertIn("new Module(&radioHal,", target_source)
+                if hal is not None:
+                    name = "radio_hal" if target == "thinknode_m4" else "radioHal"
+                    self.assertIn(f"{hal} {name}(", target_source)
+                    self.assertIn(f"new Module(&{name},", target_source)
+                else:
+                    self.assertNotIn("BufferedRadioHal", target_source)
+                    self.assertIn(
+                        "new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI)",
+                        target_source)
 
         esp32_hal = (ROOT / "src/helpers/radiolib/ESP32BufferedRadioHal.h").read_text()
         nrf52_hal = (ROOT / "src/helpers/radiolib/Nrf52BufferedRadioHal.h").read_text()
-        self.assertIn("SPISettings(hz, MSBFIRST, SPI_MODE0)", esp32_hal)
+        tunable_hal = (ROOT / "src/helpers/radiolib/TunableRadioHal.h").read_text()
+        self.assertIn("SPISettings(hz, MSBFIRST, SPI_MODE0)", tunable_hal)
+        self.assertIn("TunableRadioHal(bus, hz, false, true,", esp32_hal)
         self.assertIn("spi->transferBytes(out, in, len)", esp32_hal)
-        self.assertIn("SPISettings(hz, MSBFIRST, SPI_MODE0)", nrf52_hal)
+        self.assertIn("TunableRadioHal(bus, hz, false, true,", nrf52_hal)
         self.assertIn("spi->transfer(out, in, len)", nrf52_hal)
         for target in ("thinknode_m7", "thinknode_m9"):
             source = (ROOT / "variants" / target / "target.cpp").read_text()
@@ -53,9 +65,11 @@ class LR1110ProfileSwitchTests(unittest.TestCase):
         implementation = method(source, "int16_t snapshotIrqAfterRxExit(")
         harness = r'''
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#define MC_LR1110_FAST_PROFILE_SWITCH 1
 #define RADIOLIB_ERR_NONE 0
 #define RADIOLIB_MODULE_SPI_WIDTH_STATUS 2
 struct Module {
@@ -87,7 +101,8 @@ int main() {
     def test_fast_rx_skips_only_unchanged_packet_tuple_and_fails_closed(self):
         source = (ROOT / "src/helpers/radiolib/CustomLR1110.h").read_text()
         signatures = (
-            "void setProfileSwitchOptimization(", "void setProfileStandbyWarm(",
+            "uint8_t profileSwitchCapabilities(", "uint8_t getProfileSwitchFeatures(",
+            "void setProfileSwitchFeatures(", "void setProfileSwitchOptimization(", "void setProfileStandbyWarm(",
             "void beginProfileSwitch(", "void endProfileSwitch(",
             "bool profileSwitchFailed(", "int16_t standby()", "int16_t standby(uint8_t",
             "int16_t sleep()", "int16_t reset()", "int16_t stageMode(",
@@ -100,10 +115,12 @@ int main() {
         )
         harness = r'''
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cstdint>
 #include <cstddef>
 #include <string>
 @STATE@
+#define MC_LR1110_FAST_PROFILE_SWITCH 1
 #define RADIOLIB_ERR_NONE 0
 #define RADIOLIB_LR11X0_STANDBY_XOSC 0
 #define RADIOLIB_LR11X0_RX_TIMEOUT_INF 0xffffff
@@ -150,7 +167,9 @@ struct LR1110 {
   int16_t setRx(uint32_t timeout) { assert(timeout==0xffffff);return call('R'); }
 };
 struct Radio:LR1110 {
+  uint32_t _activityAt=0;bool _headerSeen=false;
   LR1110ProfileSwitchState _profileSwitch{true};
+  uint8_t _profileSwitchFeatures=55;
   bool _profileStandbyWarm=false,_profilePacketDirty=false;
   uint32_t _profileFastResumes=0;
   uint32_t pendingIrq=0;
@@ -206,7 +225,29 @@ int main() {
   prime(r);r.stageMode(2,nullptr);assert(!r._profileSwitch.rxValid);
   prime(r);r.sleep();assert(!r._profileSwitch.rxValid);
   prime(r);r.reset();assert(!r._profileSwitch.rxValid);
+  // FS and packet reuse remain independently controllable without disabling
+  // warm receive ownership; unsupported SX1262 IQ/transport bits stay absent.
+  for(unsigned requested=0;requested<256;++requested) {
+    Radio x;x.setProfileSwitchFeatures(uint8_t(requested));
+    const uint8_t features=requested & x.profileSwitchCapabilities();
+    assert(x.getProfileSwitchFeatures()==features && x.trace.empty());
+    assert(!(features & (mesh::RadioSwitchTuning::Iq | mesh::RadioSwitchTuning::Buffer)));
+    assert(x._profileSwitch.enabled==bool(features & mesh::RadioSwitchTuning::Warm));
+    assert(!x._profileSwitch.rxValid && !x._profileSwitch.modulationValid);
+    assert(x.startReceive()==0);x.setProfileStandbyWarm(true);x.trace.clear();
+    x.beginProfileSwitch(true);assert(x.standby()==0);
+    const bool warm=features & mesh::RadioSwitchTuning::Warm;
+    const bool fs=features & mesh::RadioSwitchTuning::Fs;
+    assert(x.trace==(warm ? (fs ? "IF":"s") : "S"));x.trace.clear();
+    assert(x.startReceive()==0);
+    const bool packet=features & mesh::RadioSwitchTuning::Packet;
+    assert(x.trace==(warm ? (packet ? "QWR":"QPWR") : "N"));
+    x.endProfileSwitch(true);x.trace.clear();x._profilePacketDirty=true;
+    x.setProfileSwitchFeatures(features);
+    assert(x.trace.empty() && !x._profileSwitch.rxValid && !x._profilePacketDirty);
+  }
 }
+
 '''
         self.compile_run(harness.replace("@STATE@", state).replace("@METHODS@", methods))
 
@@ -216,6 +257,7 @@ int main() {
         )
         harness = r'''
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cstdint>
 @STATE@
 int main() {
@@ -269,10 +311,12 @@ int main() {
         )
         harness = r'''
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
 @STATE@
+#define MC_LR1110_FAST_PROFILE_SWITCH 1
 #define RADIOLIB_ERR_NONE 0
 #define RADIOLIB_ERR_INVALID_SPREADING_FACTOR -1
 #define RADIOLIB_ERR_INVALID_CODING_RATE -2
@@ -288,6 +332,7 @@ int main() {
 #define RADIOLIB_LR11X0_LORA_LDRO_DISABLED 0
 struct Radio {
   LR1110ProfileSwitchState _profileSwitch{true};
+  uint8_t _profileSwitchFeatures=55;
   uint8_t spreadingFactor=7, bandwidth=4, codingRate=1, ldrOptimize=0;
   float bandwidthKhz=125;
   bool ldroAuto=true;
@@ -340,6 +385,15 @@ int main() {
   assert(r.spreadingFactor==oldSf && r.bandwidth==oldBw && r.codingRate==oldCr);
   assert(r.bandwidthKhz==oldKhz && r.ldrOptimize==oldLdro);
   assert(r._profileSwitch.failed() && !r._profileSwitch.rxValid);
+  for(unsigned features=0;features<64;++features) {
+    Radio x;x._profileSwitchFeatures=features;
+    assert(x.setLoRaModulationParams(125,7,5)==0 && x.writes==1 && x.queries==1);
+    x._profileSwitch.rxResult(0,true);x._profileSwitch.begin(true,true);
+    x._profileSwitch.standbyResult(0);
+    assert(x.setLoRaModulationParams(125,7,5)==0);
+    assert(x.queries==((features & mesh::RadioSwitchTuning::Modem) ? 1U:2U));
+    assert(x.writes==((features & mesh::RadioSwitchTuning::Batch) ? 1U:2U));
+  }
 }
 '''
         self.compile_run(harness.replace("@STATE@", state).replace("@PRODUCTION@", production))

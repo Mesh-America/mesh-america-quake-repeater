@@ -22,6 +22,25 @@ def method(source: str, signature: str) -> str:
 
 
 class OneKeyDMSharedQueueTest(unittest.TestCase):
+    def test_standard_high_contact_nrf52_selects_shared_pool_by_default(self):
+        header = (ROOT / "examples/companion_radio/MyMesh.h").read_text()
+        start = header.index("#if defined(NRF52_PLATFORM) && MAX_CONTACTS > 300")
+        end = header.index("#ifndef ROOM_MESSAGE_TIMESTAMP_CACHE_SIZE", start)
+        policy = '#include <helpers/ContactCachePolicy.h>\n' + header[start:end]
+        policy += '\nstatic_assert(MESH_CONTACT_CACHE == 1);\n'
+        policy += 'static_assert(ONE_KEY_DM_SHARED_OFFLINE_QUEUE == 1);\n'
+        policy += 'static_assert(OFFLINE_QUEUE_SIZE == 256);\nint main() {}\n'
+        with tempfile.TemporaryDirectory(prefix="meshcore-dm-policy-") as temp:
+            binary = Path(temp) / "policy.exe"
+            for capacity in (301, 350):
+                with self.subTest(capacity=capacity):
+                    result = subprocess.run([
+                        "c++", "-std=c++17", "-x", "c++", "-",
+                        "-DNRF52_PLATFORM=1", f"-DMAX_CONTACTS={capacity}",
+                        "-I", str(ROOT / "src"), "-o", str(binary),
+                    ], input=policy, text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
     def compile_and_run(self, source: str):
         with tempfile.TemporaryDirectory(prefix="meshcore-shared-dm-") as temp:
             path = Path(temp) / "shared_dm.cpp"
@@ -46,6 +65,8 @@ class OneKeyDMSharedQueueTest(unittest.TestCase):
             "MyMesh::Frame& MyMesh::heldDMFrameAt(uint8_t index)",
             "void MyMesh::removeHeldOneKeyDM(uint8_t index)",
             "bool MyMesh::addToOfflineQueue(const uint8_t frame[], int len)",
+            "int MyMesh::peekOfflineQueue(uint8_t frame[])",
+            "void MyMesh::popOfflineQueue()",
             "int MyMesh::getFromOfflineQueue(uint8_t frame[])",
         ))
         harness = r'''
@@ -77,6 +98,8 @@ public:
   Frame& heldDMFrameAt(uint8_t index);
   void removeHeldOneKeyDM(uint8_t index);
   bool addToOfflineQueue(const uint8_t frame[], int len);
+  int peekOfflineQueue(uint8_t frame[]);
+  void popOfflineQueue();
   int getFromOfflineQueue(uint8_t frame[]);
 };
 static_assert(sizeof(MyMesh::Frame) == 177);
@@ -161,6 +184,8 @@ int main() {
             "MyMesh::Frame& MyMesh::heldDMFrameAt(uint8_t index)",
             "void MyMesh::removeHeldOneKeyDM(uint8_t index)",
             "bool MyMesh::addToOfflineQueue(const uint8_t frame[], int len)",
+            "int MyMesh::peekOfflineQueue(uint8_t frame[])",
+            "void MyMesh::popOfflineQueue()",
             "int MyMesh::getFromOfflineQueue(uint8_t frame[])",
             "bool MyMesh::onAddressedTextPacket(mesh::Packet* packet, uint8_t src_hash,",
             "void MyMesh::releaseHeldOneKeyDMs()",
@@ -237,6 +262,8 @@ public:
   Frame& heldDMFrameAt(uint8_t index);
   void removeHeldOneKeyDM(uint8_t index);
   bool addToOfflineQueue(const uint8_t frame[], int len);
+  int peekOfflineQueue(uint8_t frame[]);
+  void popOfflineQueue();
   int getFromOfflineQueue(uint8_t frame[]);
   bool onAddressedTextPacket(mesh::Packet*, uint8_t, const uint8_t*, size_t);
   void releaseHeldOneKeyDMs();
