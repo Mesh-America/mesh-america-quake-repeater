@@ -49,6 +49,10 @@ The kit's enclosure has a solar panel and mounting plate, so it suits an outdoor
 
 The RAK1906 is read only when telemetry is requested, so it adds no idle power draw. Its gas resistance is a raw value, not an air-quality index: that would need Bosch's BSEC library, which samples continuously and has its own license, so it is left out for now. Neither the RAK1906 nor the earthquake sensor in a RAK19007 slot has been checked on hardware with this release. Details are in the [D7S integration notes](d7s-integration.md).
 
+### Checking that a sensor is detected
+
+Sensors are detected when the repeater starts, so fit them first, then restart it. Request the repeater's telemetry from the MeshCore app (the same place the earthquake sensor's readings appear). A RAK1906 shows as one extra channel with temperature, humidity, pressure, altitude and gas resistance. If it is missing, check that the module is fully seated, restart the repeater once more, and try another slot. Please report what you see either way, especially on a RAK19003, where this combination has not been run on hardware yet.
+
 ## Other hardware
 
 Nothing else is supported. A RAK4631 with a different sensor module, or a different board, would need a firmware build of its own.
