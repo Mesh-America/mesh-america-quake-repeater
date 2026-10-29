@@ -41,15 +41,15 @@ On a RAK3401 the stock firmware drives IO2 high. That would fight INT2, so once 
 
 ## Hardware notes (RAK19003 + RAK4631 + RAK12027: the RAK10703 kit)
 
-Status: **alpha, not yet run on this hardware.** The RAK10703 earthquake sensor kit is a RAK19003 mini base board, a RAK4631 core and a RAK12027 (D7S) in an IP65 Unify enclosure with a solar panel and an integrated antenna (the RAK10703-K kit has no battery; the RAK10703 solution is assembled and has one). The `MeshAmerica_Quake_Repeater_RAK4631` environment builds this combination, and also any RAK4631 on another WisBlock base with the sensor fitted. The kit ships with RAK's own firmware; this one replaces it. Facts below come from RAK's product page and datasheets, read on 2026-10-05.
+Status: **confirmed by a user test** on a RAK10703 kit, with the earthquake sensor in slot C; the maintainer separately ran the RAK4631 image on a RAK19007 with the sensor in slot D. The RAK10703 earthquake sensor kit is a RAK19003 mini base board, a RAK4631 core and a RAK12027 (D7S) in an IP65 Unify enclosure with a solar panel and an integrated antenna (the RAK10703-K kit has no battery; the RAK10703 solution is assembled and has one). The `MeshAmerica_Quake_Repeater_RAK4631` environment builds this combination, and also any RAK4631 on another WisBlock base with the sensor fitted. The kit ships with RAK's own firmware; this one replaces it. Facts below come from RAK's product page and datasheets, read on 2026-10-05, and from WisMap, read on 2026-10-29.
 
-- **Slot.** The RAK19003 has two sensor slots, **C and D**, not A. Its datasheet says slot D takes modules up to 23 mm and slot C only 10 mm modules, and the RAK12027 is 10 x 23 mm, so it goes in **slot D** (our reading of the two datasheets; RAK's RAK12027 page lists slots C to F for the larger bases). The firmware does not detect the slot.
-- **Interrupts.** In slot D the module's INT1 is IO5 and INT2 is IO6 (in slot C they would be IO3 and IO4). The firmware does not use the interrupts (it polls), so the slot makes no difference to it.
+- **Slot.** The RAK19003 has two sensor slots, **C and D**, not A. The earthquake sensor is a double-width module and goes in **slot C**: WisMap labels the slots `SENSOR_C (double)` and `SENSOR_D` and offers the sensor only in C, and a user test on a RAK10703 kit confirmed it. (RAK's RAK19003 datasheet text says slot D takes 23 mm modules and slot C only 10 mm ones, which is wrong for the kit.) The firmware does not detect the slot.
+- **Interrupts.** In slot C the module's INT1 is IO3 and INT2 is IO4 (in slot D they would be IO5 and IO6). The firmware does not use the interrupts (it polls), so the slot makes no difference to it.
 - **I2C.** The sensor is on the base's I2C1 (SDA P0.13, SCL P0.14 on a RAK4631, as in the variant), at address 0x55.
 - **Power and IO2.** The RAK19003 datasheet says IO2 is the enable for the 3V3_S rail, and that rail powers the RAK12027. Unlike the RAK3401 build above, **IO2 is not the sensor's INT2 here**, so there is nothing for it to fight. `d7sBoardOnConfirmed()` therefore does nothing on a RAK4631 and IO2 stays driven high, which keeps the sensor powered.
 - **Radio.** The RAK4631's SX1262 transmits at up to 22 dBm. There is no external amplifier as on the RAK3401 with a RAK13302, so range is lower.
 
-Not verified: that a RAK19003 with a RAK12027 behaves as the RAK19007 build did (no hardware to test), whether the D7S answers during its power-up calibration, and the live PGA scale (see the measurement contract). Do the same [hardware check](#hardware-check) as for the RAK3401 and report what you see.
+Not verified: whether the D7S answers during its power-up calibration, and the live PGA scale (see the measurement contract). Do the same [hardware check](#hardware-check) as for the RAK3401 and report what you see.
 
 ## Limits
 

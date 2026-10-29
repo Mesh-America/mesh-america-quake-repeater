@@ -4,11 +4,12 @@ The Quake Repeater firmware runs on two WisBlock builds. Both use an Omron D7S e
 
 | Hardware | Status | Radio |
 |---|---|---|
-| **RAK3401** (RAK19007 base, RAK4631 core, RAK13302 1 W module) with a RAK12027 | Tested | 1 W |
-| **RAK4631 on a RAK19003 base** with a RAK12027: the RAK10703 kit | **Alpha: not yet run on this hardware** | 22 dBm (no external amplifier) |
+| **RAK3401** (RAK19007 base, RAK3401 core, RAK13302 1 W module) with a RAK12027 | Tested | 1 W |
+| **RAK4631 on a RAK19003 base** with a RAK12027: the RAK10703 kit | Works (confirmed by a user test) | 22 dBm (no external amplifier) |
+| **RAK4631 on a RAK19007 base** with a RAK12027 in slot D | Limited testing (the earthquake sensor reports telemetry) | 22 dBm (no external amplifier) |
 
-::: warning The RAK10703 build is an alpha
-The firmware for the RAK19003 is built from the same code as the tested RAK3401 firmware, but nobody has run it on this hardware yet. The flasher shows an "untested firmware" warning and asks you to accept it. If you try it, please [tell us what you see](https://github.com/Mesh-America/mesh-america-quake-repeater/issues).
+::: tip Lightly tested
+The RAK4631 builds use the same code as the tested RAK3401 firmware. A user test confirmed the RAK19003 kit works, and the maintainer has run a RAK19007 with the earthquake sensor in slot D. If you try either, please [tell us what you see](https://github.com/Mesh-America/mesh-america-quake-repeater/issues).
 :::
 
 ## The RAK10703 earthquake sensor kit
@@ -26,7 +27,7 @@ Flashing replaces RAK's firmware with this one, so the board becomes a MeshCore 
 
 ### Where the sensor goes
 
-On the RAK19003 the RAK12027 goes in **slot D**. It is 23 mm long; slot D takes modules that long and slot C only takes 10 mm modules. The sensor is on the board's main I2C bus at address 0x55, and its interrupt pin is not used by the firmware, so nothing else needs wiring.
+On the RAK19003 the RAK12027 goes in **slot C**, the double slot: it is a double-width module (23 mm long), WisMap offers it only in slot C, and a user test on a RAK10703 kit confirmed it. Slot D takes single-width modules. On a **RAK19007** the sensor goes in slot D. The sensor is on the board's main I2C bus at address 0x55, and its interrupt pin is not used by the firmware, so nothing else needs wiring.
 
 Unlike the RAK3401, the sensor does not share a signal with the base board's power enable here, so the firmware needs no special handling for it. Details and what is still unverified are in the [D7S integration notes](d7s-integration.md).
 
