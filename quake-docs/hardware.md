@@ -45,8 +45,8 @@ The kit's enclosure has a solar panel and mounting plate, so it suits an outdoor
 
 | Module | What it does | Slots |
 |---|---|---|
-| **RAK12027** | The earthquake sensor (Omron D7S) that this firmware exists for | RAK3401: slot A. RAK19003: slot D. With the RAK4631 image on a RAK19007, use slot D, not A |
-| **RAK1906** | Environmental sensor (Bosch BME680): temperature, humidity, pressure, altitude and gas resistance in telemetry | Any slot. It is 10 x 10 mm, so on a RAK19003 it fits slot C next to the earthquake sensor in slot D |
+| **RAK12027** | The earthquake sensor (Omron D7S) that this firmware exists for | RAK3401: slot A. RAK19003: slot C. With the RAK4631 image on a RAK19007, use slot D, not A |
+| **RAK1906** | Environmental sensor (Bosch BME680): temperature, humidity, pressure, altitude and gas resistance in telemetry | Any slot. It is 10 x 10 mm, so on a RAK19003 it fits slot D next to the earthquake sensor in slot C |
 
 The RAK1906 is read only when telemetry is requested, so it adds no idle power draw. Its gas resistance is a raw value, not an air-quality index: that would need Bosch's BSEC library, which samples continuously and has its own license, so it is left out for now. The maintainer has run the RAK4631 image on a RAK19007 with the earthquake sensor in slot D and a RAK1906, and all the telemetry works. The same modules have not yet been run on a RAK19003, or with the RAK3401 image. Details are in the [D7S integration notes](d7s-integration.md).
 
