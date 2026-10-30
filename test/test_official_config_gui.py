@@ -96,6 +96,10 @@ MockSerial Serial;
     pump = body((ROOT / "examples/simple_repeater/main.cpp").read_text(),
                 "static void __attribute__((noinline)) serviceCommandInterfaces()")
     return source + r'''
+namespace mesh { namespace power {
+// The command-pump fixture isolates USB/CLI timing from regulator storage.
+void serviceRegulatorSettings() {}
+}}
 struct MyMesh {
   void handleUsbCommand(const char*, char* reply) { strcpy(reply, "Unknown"); }
   void cancelPendingSerialOutput() {}
@@ -230,7 +234,14 @@ class OfficialConfigGuiTests(unittest.TestCase):
             witness = (FIXTURE / "bootstrap-witness.js").read_text()
             self.assertEqual(bootstrap, witness.rstrip("\n"), "Pinned GUI bootstrap witness changed")
             (work / "bootstrap.js").write_text(bootstrap, encoding="ascii")
-            for name, text in {"Arduino.h": gps.ARDUINO, "Mesh.h": gps.MESH,
+            # Discovery's UART double and shutdown assertions share the GPIO
+            # mode bookkeeping used by its standalone hardware-boundary mock.
+            pin_mode_stub = "inline void pinMode(int,int){}"
+            self.assertEqual(gps.ARDUINO.count(pin_mode_stub), 1)
+            gps_arduino = gps.ARDUINO.replace(pin_mode_stub,
+                "inline int gpio_modes[64]={};\n"
+                "inline void pinMode(int pin,int mode){gpio_modes[pin]=mode;}")
+            for name, text in {"Arduino.h": gps_arduino, "Mesh.h": gps.MESH,
                                "CayenneLPP.h": gps.CAYENNE,
                                "Wire.h": "#pragma once\nclass TwoWire {};\n"}.items():
                 (work / name).write_text(text, encoding="ascii")
@@ -281,13 +292,15 @@ class OfficialConfigGuiTests(unittest.TestCase):
             return result
 
     def test_raw_uart_first_stock_gui_command_survives_preconnect_idle(self):
-        for idle_ms in (180001, 10800000, 0xFFFFFFFE):
+        for idle_ms in (300001, 10800000, 0xFFFFFFFE):
             with self.subTest(idle_ms=idle_ms):
                 result = self.run_contract(raw_uart=True, preconnect_idle_ms=idle_ms)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_missing_raw_uart_sleep_guard_breaks_first_stock_gui_command(self):
-        result = self.run_contract(raw_uart=True, preconnect_idle_ms=180001,
+        # Run after the five-minute startup grace so removing the UART veto
+        # actually permits sleep before the first GUI command arrives.
+        result = self.run_contract(raw_uart=True, preconnect_idle_ms=300001,
                                    lose_raw_uart_guard=True)
         self.assertNotEqual(result.returncode, 0, "Negative control did not fail")
         self.assertIn("initial time missed the stock 5000 ms deadline", result.stderr)

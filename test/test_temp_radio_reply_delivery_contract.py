@@ -68,7 +68,8 @@ class TempRadioReplyDeliveryContractTest(unittest.TestCase):
         self.assertIn('primary_radio_mutation_generation != primary_mutation_before', command)
         self.assertIn('replyMutationGeneration() != secondary_mutation_before', command)
         self.assertNotIn('strncmp(deferred_cli_command.command, "tempradio ', command)
-        self.assertIn("arms_temp_radio ? &queued_reply : NULL", command)
+        self.assertIn("generation() != morse_mutation_before", command)
+        self.assertIn("(arms_temp_radio || arms_morse) ? &queued_reply : NULL", command)
 
         # A packet-level retry can arrive after the success text was cached but
         # before the authoritative reply drains. It must not create a second,

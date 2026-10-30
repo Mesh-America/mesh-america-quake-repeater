@@ -41,7 +41,11 @@ struct LocationProvider {
 struct Sensors {
   LocationProvider* provider;
   const char* user = "0";
+  bool physical_override = false, physical_power = false;
   LocationProvider* getLocationProvider() { return provider; }
+  bool isGpsPowered() const {
+    return physical_override ? physical_power : (provider && provider->powered);
+  }
   const char* getSettingByKey(const char*) { return user; }
 };
 struct Prefs { bool powersaving_enabled = true; };
@@ -58,6 +62,12 @@ int main() {
   gps.powered = true;
   status(&sensors, &prefs, reply);
   assert(!strcmp(reply, "off, powered"));
+  // A provider without its own enable pin can report enabled despite a cut
+  // shared rail. The manager's physical policy must win over that stale view.
+  sensors.physical_override = true; sensors.physical_power = false;
+  status(&sensors, &prefs, reply);
+  assert(!strcmp(reply, "off, unpowered"));
+  sensors.physical_override = false;
   sensors.user = "1"; gps.powered = false;
   status(&sensors, &prefs, reply);
   assert(!strcmp(reply, "on, unpowered (powersaving, wake in 0h 30m), last sync: none"));

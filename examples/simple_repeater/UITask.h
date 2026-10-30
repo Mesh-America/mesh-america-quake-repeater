@@ -27,6 +27,7 @@ class UITask {
   unsigned long _started_at = 0;
   uint8_t _radio_profile_display_page = 0;
   bool _dual_radio_enabled_seen = false;
+  bool _startup_complete = false;
 
   void resetRadioProfileDisplayPage();
   void advanceRadioProfileDisplayPage();
@@ -65,6 +66,10 @@ class UITask {
 #endif
   uint8_t _flip_seen = 0xFF;         // 0xFF forces the first apply
   void applyDisplayFlip();
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) && HELTEC_TFT_RUNTIME_ROTATION == 1
+  uint16_t _rotation_seen = 0xFFFF;
+  void applyDisplayRotation();
+#endif
 
 
   void renderCurrScreen();

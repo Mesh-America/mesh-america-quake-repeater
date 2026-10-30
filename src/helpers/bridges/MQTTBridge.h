@@ -12,6 +12,7 @@
 #include "helpers/JWTHelper.h"
 #include "helpers/MQTTConnectionPolicy.h"
 #include "helpers/MQTTConnectionHealth.h"
+#include "helpers/MQTTTransportHealth.h"
 #include "helpers/MQTTPayloadBuilder.h"
 #include "helpers/MQTTPacketFilter.h"
 #include "helpers/MQTTPresets.h"
@@ -25,6 +26,7 @@ class MeshSNMPAgent;  // Forward declaration
 
 #ifdef ESP_PLATFORM
 #include "helpers/esp32/SntpOperationCoordinator.h"
+#include "helpers/WiFiNetworkPowerPolicy.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -157,6 +159,10 @@ private:
     // DISCONNECTED (including a failed initial attempt). first_disconnect_time is intentionally separate
     // so the existing 'mqttN.diag' "first_disc" semantics don't change.
     unsigned long current_outage_started_ms;
+
+    // Only the bridge worker mutates this state; SDK callbacks raise atomic
+    // latches instead. Retained across reconnects to expose recovery history.
+    MQTTTransportHealth::State transport_health;
   };
 
   MQTTSlot _slots[RUNTIME_MQTT_SLOTS];
@@ -258,7 +264,14 @@ private:
 
   // Set before starting/reconnecting, cleared by connect/failed-attempt/stop.
   // Must be set before the SDK call because its event task can callback at once.
-  volatile bool _slot_attempt_pending[RUNTIME_MQTT_SLOTS];
+  std::atomic<bool> _slot_attempt_pending[RUNTIME_MQTT_SLOTS];
+  std::atomic<bool> _slot_transport_fault_pending[RUNTIME_MQTT_SLOTS];
+  std::atomic<bool> _slot_health_reset_pending[RUNTIME_MQTT_SLOTS];
+  // Read-only CLI snapshots: never read the owner-only State across tasks.
+  std::atomic<uint32_t> _slot_health_recoveries[RUNTIME_MQTT_SLOTS];
+  std::atomic<uint8_t> _slot_health_reason[RUNTIME_MQTT_SLOTS];
+  std::atomic<bool> _slot_health_recovering[RUNTIME_MQTT_SLOTS];
+  std::atomic<uint32_t> _slot_health_ack_wait_secs[RUNTIME_MQTT_SLOTS];
 
   // Pending on-connect status publish: set from the onConnect callback (which
   // runs on the esp-mqtt event task, NOT this bridge task), consumed by the MQTT
@@ -401,8 +414,8 @@ private:
 
   // Memory pressure monitoring (per-publish skip; see publishPacket()).
   // The broader fragmentation-recovery machinery was removed in Phase 4 of
-  // the MQTT memory-defrag work - persistent MQTT clients no longer churn
-  // the heap, so gray-zone / critical-restart trackers are unnecessary.
+  // the MQTT memory-defrag work. Persistent clients reduce MQTT storage churn;
+  // ESP-IDF still reallocates TLS sessions when a connection closes.
   unsigned long _last_memory_check;
   bool _memory_pressure = false;  // Cached max-alloc verdict; re-sampled at most once per interval in publishPacket() so the heap walk isn't paid per-packet under pressure
   int _skipped_publishes;  // Exposed via SNMP; count of publishes skipped when max_alloc is too low
@@ -410,6 +423,7 @@ private:
   // on Core 1 (radio callbacks), read on Core 0 for `mqtt.stats`; a torn read of
   // a diagnostic counter is harmless, so no atomic is warranted.
   unsigned long _filtered_packets = 0;
+  unsigned long _bad_sig_adverts = 0;  // RX adverts dropped by mqtt.advert.verify
 
   // Status publish retry tracking
   unsigned long _last_status_retry;  // Track last retry attempt (separate from successful publish)
@@ -447,6 +461,17 @@ private:
   unsigned long _last_wifi_reconnect_attempt;
   uint8_t _wifi_reconnect_backoff_attempt;  // 0..5 -> 15s, 30s, 60s, 120s, 300s; reset on connect
   unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s inter-slot gap)
+#ifdef ESP_PLATFORM
+  mesh::wifi::NetworkPowerPolicy _network_power_policy;
+  std::atomic<bool> _network_suspended{false};
+  uint8_t _background_ntp_server = 0;
+  uint32_t _network_publish_acks[RUNTIME_MQTT_SLOTS] = {};
+  bool _network_espnow_restore_pending = false;
+  uint32_t _network_espnow_restore_at = 0;
+  bool serviceNetworkPower(uint32_t now);
+  void serviceEspNowChannelRestore(uint32_t now);
+  void serviceBackgroundNtp(uint32_t now);
+#endif
 
   AlertFaultPolicy::OutageSnapshot wifiOutage() const {
     return AlertFaultPolicy::unpackOutageSnapshot(
@@ -479,9 +504,9 @@ private:
   // - setupSlot() ensures the client exists, then configures it (server,
   //   credentials, CA) and calls connect(). Safe to call again to reconfigure.
   // - teardownSlot() only disconnects - it never deletes the client. Leaves
-  //   the mbedTLS/transport state ready for a subsequent setupSlot().
-  // This avoids delete/new cycles that shed ~40 KB of mbedTLS buffers per
-  // reconfigure and fragment the internal heap on non-PSRAM boards.
+  //   MQTT storage and transport handles ready for a subsequent setupSlot().
+  // This avoids wrapper/configuration allocation cycles. TLS sessions and their
+  // record buffers are still freed and recreated by ESP-IDF on reconnect.
   bool ensureSlotClient(int index);    // Allocate this slot's persistent client + callbacks on first use
   bool ensureSlotAuthToken(int index); // Allocate this slot's JWT token buffer on first token creation
   void releaseSlotAuthToken(int index);// Free the token buffer (only with the client -- see MQTTSlot)
@@ -493,8 +518,13 @@ private:
   // exceeded by one route while another enforces it.
   int activatedSlotCount() const;
   bool canActivateSlot(int index) const;
+  bool hasPendingSlotConnection() const;
+  bool canStartSlotConnection(int index) const;
   void teardownSlot(int index, bool force = false);
   esp_err_t reconnectSlotClient(int index);
+  bool recoverSlotTransport(int index, uint32_t now);
+  void serviceSlotTransportHealth(uint32_t now);
+  void updateSlotTransportDiag(int index, uint32_t now);
   void maintainSlotConnections();      // Maintain all slot connections (token renewal, reconnect)
   void maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted);
   bool createSlotAuthToken(int index); // Create/renew JWT token for a slot
@@ -548,6 +578,7 @@ private:
   void getClientVersion(char* buffer, size_t buffer_size) const;
   void logMemoryStatus();
   void refreshOriginFromPrefs();
+  void applyTimezoneRules();
   // begin()/end()-scoped PSRAM buffers. Each allocation is independent so a
   // transient heap shortage degrades to the existing stack fallback instead
   // of making the bridge unusable.
@@ -604,6 +635,15 @@ public:
   void requestStop();
   bool isStopping() const { return _lifecycle.isStopInProgress(); }
   bool isRunning() const override { return _initialized; }
+  // Configured and still scheduling recovery, but transports are quiesced.
+  // Do not conflate automatic suspension with a persisted bridge disable.
+  bool isNetworkSuspended() const {
+#ifdef ESP_PLATFORM
+    return _network_suspended.load(std::memory_order_acquire);
+#else
+    return false;
+#endif
+  }
   void loop() override;
   void onPacketReceived(mesh::Packet *packet) override;
   void sendPacket(mesh::Packet *packet) override;
@@ -676,6 +716,18 @@ public:
   #else
   static const int NEIGHBORS_MAX_PUBLISH_ENTRIES = 20;
   #endif
+
+  // Discovery budgets each row with a 64-character public key, UINT32_MAX
+  // heard age and a status of at least "timeout". Its shortest measured JSON
+  // is 144 bytes. Reserve scope results only for rows that could fit the
+  // existing JSON buffer, plus one overflow sentinel. Serializer tests keep
+  // this lower bound tied to completeNeighborDiscoverEntry's measurement.
+  // The neighbor cache and actual per-publish entry limit remain unchanged.
+  static const size_t NEIGHBORS_MIN_DISCOVERY_ENTRY_JSON_BYTES = 144;
+  static const size_t NEIGHBORS_SCOPE_RESULT_CAPACITY =
+      (NEIGHBORS_MAX_PUBLISH_ENTRIES < NEIGHBORS_JSON_BUFFER_SIZE / NEIGHBORS_MIN_DISCOVERY_ENTRY_JSON_BYTES
+          ? NEIGHBORS_MAX_PUBLISH_ENTRIES
+          : NEIGHBORS_JSON_BUFFER_SIZE / NEIGHBORS_MIN_DISCOVERY_ENTRY_JSON_BYTES) + 1;
 
   // Called by the mesh (Core 1) once a neighbor-discovery pass has built the
   // table JSON. Copies it into the persistent PSRAM buffer and raises the

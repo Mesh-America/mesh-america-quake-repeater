@@ -8,6 +8,8 @@ class ThinknodeM2Board : public ESP32Board {
 
 public:
   void begin();
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
   const char* getManufacturerName() const override ;
 

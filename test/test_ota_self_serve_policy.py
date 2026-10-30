@@ -13,6 +13,133 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class OtaSelfServePolicyTest(unittest.TestCase):
+    def test_adaptive_self_reports_actual_capabilities_inside_remote_reply(self):
+        cli = (ROOT / "src/helpers/ota/OtaCli.cpp").read_text(encoding="ascii")
+        branch = method(cli, 'else if (is_cmd(a, "self|id", &rest))').removeprefix("else ")
+        harness = r'''
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <initializer_list>
+struct SelfFwInfo {
+  bool valid = true;
+  uint32_t body_len = UINT32_MAX, image_len = UINT32_MAX;
+  uint8_t body_hash[8] = {};
+};
+static SelfFwInfo running;
+static bool ota_self_firmware(SelfFwInfo& info) { info = running; return true; }
+namespace mesh { struct Utils {
+  static void toHex(char* out, const uint8_t*, unsigned count) {
+    assert(count == 8); memcpy(out, "0011223344556677", 17);
+  }
+}; }
+static unsigned ota_max_block_capability() { return 2048; }
+struct OtaBlCaps {
+  bool present = true;
+  uint16_t apply_abi = 3, codec_mask = 5;
+  uint8_t storage_flags = 4, optional_sd_app_storage = 1;
+};
+enum { OTA_BL_STORAGE_SD = 1, OTA_BL_STORAGE_QSPI = 4 };
+struct Store {
+  enum Kind { Internal, Qspi, Sd, Unsafe } kind = Internal;
+  uint32_t bytes = 252 * 1024;
+  bool supported = true;
+  bool usesInternal() const { return kind == Internal; }
+  bool usesQspi() const { return kind == Qspi; }
+  bool usesSd() const { return kind == Sd; }
+  bool usesExternal() const { return usesSd() || usesQspi(); }
+  bool compatible() const { return supported; }
+  uint32_t capacity() const { return bytes; }
+  uint32_t qspiCapacity() const { return bytes; }
+  const char* selectionReason() const {
+    return "unsafe storage diagnostic intentionally longer than the remote reply "
+           "budget: capabilities must remain complete before this explanatory tail";
+  }
+};
+struct Context {
+  OtaBlCaps caps;
+  Store fetch_store;
+  unsigned caps_reads = 0;
+  const OtaBlCaps& bootloaderAppCaps() { ++caps_reads; return caps; }
+};
+static bool is_cmd(const char*, const char*, const char**) { return true; }
+static bool command(char* reply, Context& c) {
+  const char* a = "self", *rest = nullptr;
+@BRANCH@
+  return true;
+}
+int main() {
+  for (auto kind : {Store::Internal, Store::Qspi, Store::Sd, Store::Unsafe})
+  for (bool supported : {false, true})
+  for (uint16_t abi : {uint16_t(3), uint16_t(65535)}) {
+    Context c;
+    c.fetch_store.kind = kind;
+    c.fetch_store.bytes = supported ? UINT32_MAX : 0;
+    c.fetch_store.supported = supported;
+    c.caps.apply_abi = abi;
+    c.caps.codec_mask = abi == 3 ? 5 : 65535;
+    c.caps.present = supported;
+    c.caps.storage_flags = supported ? OTA_BL_STORAGE_QSPI : 0;
+    c.caps.optional_sd_app_storage = supported ? OTA_BL_STORAGE_SD : 0;
+    struct { char before[8], reply[160], after[8]; } out;
+    memset(&out, 0x5A, sizeof(out));
+    assert(command(out.reply, c));
+    for (char byte : out.before) assert(byte == 0x5A);
+    for (char byte : out.after) assert(byte == 0x5A);
+    assert(memchr(out.reply, 0, sizeof(out.reply)));
+    assert(c.caps_reads == 1);
+    assert(strstr(out.reply, "base_hash=0011223344556677"));
+    assert(strstr(out.reply, "maxblk:2048"));
+#if defined(OTA_SEEDER_ONLY)
+    assert(strstr(out.reply, "source-only; local install disabled"));
+    assert(!strstr(out.reply, "abi="));
+#else
+    char expected[40];
+    snprintf(expected, sizeof(expected), "abi=%u codecs=0x%x", abi, c.caps.codec_mask);
+    const char* caps = strstr(out.reply, expected);
+    assert(caps && caps < out.reply + 110);
+#if defined(OTA_TOWER_AUTO_STORE)
+    assert(strstr(out.reply, supported ? "bootloader:apply OK" : "bootloader:unsupported"));
+#else
+    if (kind == Store::Qspi) {
+      assert(strstr(out.reply, supported ? "QSPI apply OK" : "NO QSPI apply"));
+      assert(strstr(out.reply, supported ? "QSPI store:4194303K" : "QSPI store:ERR 0K"));
+    } else if (kind == Store::Internal) {
+      assert(strstr(out.reply, supported ? "delta apply OK" : "NO delta apply"));
+      assert(strstr(out.reply, "internal store:"));
+    }
+#if defined(OTA_RAK15002_SD_STORE)
+    else if (kind == Store::Sd) {
+      assert(strstr(out.reply, supported ? "authenticated SD apply OK" : "NO SD apply"));
+      assert(strstr(out.reply, "SD store"));
+    }
+#endif
+#endif
+#endif
+  }
+  running.valid = false;
+  Context c;
+  char reply[160];
+  assert(command(reply, c));
+  assert(!strncmp(reply, "ERR no EndF", 11) && c.caps_reads == 0);
+}
+'''.replace("@BRANCH@", branch)
+        with tempfile.TemporaryDirectory(prefix="ota-self-caps-") as directory:
+            path = Path(directory)
+            source = path / "test.cpp"
+            source.write_text(harness, encoding="ascii")
+            variants = (
+                ("NRF52_PLATFORM=1", "OTA_RAK_AUTO_STORE=1"),
+                ("NRF52_PLATFORM=1", "OTA_RAK_AUTO_STORE=1", "OTA_RAK15002_SD_STORE=1"),
+                ("NRF52_PLATFORM=1", "OTA_TOWER_AUTO_STORE=1"),
+                ("NRF52_PLATFORM=1", "OTA_RAK_AUTO_STORE=1", "OTA_SEEDER_ONLY=1"),
+            )
+            for definitions in variants:
+                with self.subTest(defines=definitions):
+                    self.compile_and_run(path, source, definitions)
+
     def compile_and_run(self, path, source, defines=(), scenarios=((),)):
         binary = path / "self-serve-policy.exe"
         sanitizers = [] if os.name == "nt" else ["-fsanitize=address,undefined"]
@@ -89,6 +216,10 @@ typedef bool (*OtaSend)(void*, const uint8_t*, uint16_t, bool);
 struct SelfFwInfo { bool valid = false; uint32_t target_id = 0, fw_version = 0; char hw_id[33] = {}; };
 static bool ota_self_firmware(SelfFwInfo& info) { info = SelfFwInfo(); return false; }
 static int ota_transport_inflate;
+struct MotaManifest {};
+static bool ota_manifest_trusted(const MotaManifest&, int) { return false; }
+struct Context;
+using OtaContext = Context;
 enum { CODEC_DETOOLS_INPLACE = 1, CODEC_DETOOLS_SEQUENTIAL = 2 };
 struct Store {
   bool external = false;
@@ -100,6 +231,7 @@ struct Manager {
   bool accept_full = false;
   void begin(uint32_t, OtaSend, void*) {}
   void set_transport_deflate_decoder(int) {}
+  template<class Callback> void set_manifest_admission(Callback, void*) {}
   void set_auto_version_floor(uint32_t, bool) {}
   void set_accept_full(bool value) { accept_full = value; }
   void set_autofetch(uint8_t) {}
@@ -112,6 +244,7 @@ struct Manager {
 using OtaManager = Manager;
 struct Context {
   Manager manager;
+  int allow = 0;
   Store fetch_store;
   bool self_serve_supported = false, fetch_to_folder = false;
   static const uint8_t AUTOINSTALL_OFF = 0;

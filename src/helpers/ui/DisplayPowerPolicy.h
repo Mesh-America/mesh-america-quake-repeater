@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include "DisplayBuildFlags.h"
 
 namespace mesh { namespace ui {
 
@@ -19,7 +20,11 @@ inline const char* displayInboxModeName(DisplayInboxMode mode) {
 
 struct DisplayPowerProfile {
   DisplayMode mode = DisplayMode::Button;
+#ifdef MESHCORE_HAS_EINK_DISPLAY
+  uint16_t seconds = 15 * 60;
+#else
   uint16_t seconds = 15;
+#endif
 };
 struct DisplayPowerPrefs {
   DisplayPowerProfile battery;

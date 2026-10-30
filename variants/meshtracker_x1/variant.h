@@ -26,7 +26,7 @@
 
 #define EXT_CHRG_DETECT         (35)            // P1.3, LOW while charging
 // P1.4 is the charger's second status line, but it reads LOW regardless of
-// charge state on this board, so it is not used (Meshtastic leaves it out too)
+// charge state on this board, so it is not used.
 #define EXT_PWR_DETECT          (5)             // P0.5
 
 #define ADC_RESOLUTION          (14)

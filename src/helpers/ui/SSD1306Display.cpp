@@ -1,4 +1,18 @@
 #include "SSD1306Display.h"
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+#include "OLEDControllerSettings.h"
+#endif
+
+#if defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)
+// Adafruit_SSD1306::begin allocates WIDTH * ((HEIGHT + 7) / 8) once and
+// reuses that framebuffer on later begin calls. The driver itself is embedded
+// in the linked global display, not allocated on the heap. Even including
+// that object again plus allocator overhead fits the 2 KiB runtime bound.
+static_assert(SSD1306Display::FRAMEBUFFER_BYTES == 1024,
+              "Update the SSD1306 OLED framebuffer budget");
+static_assert(sizeof(SSD1306Display) + SSD1306Display::FRAMEBUFFER_BYTES + 32 <= 2048,
+              "Update the SSD1306 OLED runtime budget");
+#endif
 
 bool SSD1306Display::i2c_probe(TwoWire& wire, uint8_t addr) {
   wire.beginTransmission(addr);
@@ -23,11 +37,26 @@ bool SSD1306Display::begin() {
     _isOn = true;
   }
   const bool started = display.begin(SSD1306_SWITCHCAPVCC, DISPLAY_ADDRESS,
-                                     true, false)
+                                     true, false
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+                                     , mesh::ui::oledControllerMode()
+#endif
+                                     )
       && i2c_probe(Wire, DISPLAY_ADDRESS);
   if (started) {
     _panel_ready = true;
     applyRotation();
+  } else {
+    _panel_ready = false;
+    if (_peripher_power) {
+#if PIN_OLED_RESET >= 0
+      digitalWrite(PIN_OLED_RESET, LOW);
+#endif
+      // begin() owns one claim even when it was already on, or turnOn()
+      // reached it after a previous failure. Other peripheral owners remain.
+      _peripher_power->release();
+    }
+    _isOn = false;
   }
   return started;
 }
@@ -68,9 +97,11 @@ void SSD1306Display::setFlipped(bool flipped) {
 
 void SSD1306Display::turnOn() {
   if (!_isOn) {
-    if (_peripher_power) _peripher_power->claim();
-    _isOn = true;  // set before begin() to prevent double claim
-    if (_peripher_power) begin();  // re-init display after power was cut
+    if (_peripher_power || !_panel_ready) {
+      if (!begin()) return;  // begin owns and rolls back its claim on failure
+    } else {
+      _isOn = true;  // A continuously powered, initialized panel needs no reset.
+    }
   }
   display.ssd1306_command(SSD1306_DISPLAYON);
 }

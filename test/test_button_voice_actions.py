@@ -40,7 +40,7 @@ int main(){
    {ButtonVoicePrompt::AlertsSilent,alertsSilentClip,nullptr},
 #endif
  };
- genericBuzzer buzzer;buzzer.begin();
+ genericBuzzer buzzer;buzzer.begin();buzzer.quiet(false);
  auto finish=[&]{
    assert(!registers.ENABLE);
    rtttl::finish();buzzer.loop();
@@ -293,6 +293,7 @@ struct UITask {
  char _alert[80]={},_origin[80]={},_msg[80]={};
  bool _need_refresh=false,_displayWasOn=false,_button_notification_cleared=false;
  bool _shutdown_pending=false,_shutdown_restart=false;
+ bool _startup_complete=false;
  uint32_t _shutdown_started_at=0,ui_started_at=0;
  uint8_t _radio_profile_display_page=0,_notification_outputs=mesh::notify::Sound;
  bool guard_ok=true,guard_reject_drain=false;unsigned guards=0,preview_clears=0;
@@ -547,7 +548,7 @@ NOTIFICATION_STOPS = r'''
 #include <helpers/ui/buzzer.cpp>
 uint32_t now_ms=0;
 int main(){
- genericBuzzer buzzer;buzzer.begin();
+ genericBuzzer buzzer;buzzer.begin();buzzer.quiet(false);
  buzzer.playNotification("ordinary:d=4,o=5,b=120:c");
  assert(buzzer.isPlaying()&&rtttl::isPlaying());
  buzzer.stopNotification();assert(!buzzer.isPlaying()&&!rtttl::isPlaying());
@@ -590,10 +591,12 @@ int main(){
  buzzer.quiet(true);
 #endif
  buzzer.playNotification("ordinary:d=4,o=5,b=120:c");
+ assert(!buzzer.isPlaying()&&buzzer.isQuiet()&&pin_states[PIN_BUZZER_EN]==LOW);
+ buzzer.quiet(false);
+ buzzer.playNotification("ordinary:d=4,o=5,b=120:c");
  assert(buzzer.isPlaying()&&pin_states[PIN_BUZZER_EN]==HIGH);
  buzzer.stopNotification();
- assert(!buzzer.isPlaying()&&!rtttl::isPlaying()&&buzzer.isQuiet());
- assert(pin_states[PIN_BUZZER_EN]==LOW);
+ assert(!buzzer.isPlaying()&&!rtttl::isPlaying()&&!buzzer.isQuiet());
 }
 '''
 

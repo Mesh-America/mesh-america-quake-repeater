@@ -10,7 +10,8 @@ using namespace fake_nimble;
 static void reset() {
   NimBLEDevice::deinit(true);
   failure.clear(); calls.clear(); transmitted.clear();
-  persisted = true; accept_notification = true; disconnects = 0;
+  connection_updates.clear();
+  persisted = true; accept_notification = true; disconnects = 0; notification_attempts = 0;
   test_millis = 100;
 }
 
@@ -111,6 +112,7 @@ static void test_authentication_and_bond_lifecycle() {
     authenticate(interface, info);
     assert(!interface.isConnected() && !interface.takeSuccessfulConnection());
     assert(disconnects == 1);
+    assert(connection_updates.empty());
     NimBLEDevice::deinit(true);
   }
 
@@ -146,6 +148,47 @@ static void test_authentication_and_bond_lifecycle() {
   rebooted.enable();
   assert(!NimBLEDevice::server->advertising.active);
   assert(rebooted.takeBondedOnlyRecovery());
+  NimBLEDevice::deinit(true);
+}
+
+static void test_connection_parameters_only_on_current_authenticated_transition() {
+  reset(); SerialBLEInterface interface;
+  assert(interface.begin("MeshCore-", "connection", 123456));
+  interface.enable();
+  auto* server = NimBLEDevice::server.get();
+  NimBLEConnInfo info;
+  info.handle = 29;
+  // A callback after the physical link has closed must not request an update.
+  server->callbacks->onAuthenticationComplete(info);
+  assert(connection_updates.empty() && !interface.isConnected());
+  server->connected = true;
+  server->callbacks->onConnect(server, info);
+  assert(connection_updates.empty() && !interface.isConnected());
+  NimBLEConnInfo stale = info;
+  stale.handle = 7;
+  server->callbacks->onAuthenticationComplete(stale);
+  assert(connection_updates.empty() && !interface.isConnected());
+  server->callbacks->onAuthenticationComplete(info);
+  assert(connection_updates.size() == 1 && interface.isConnected());
+  const auto& first = connection_updates[0];
+  assert(first.handle == 29 && first.minimum == 12 && first.maximum == 24
+         && first.latency == 0 && first.timeout == 400);
+  server->callbacks->onAuthenticationComplete(info);
+  assert(connection_updates.size() == 1); // No repeated update on the same link.
+  server->connected = false;
+  server->callbacks->onDisconnect(server, info, 0);
+  server->callbacks->onAuthenticationComplete(info);
+  assert(connection_updates.size() == 1 && !interface.isConnected());
+  NimBLEConnInfo next = info;
+  next.handle = 31;
+  server->connected = true;
+  server->callbacks->onConnect(server, next);
+  server->callbacks->onAuthenticationComplete(info); // Prior connection's callback.
+  assert(connection_updates.size() == 1 && !interface.isConnected());
+  server->callbacks->onAuthenticationComplete(next);
+  assert(connection_updates.size() == 2 && connection_updates[1].handle == 31);
+  server->callbacks->onAuthenticationComplete(next);
+  assert(connection_updates.size() == 2);
   NimBLEDevice::deinit(true);
 }
 
@@ -199,11 +242,263 @@ static void test_real_transport_frames() {
   NimBLEDevice::deinit(true);
 }
 
+static void test_required_reply_backpressure_services_tx_before_rx() {
+  reset(); SerialBLEInterface interface;
+  assert(interface.begin("MeshCore-", "backpressure", 123456));
+  interface.enable();
+  NimBLEConnInfo info;
+  authenticate(interface, info);
+  auto* server = NimBLEDevice::server.get();
+  auto* tx = server->service->characteristics[0].get();
+  auto* rx = server->service->characteristics[1].get();
+  tx->callbacks->onSubscribe(tx, info, 1);
+  mtu = 179;
+  for (uint8_t i = 0; i < 4; ++i) {
+    const uint8_t reply[] = {0x0d, i};
+    assert(interface.writeFrame(reply, sizeof(reply)) == sizeof(reply));
+  }
+  const uint8_t command[] = {66, 'A', '7', '|', 'g', 'e', 't', ' ', 'l', 'a', 'b', '.', 't', 'x'};
+  rx->setValue(command, sizeof(command));
+  rx->callbacks->onWrite(rx, info);
+  uint8_t received[MAX_FRAME_SIZE] = {};
+  accept_notification = false;
+  // A command must retain its RX slot until its required reply can fit.
+  assert(interface.checkRecvFrame(received) == 0);
+  assert(interface.isReadBusy() && transmitted.empty());
+  test_millis += 61;
+  assert(interface.isWriteBusy()); // Capacity also blocks while TX is ready.
+  assert(interface.checkRecvFrame(received) == 0);
+  assert(interface.isReadBusy() && transmitted.empty());
+
+  accept_notification = true;
+  test_millis += 61;
+  // TX must be serviced BEFORE the full-queue RX gate, or this deadlocks.
+  assert(interface.checkRecvFrame(received) == sizeof(command));
+  assert(memcmp(received, command, sizeof(command)) == 0);
+  assert(!interface.isReadBusy() && transmitted.size() == 1);
+  const uint8_t cli_reply[] = {29, 'A', '7', '|', 'O', 'K'};
+  assert(interface.writeFrame(cli_reply, sizeof(cli_reply)) == sizeof(cli_reply));
+  for (unsigned i = 0; i < 6; ++i) {
+    test_millis += 61;
+    assert(interface.checkRecvFrame(received) == 0);
+  }
+  assert(transmitted.size() == 5);
+  for (uint8_t i = 0; i < 4; ++i) {
+    assert((transmitted[i] == std::vector<uint8_t>{0x0d, i}));
+  }
+  assert(transmitted[4] == std::vector<uint8_t>(cli_reply, cli_reply + sizeof(cli_reply)));
+  assert(!interface.hasPendingIO());
+  NimBLEDevice::deinit(true);
+}
+
+static void test_full_queue_best_effort_eviction_still_admits_rx() {
+  reset(); SerialBLEInterface interface;
+  assert(interface.begin("MeshCore-", "eviction", 123456));
+  interface.enable();
+  NimBLEConnInfo info;
+  authenticate(interface, info);
+  auto* server = NimBLEDevice::server.get();
+  auto* tx = server->service->characteristics[0].get();
+  auto* rx = server->service->characteristics[1].get();
+  tx->callbacks->onSubscribe(tx, info, 1);
+  mtu = 179;
+  for (uint8_t i = 0; i < 3; ++i) {
+    const uint8_t log[] = {0x88, i};
+    assert(interface.writeFrame(log, sizeof(log)) == sizeof(log));
+  }
+  const uint8_t extra_log[] = {0x88, 9};
+  assert(interface.writeFrame(extra_log, sizeof(extra_log)) == 0);
+  const uint8_t previous_reply[] = {0x0d, 7};
+  assert(interface.writeFrame(previous_reply, sizeof(previous_reply)) == sizeof(previous_reply));
+  const uint8_t command[] = {66, 'B', '8', '|', 'v', 'e', 'r'};
+  rx->setValue(command, sizeof(command));
+  rx->callbacks->onWrite(rx, info);
+  uint8_t received[MAX_FRAME_SIZE] = {};
+  accept_notification = false;
+  // Full is not blocked when a required response can evict a packet log.
+  assert(!interface.isWriteBusy());
+  assert(interface.checkRecvFrame(received) == sizeof(command));
+  assert(memcmp(received, command, sizeof(command)) == 0);
+  const uint8_t cli_reply[] = {29, 'B', '8', '|', 'O', 'K'};
+  assert(interface.writeFrame(cli_reply, sizeof(cli_reply)) == sizeof(cli_reply));
+  assert(transmitted.empty());
+  accept_notification = true;
+  for (unsigned i = 0; i < 6; ++i) {
+    test_millis += 61;
+    assert(interface.checkRecvFrame(received) == 0);
+  }
+  assert(transmitted.size() == 4);
+  assert(transmitted[0] == std::vector<uint8_t>(previous_reply, previous_reply + sizeof(previous_reply)));
+  assert(transmitted[1] == std::vector<uint8_t>(cli_reply, cli_reply + sizeof(cli_reply)));
+  assert((transmitted[2] == std::vector<uint8_t>{0x88, 0}));
+  assert((transmitted[3] == std::vector<uint8_t>{0x88, 1}));
+  assert(!interface.hasPendingIO());
+  NimBLEDevice::deinit(true);
+}
+
+static void test_exact_notify_interval_failure_retention_and_rollover() {
+#if defined(MESH_HIL_BLE_INTERVAL_MS)
+  constexpr uint32_t interval = MESH_HIL_BLE_INTERVAL_MS;
+#else
+  constexpr uint32_t interval = 7;
+#endif
+  reset(); SerialBLEInterface interface;
+  assert(interface.begin("MeshCore-", "interval", 123456));
+  interface.enable();
+  NimBLEConnInfo info; authenticate(interface, info);
+  auto* tx = NimBLEDevice::server->service->characteristics[0].get();
+  uint8_t first[MAX_FRAME_SIZE] = {0x70, 1}, second[MAX_FRAME_SIZE] = {0x70, 2};
+  uint8_t received[MAX_FRAME_SIZE] = {};
+  assert(interface.writeFrame(first, sizeof(first)) == sizeof(first));
+  interface.checkRecvFrame(received);
+  assert(notification_attempts == 0); // CCCD is not ready.
+  tx->callbacks->onSubscribe(tx, info, 1);
+  mtu = 23; interface.checkRecvFrame(received);
+  assert(notification_attempts == 0); // Never truncate to fit a smaller MTU.
+  mtu = 179; accept_notification = false;
+  interface.checkRecvFrame(received);
+  assert(notification_attempts == 1 && transmitted.empty() && interface.hasPendingIO());
+  test_millis += interval - 1;
+  assert(interface.isWriteBusy());
+  interface.checkRecvFrame(received);
+  assert(notification_attempts == 1); // Failed attempts must also be paced.
+  ++test_millis;
+  assert(!interface.isWriteBusy());
+  accept_notification = true; interface.checkRecvFrame(received);
+  assert(notification_attempts == 2 && transmitted.size() == 1);
+  assert(transmitted[0] == std::vector<uint8_t>(first, first + sizeof(first)));
+  assert(!interface.hasPendingIO()); // One accepted copy, no retry/late-status duplicate.
+  assert(interface.writeFrame(second, sizeof(second)) == sizeof(second));
+  test_millis += interval - 1; interface.checkRecvFrame(received);
+  assert(notification_attempts == 2 && transmitted.size() == 1);
+  ++test_millis; interface.checkRecvFrame(received);
+  assert(notification_attempts == 3 && transmitted.size() == 2);
+  assert(transmitted[1] == std::vector<uint8_t>(second, second + sizeof(second)));
+  // Real adapter arithmetic must remain correct when millis wraps at UINT32.
+  test_millis = UINT32_MAX - (interval / 2);
+  assert(interface.writeFrame(first, sizeof(first)) == sizeof(first));
+  interface.checkRecvFrame(received);
+  assert(notification_attempts == 4);
+  assert(interface.writeFrame(second, sizeof(second)) == sizeof(second));
+  test_millis += interval - 1;
+  assert(interface.isWriteBusy()); interface.checkRecvFrame(received);
+  assert(notification_attempts == 4);
+  ++test_millis;
+  assert(!interface.isWriteBusy()); interface.checkRecvFrame(received);
+  assert(notification_attempts == 5 && transmitted.size() == 4);
+  interface.checkRecvFrame(received);
+  assert(notification_attempts == 5 && !interface.hasPendingIO());
+  // A faster lab pace must not shorten or remove the existing stall recovery.
+  assert(interface.writeFrame(first, sizeof(first)) == sizeof(first));
+  accept_notification = false; test_millis += interval;
+  interface.checkRecvFrame(received);
+  test_millis += 9999; interface.checkRecvFrame(received);
+  assert(disconnects == 0 && interface.hasPendingIO());
+  test_millis += interval; interface.checkRecvFrame(received);
+  assert(disconnects == 1 && !interface.isConnected());
+  NimBLEDevice::deinit(true);
+}
+
+static void test_128_contact_stream_under_queue_and_controller_pressure() {
+#if defined(MESH_HIL_BLE_INTERVAL_MS)
+  constexpr uint32_t interval = MESH_HIL_BLE_INTERVAL_MS;
+#else
+  constexpr uint32_t interval = 7;
+#endif
+  reset(); SerialBLEInterface interface;
+  assert(interface.begin("MeshCore-", "contacts", 123456));
+  interface.enable();
+  NimBLEConnInfo info; authenticate(interface, info);
+  auto* server = NimBLEDevice::server.get();
+  auto* tx = server->service->characteristics[0].get();
+  std::vector<std::vector<uint8_t>> expected;
+  for (unsigned index = 0; index < 128; ++index) {
+    std::vector<uint8_t> frame(148);
+    frame[0] = 3; // Contact response: required delivery, never evicted.
+    for (size_t byte = 1; byte < frame.size(); ++byte)
+      frame[byte] = static_cast<uint8_t>(index * 17 + byte * 3);
+    frame[1] = index;
+    expected.push_back(frame);
+  }
+  unsigned queued = 0, full_queue_rejections = 0;
+  auto fill = [&]() {
+    while (queued < expected.size()) {
+      const auto& frame = expected[queued];
+      const size_t accepted = interface.writeFrame(frame.data(), frame.size());
+      if (accepted == 0) { ++full_queue_rejections; break; }
+      assert(accepted == frame.size());
+      ++queued;
+    }
+  };
+  fill();
+  assert(queued == 4 && full_queue_rejections == 1 && interface.isWriteBusy());
+  uint8_t received[MAX_FRAME_SIZE] = {};
+  auto poll = [&]() {
+    test_millis += interval;
+    assert(interface.checkRecvFrame(received) == 0);
+    assert(transmitted.size() <= queued);
+    for (size_t index = 0; index < transmitted.size(); ++index)
+      assert(transmitted[index] == expected[index]);
+  };
+  poll();
+  assert(notification_attempts == 0 && interface.hasPendingIO()); // No CCCD yet.
+  tx->callbacks->onSubscribe(tx, info, 1);
+  mtu = 23;
+  server->callbacks->onMTUChange(247, info); // Stale event cannot override actual MTU.
+  poll();
+  assert(notification_attempts == 0 && interface.hasPendingIO());
+  mtu = 247;
+  server->callbacks->onMTUChange(23, info); // The live peer MTU permits full records.
+  bool injected_failures[128] = {};
+  bool cccd_paused = false, mtu_paused = false;
+  for (unsigned step = 0; step < 512 && transmitted.size() < expected.size(); ++step) {
+    const auto delivered = transmitted.size();
+    if (delivered == 32 && !cccd_paused) {
+      cccd_paused = true;
+      tx->callbacks->onSubscribe(tx, info, 0);
+      const auto attempts = notification_attempts;
+      poll(); poll();
+      assert(notification_attempts == attempts && transmitted.size() == delivered);
+      tx->callbacks->onSubscribe(tx, info, 1);
+    }
+    if (delivered == 64 && !mtu_paused) {
+      mtu_paused = true;
+      mtu = 23;
+      server->callbacks->onMTUChange(247, info);
+      const auto attempts = notification_attempts;
+      poll(); poll();
+      assert(notification_attempts == attempts && transmitted.size() == delivered);
+      mtu = 247;
+      server->callbacks->onMTUChange(23, info);
+    }
+    const bool fail_this_attempt = (delivered == 0 || delivered == 17
+        || delivered == 63 || delivered == 127) && !injected_failures[delivered];
+    accept_notification = !fail_this_attempt;
+    if (fail_this_attempt) injected_failures[delivered] = true;
+    const auto attempts = notification_attempts;
+    poll();
+    assert(notification_attempts == attempts + 1);
+    assert(transmitted.size() == delivered + (fail_this_attempt ? 0 : 1));
+    fill(); // Repeatedly hit all four slots without losing the next record.
+  }
+  assert(queued == 128 && transmitted == expected && cccd_paused && mtu_paused);
+  assert(notification_attempts == 132 && full_queue_rejections > 100);
+  assert(disconnects == 0 && !interface.hasPendingIO());
+  poll(); poll();
+  assert(transmitted == expected && notification_attempts == 132); // No duplicates.
+  NimBLEDevice::deinit(true);
+}
+
 int main() {
   test_identity_modes();
   test_pairing_wake_for_random_and_saved_pins();
   test_startup_failures();
   test_authentication_and_bond_lifecycle();
+  test_connection_parameters_only_on_current_authenticated_transition();
   test_real_transport_frames();
+  test_required_reply_backpressure_services_tx_before_rx();
+  test_full_queue_best_effort_eviction_still_admits_rx();
+  test_exact_notify_interval_failure_retention_and_rollover();
+  test_128_contact_stream_under_queue_and_controller_pressure();
   puts("NimBLE adapter: identity, faults, bonding, stealth and full frames PASS");
 }

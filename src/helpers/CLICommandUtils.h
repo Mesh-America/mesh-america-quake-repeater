@@ -8,6 +8,17 @@
 namespace mesh {
 namespace cli {
 
+// Share fixed error prefixes without duplicating their bytes in each message.
+// Formatting keeps the same termination and truncation as other CLI replies.
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, noclone))
+#elif defined(__GNUC__)
+__attribute__((noinline))
+#endif
+inline void formatError(char* reply, size_t capacity, const char* message) {
+  snprintf(reply, capacity, "Error: %s", message);
+}
+
 enum class StandaloneWiFiKey : uint8_t {
   None = 0,
   SSID,
@@ -135,6 +146,17 @@ inline const char* terminalPasswordInput(const char* line) {
   if (parseTerminalArgumentCommand(setting, "wifi.pwd", password)
       == TerminalArgumentCommandMatch::Valid) {
     return password;
+  }
+  // `set mt.channel <slot> <name> <PSK>`: never echo private channel keys.
+  const char* channel = nullptr;
+  if (parseTerminalArgumentCommand(setting, "mt.channel", channel)
+      == TerminalArgumentCommandMatch::Valid) {
+    for (unsigned token = 0; token < 2; ++token) {
+      while (*channel && *channel != ' ' && *channel != '\t') ++channel;
+      channel = skipRecentRepeaterSpaces(channel);
+      if (!*channel) return nullptr;
+    }
+    return channel;
   }
   return nullptr;
 }

@@ -37,6 +37,9 @@ class TestFS : public MemoryFS {
 #include <helpers/CLICommandUtils.h>
 #include <helpers/RepeaterRadioTiming.h>
 #include <helpers/GpsPowerPolicy.h>
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/CpuClockPolicy.h>
+#endif
 #include <helpers/bridges/ESPNowBridgeFormat.h>
 #include <helpers/radiolib/LR2021SideDetectorConfig.h>
 #define MIN_LORA_TX_POWER -9
@@ -75,8 +78,6 @@ struct NodePrefs {
 };
 @HELPERS@
 void ensureRxPowerSavingDefaults(uint32_t*, uint32_t*) {}
-void recalcRxPowerSavingFromLevel(uint8_t, uint8_t, float, uint8_t,
-                                uint32_t*, uint32_t*) {}
 @LEGACY@
 @SERIALIZER@
 @STORE@;
@@ -87,6 +88,14 @@ struct Callbacks {
   void updateAdvertTimer() {}
 };
 struct CommonCLI {
+#if defined(ESP32_PLATFORM)
+  struct CpuBoard {
+    bool supportsCpuFrequencyMHz(uint16_t mhz) const {
+      return mhz == 80 || mhz == 160 || mhz == 240;
+    }
+  } cpu_board;
+  CpuBoard* _board = &cpu_board;
+#endif
   FILESYSTEM fs;
   NodePrefs prefs;
   NodePrefs* _prefs = &prefs;
@@ -108,6 +117,9 @@ struct CommonCLI {
   void savePrefs(PrefsSaveRouting::Scope scope = PrefsSaveRouting::Scope::Common);
   bool trySavePrefs(PrefsSaveRouting::Scope scope = PrefsSaveRouting::Scope::Common);
   void loadPrefsInt(FILESYSTEM*, const char*);
+  // Persistence tests leave radio timing untouched. The separate RXPS
+  // capability suite exercises this production API and its timing model.
+  static bool recalculateRxPowerSavingFromLevel(NodePrefs*) { return false; }
   bool recoverCommonPrefsFiles(FILESYSTEM*);
   bool saveCommonPrefsImageAtomically(FILESYSTEM*);
   bool saveMQTTPrefs(FILESYSTEM*) { return true; }
@@ -213,7 +225,7 @@ int main() {
     if (fault == 3) cli.fs.fail_rename = 1;
     const unsigned updates = mesh::debug_updates;
     cli.set("usb.debug on", reply);
-    assert(strcmp(reply, "Error: USB debug not saved; unchanged") == 0);
+    assert(strcmp(reply, "Error: save unconfirmed; reboot may differ") == 0);
     assert(cli.prefs.usb_debug_enabled == 0 && !mesh::isUsbDebugEnabled());
     assert(mesh::debug_updates == updates && !mesh::isUsbLoggingEnabled());
     assert(cli.fs.files["/com_prefs"] == debug_off);
@@ -318,7 +330,7 @@ class CommonUsbDebugTest(unittest.TestCase):
             'SERIALIZER': 'template<typename Writer>\n' + extract_braced(
                 source, 'static bool writeCommonPrefsImage('),
             'STORE': extract_braced(source, 'class CommonPrefsFileStore'),
-            'METHODS': methods,
+            'METHODS': ("\n#include <stddef.h>\ntemplate<typename Writer>\n" + extract_braced(source, "static void writeCommonRetryPrefs(") + "\n" + methods),
             'DYNAMIC': extract_braced(header, 'class BridgePrefs :'),
             'SET_DEBUG': extract_braced(source, 'if (strncmp(config, "usb.debug", 9)'),
             'SET_MASTER': extract_braced(source, 'if (strncmp(config, "usb.logging", 11)'),

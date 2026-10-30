@@ -1,11 +1,13 @@
 #include "target.h"
+#include <helpers/radiolib/SX126xBufferedRadioHal.h>
 
 #include <Arduino.h>
 #include <helpers/ArduinoHelpers.h>
 
 XiaoRP2040Board board;
 
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+static SX126xBufferedRadioHal radioHal(SPI, MC_SX1262_SPI_HZ, true);
+RADIO_CLASS radio = new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 
 WRAPPER_CLASS radio_driver(radio, board);
 

@@ -12,10 +12,11 @@ struct Clock : mesh::RTCClock {
 };
 struct Radio : mesh::Radio {
   mesh::RadioProfiles p;
+  float minimum_frequency = 137;
   Radio() { p.primary.freq=909.5; p.primary.bw=62.5; p.primary.sf=7; p.primary.cr=5; }
   mesh::RadioProfiles* profiles() override { return &p; }
   const mesh::RadioProfiles* profiles() const override { return &p; }
-  bool validateProfile(const mesh::RadioProfileParams& v) const override { return mesh::RadioProfiles::valid(v) && v.bw<=500; }
+  bool validateProfile(const mesh::RadioProfileParams& v) const override { return mesh::RadioProfiles::valid(v) && v.freq>=minimum_frequency && v.bw<=500; }
   uint16_t profilePreamble(uint8_t profile) const override { return p.preamble(profile, 32); }
   int recvRaw(uint8_t*,int) override { return 0; }
   uint32_t getEstAirtimeFor(int) override { return 10; }
@@ -43,11 +44,14 @@ struct Fixture {
   }
   void advance(uint32_t ms, bool epoch=true) { g_mock_millis+=ms; if(epoch)clock.epoch+=ms/1000; cli.loop(); }
   void finishTimingTest(uint32_t switch_us=545) {
+    const uint32_t start = g_mock_millis - mesh::RadioProfiles::SwitchRecommendationWindowMs;
     for (unsigned i=0;i<mesh::RadioProfiles::SwitchTestSamplesPerDirection;++i) {
-      radio.p.sampleSwitch(0,1,switch_us);
-      radio.p.sampleSwitch(1,0,switch_us);
+      radio.p.sampleSwitch(0,1,switch_us,start+i);
+      radio.p.sampleSwitch(1,0,switch_us,start+i);
     }
+    radio.p.sampleSwitch(0,1,switch_us,g_mock_millis);
     assert(radio.p.switchTestReady());
+    assert(radio.p.recommendationReady());
   }
 };
 static void permanentScheduleOrder() {
@@ -214,7 +218,372 @@ static void relativeSchedules() {
   f.cmd("set tempradioat2 912.5,500,8,5,rx,+3,+1,80", false);
 }
 
+static const char* spectrum_warning = "WARN radio2 overlaps radio1 (6kHz guard)";
+
+static void expectSpectrumWarning(const char* reply, bool expected = true) {
+  if ((strstr(reply, spectrum_warning) != nullptr) != expected) {
+    fprintf(stderr, "spectrum warning expected=%d: %s\n", expected, reply);
+    assert(false);
+  }
+}
+
+static float suggestedSpectrumFrequency(const char* reply) {
+  expectSpectrumWarning(reply);
+  const char* suggestion = strstr(reply, "; try ");
+  float frequency = 0;
+  assert(suggestion && sscanf(suggestion, "; try %fMHz", &frequency) == 1);
+  assert(std::isfinite(frequency));
+  return frequency;
+}
+
+static void spectrumOverlap() {
+  // The warning concerns occupied RF spectrum, regardless of SF/CR or which
+  // profile has the wider bandwidth. The 6 kHz guard is an edge-to-edge gap.
+  struct Case { float primary_bw, secondary_bw; const char* frequency; bool warn; };
+  const Case cases[] = {
+      {62.5f, 62.5f, "909.500000", true},
+      {62.5f, 62.5f, "909.550000", true},
+      {62.5f, 62.5f, "909.450000", true},
+      {125, 31.25f, "909.540000", true},  // radio2 contained in radio1
+      {31.25f, 125, "909.500000", true},  // radio1 contained in radio2
+      {62.5f, 62.5f, "909.562500", true}, // exact occupied-band edge touch
+      {62.5f, 62.5f, "909.437500", true},
+      {62.5f, 62.5f, "909.565000", true}, // no band overlap; inside guard
+      {62.5f, 62.5f, "909.435000", true},
+      {62.5f, 62.5f, "909.568500", true}, // configured decimal guard boundary
+      {62.5f, 62.5f, "909.431500", true},
+      {62.5f, 62.5f, "909.570000", false},
+      {62.5f, 62.5f, "909.430000", false},
+      {125, 62.5f, "909.599750", true},
+      {125, 62.5f, "909.400250", true},
+      {125, 62.5f, "909.601000", false},
+      {125, 62.5f, "909.399000", false},
+  };
+  for (const auto& c : cases) {
+    Fixture f;
+    f.radio.p.primary.bw = c.primary_bw;
+    char command[100];
+    snprintf(command, sizeof(command), "set radio2 %s,%g,9,7,rx",
+             c.frequency, c.secondary_bw);
+    expectSpectrumWarning(f.cmd(command), c.warn);
+    // A warning cannot reject the request or alter the requested modem tuple.
+    f.advance(2000);
+    assert(f.radio.p.secondary.mode == mesh::RadioProfileMode::Rx);
+    assert(f.radio.p.secondary.params.bw == c.secondary_bw);
+    assert(f.radio.p.secondary.params.sf == 9 && f.radio.p.secondary.params.cr == 7);
+    expectSpectrumWarning(f.cmd("get radio2"), c.warn);
+    if (c.warn) {
+      const float suggestion = suggestedSpectrumFrequency(f.reply);
+      const float requested = strtof(c.frequency, nullptr);
+      if (requested < f.radio.p.primary.freq) assert(suggestion < f.radio.p.primary.freq);
+      else assert(suggestion > f.radio.p.primary.freq); // same center chooses above
+      snprintf(command, sizeof(command), "set radio2 %.3f,%g,9,7,rx", suggestion, c.secondary_bw);
+      expectSpectrumWarning(f.cmd(command), false); // suggested tuple must be safe
+      f.advance(2000);
+      assert(f.radio.p.secondary.params.bw == c.secondary_bw);
+      assert(f.radio.p.secondary.params.sf == 9 && f.radio.p.secondary.params.cr == 7);
+    } else assert(!strstr(f.reply, "; try "));
+  }
+  // These actual float centers round to exactly 17,700 Hz of separation.
+  // Together with supported 7.8/15.6 kHz bandwidths, they exercise equality
+  // under the same units users set, rather than a decimal approximation.
+  for (bool below : {false, true}) for (bool outside : {false, true}) {
+    Fixture f;
+    f.radio.p.primary.freq = 900.0f; f.radio.p.primary.bw = 7.8f;
+    float frequency = below ? 899.9822998046875f : 900.0177001953125f;
+    if (outside) frequency = std::nextafter(frequency, below ? -INFINITY : INFINITY);
+    const auto distance = llabs(llround(double(frequency) * 1000000) - 900000000LL);
+    assert(distance == (outside ? 17761 : 17700));
+    char command[100];
+    snprintf(command, sizeof(command), "set radio2 %.9f,15.6,9,7,rx", frequency);
+    expectSpectrumWarning(f.cmd(command), !outside);
+  }
+  // 10.4f is slightly below decimal 10.4: truncating the computed guard
+  // would lose a whole Hz and miss this inclusive 42,450 Hz boundary.
+  for (bool outside : {false, true}) {
+    Fixture f;
+    f.radio.p.primary.freq = 150.0f; f.radio.p.primary.bw = 10.4f;
+    float frequency = 150.042449951171875f;
+    if (outside) frequency = std::nextafter(frequency, INFINITY);
+    assert(llround(double(frequency) * 1000000) - 150000000LL
+           == (outside ? 42465 : 42450));
+    // The compact CLI decimal parser accumulates digits in float. These
+    // short inputs produce the exact stored floats whose boundary we test.
+    const char* text = outside ? "150.04247" : "150.04246";
+    float parsed = 0;
+    assert(mesh::cli::parseDecimalStrict(text, parsed) && parsed == frequency);
+    char command[100];
+    snprintf(command, sizeof(command), "set radio2 %s,62.5,8,7,rx", text);
+    expectSpectrumWarning(f.cmd(command), !outside);
+  }
+  {
+    Fixture f;
+    f.radio.p.primary.freq = 910.525f;
+    f.cmd("set radio2 910.525,62.5,8,7,rx");
+    assert(strstr(f.reply, "; try 910.594MHz"));
+    expectSpectrumWarning(f.cmd("set radio2 910.594,62.5,8,7,rx"), false);
+  }
+  for (const char* frequency : {"909.500000", "909.450000"}) {
+    Fixture f;
+    char command[100];
+    snprintf(command, sizeof(command), "set radio2 %s,62.5,8,7,rx", frequency);
+    f.cmd(command);
+    // Nearest outward whole-kHz center, with the requested bandwidth retained.
+    assert(strstr(f.reply, !strcmp(frequency, "909.500000")
+                              ? "; try 909.569MHz" : "; try 909.431MHz"));
+  }
+  {
+    Fixture f;
+    f.radio.p.primary.bw = 125;
+    f.cmd("set radio2 909.540,31.25,8,7,rx");
+    assert(strstr(f.reply, "; try 909.585MHz"));
+  }
+  for (float minimum : {137.0f, 150.0f}) {
+    Fixture f;
+    // Cover the shared parser limit and a stricter physical-radio limit.
+    f.radio.minimum_frequency = minimum;
+    f.radio.p.primary.freq = minimum + 0.01f; f.radio.p.primary.bw = 31.25f;
+    char command[100];
+    snprintf(command, sizeof(command), "set radio2 %.3f,31.25,8,7,rx", minimum + 0.001f);
+    f.cmd(command);
+    const float frequency = suggestedSpectrumFrequency(f.reply);
+    assert(frequency > f.radio.p.primary.freq); // lower suggestion violates radio limit
+    snprintf(command, sizeof(command), "set radio2 %.3f,31.25,8,7,rx", frequency);
+    expectSpectrumWarning(f.cmd(command), false);
+  }
+  {
+    Fixture f;
+    expectSpectrumWarning(f.cmd("set radio2 909.5,62.5,7,5,rxtx"));
+    const char* warning = strstr(f.reply, spectrum_warning);
+    const char* timing = strstr(f.reply, "timing self-test pending");
+    assert(timing && warning < timing); // warning is visible before calibration
+    assert(!f.radio.p.enabled());       // the normal 2-second delay is retained
+    expectSpectrumWarning(f.cmd("get radio2"));
+    f.advance(2000);
+    f.finishTimingTest();
+    expectSpectrumWarning(f.cmd("get radio2"));
+    assert(!strstr(f.reply, "timing self-test pending"));
+    expectSpectrumWarning(f.cmd("set radio2 off"), false);
+    expectSpectrumWarning(f.cmd("get radio2"), false);
+    expectSpectrumWarning(f.cmd("set radio2 909.5,63,7,5,rx", false), false);
+    expectSpectrumWarning(f.cmd("set radio2 909.5,62.5,13,5,rx", false), false);
+  }
+  {
+    Fixture f;
+    f.fs.fail_write = true;
+    expectSpectrumWarning(f.cmd("set radio2 909.5,62.5,7,5,rx", false), false);
+    assert(!f.radio.p.enabled());
+    assert(!f.cli.hasReplyMutation());
+  }
+  {
+    Fixture f;
+    f.cmd("set radio2 911.5,62.5,7,5,rx"); f.advance(2000);
+    expectSpectrumWarning(f.cmd("set tempradio2 909.5,62.5,8,7,rxtx,1"));
+    assert(f.radio.p.secondary.params.freq == 911.5f);
+    expectSpectrumWarning(f.cmd("get tempradio2")); // pending temporary tuple
+    expectSpectrumWarning(f.cmd("get radio2"), false); // saved tuple is separate
+    f.advance(2000);
+    expectSpectrumWarning(f.cmd("get tempradio2"));
+    assert(f.radio.p.secondary_temporary);
+    assert(f.radio.p.secondary.params.freq == 909.5f);
+    f.advance(60000);
+    expectSpectrumWarning(f.cmd("get tempradio2"), false);
+    assert(f.radio.p.secondary.params.freq == 911.5f);
+  }
+  for (bool temporary : {false, true}) {
+    Fixture f;
+    const char* set = temporary ? "set tempradioat2 909.5,62.5,8,7,rx,+1,+2"
+                                : "set radioat2 909.5,62.5,8,7,rx,+1";
+    const char* get = temporary ? "get tempradioat2 1" : "get radioat2 1";
+    expectSpectrumWarning(f.cmd(set));
+    expectSpectrumWarning(f.cmd(get));
+    if (temporary) {
+      char reply[158]; memset(reply, 0x55, sizeof(reply));
+      assert(f.cli.handle(get, reply, 157));
+      assert(static_cast<unsigned char>(reply[157]) == 0x55);
+      assert(memchr(reply, 0, 157));
+      char timestamps[48];
+      snprintf(timestamps, sizeof(timestamps), "@%lu-%lu",
+               (unsigned long)(f.clock.epoch + 60),
+               (unsigned long)(f.clock.epoch + 120));
+      assert(strstr(reply, timestamps));
+      expectSpectrumWarning(reply);
+      assert(strstr(reply, "; try 909.569MHz"));
+    }
+    assert(!f.radio.p.enabled()); // warning does not activate a future schedule
+    f.advance(60000);
+    assert(f.radio.p.secondary.params.freq == 909.5f);
+    assert(f.radio.p.secondary_temporary == temporary);
+  }
+  for (bool temporary : {false, true}) for (bool delivered : {false, true}) {
+    Fixture f(true);
+    f.cmd("set radio2 911.5,62.5,7,5,rx"); f.advance(2000);
+    const auto saved = f.fs.files["/radio_profiles"];
+    f.cli.beginReplyCommand();
+    expectSpectrumWarning(f.cmd(temporary ? "set tempradio2 909.5,62.5,8,7,rxtx,1"
+                                         : "set radio2 909.5,62.5,8,7,rxtx"));
+    f.cli.endReplyCommand();
+    assert(f.cli.hasReplyMutation());
+    assert(f.fs.files["/radio_profiles"] == saved);
+    f.advance(2000);
+    assert(f.radio.p.secondary.params.freq == 911.5f); // old RF retained for ACK
+    assert(f.cli.finishReplyMutation(delivered));
+    f.advance(1);
+    assert(!f.cli.hasReplyMutation());
+    assert(f.radio.p.secondary.params.freq == (delivered ? 909.5f : 911.5f));
+  }
+#if MESH_ENABLE_FLEET_CONTROL
+  for (bool temporary : {false, true}) {
+    Fixture f(true);
+    f.cli.beginReplyCommand();
+    expectSpectrumWarning(f.cmd(temporary ? "set tempradioat2 909.5,62.5,8,7,rx,+1,+2"
+                                         : "set radioat2 909.5,62.5,8,7,rx,+1"));
+    f.cli.endReplyCommand();
+    assert(f.cli.hasReplyMutation());
+    const char* get = temporary ? "get tempradioat2 1" : "get radioat2 1";
+    assert(!strcmp(f.cmd(get), "> off"));
+    assert(f.cli.finishReplyMutation(true)); f.advance(1);
+    expectSpectrumWarning(f.cmd(get));
+    assert(!f.radio.p.enabled());
+    f.advance(60000);
+    assert(f.radio.p.secondary.params.freq == 909.5f);
+  }
+#endif
+  {
+    Fixture f;
+    f.cmd("set radio2 909.5,62.5,8,7,rxtx");
+    // The public command path must retain terminators and adjacent bytes for
+    // every response budget, including the CLI's tagged 157-byte response.
+    for (size_t capacity = 0; capacity <= 160; ++capacity) {
+      char bytes[162]; memset(bytes, 0x55, sizeof(bytes));
+      assert(f.cli.handle("get radio2", bytes, capacity));
+      assert(static_cast<unsigned char>(bytes[capacity]) == 0x55);
+      if (capacity) assert(memchr(bytes, 0, capacity));
+      if (capacity >= 157) expectSpectrumWarning(bytes);
+    }
+  }
+  // Reapply the literal displayed suggestion through the actual CLI parser.
+  // Its float fractional accumulation can differ from a double-to-float
+  // candidate, especially at high frequencies and near whole-kHz edges.
+  unsigned roundtrips = 0;
+  for (float base : {150.125f, 433.125f, 868.125f, 915.125f, 2400.125f}) {
+    for (float bw : {7.8f, 10.4f, 15.6f, 20.8f, 31.25f,
+                     41.7f, 62.5f, 125.0f, 250.0f, 500.0f}) {
+      for (float offset : {0.0f, 0.000001f, 0.000499f, 0.000500f, 0.000501f,
+                           0.000999f, 0.001000f, 0.001001f, 0.001499f, 0.001501f}) {
+        for (bool below : {false, true}) {
+          Fixture f;
+          f.radio.p.primary.freq = base + offset;
+          f.radio.p.primary.bw = bw;
+          const float requested = f.radio.p.primary.freq + (below ? -0.001f : 0.001f);
+          char command[100];
+          snprintf(command, sizeof(command), "set radio2 %.6f,%g,7,5,rx", requested, bw);
+          expectSpectrumWarning(f.cmd(command));
+          const char* begin = strstr(f.reply, "; try ");
+          assert(begin); begin += strlen("; try ");
+          const char* end = strstr(begin, "MHz");
+          assert(end && end - begin < 24);
+          char suggestion[24];
+          memcpy(suggestion, begin, end - begin); suggestion[end - begin] = 0;
+          const char* decimal = strchr(suggestion, '.');
+          assert(decimal && strlen(decimal + 1) == 3);
+          snprintf(command, sizeof(command), "set radio2 %s,%g,7,5,rx", suggestion, bw);
+          f.cmd(command);
+          if (strstr(f.reply, spectrum_warning)) {
+            fprintf(stderr, "Unsafe suggestion: primary=%.12f BW=%g requested=%.12f suggestion=%s\n",
+                    f.radio.p.primary.freq, bw, requested, suggestion);
+          }
+          expectSpectrumWarning(f.reply, false);
+          ++roundtrips;
+        }
+      }
+    }
+  }
+  assert(roundtrips == 1000);
+}
+
+static void mediaMeshPresets() {
+  for (bool infrastructure : {false, true}) {
+    for (bool range : {false, true}) {
+      Fixture f(infrastructure);
+      const auto primary = f.radio.p.primary;
+      assert(!f.radio.p.enabled() && f.radio.p.cross == mesh::RadioCrossMode::Off);
+      const char* command = range ? "set radio2 mediamesh-range" : "set radio2 mediamesh";
+      f.cmd(command);
+      assert(!f.radio.p.enabled()); // Same delayed apply as a saved tuple.
+      f.advance(2000);
+      const auto config = f.radio.p.secondary;
+      assert(config.mode == mesh::RadioProfileMode::RxTx);
+      assert(fabsf(config.params.freq - 911.150f) < 0.0001f
+          && config.params.bw == (range ? 125 : 250));
+      assert(config.params.sf == 7 && config.params.cr == 5 && !config.params.preamble);
+      assert(config.params.protocol == mesh::RadioProfileProtocol::MeshCore);
+      assert(f.radio.p.primary == primary && f.radio.p.cross == mesh::RadioCrossMode::Off);
+      assert(!f.fs.files["/radio_profiles"][14] && !f.fs.files["/radio_profiles"][15]);
+      Radio reboot; mesh::RadioProfileCLI restored;
+      restored.begin(&f.fs, &reboot, &f.clock, infrastructure);
+      assert(reboot.p.secondary.params == config.params);
+      assert(reboot.p.secondary.mode == mesh::RadioProfileMode::RxTx);
+      assert(reboot.p.cross == mesh::RadioCrossMode::Off);
+      // A preset replaces an old preamble override but retains operator crossover.
+      f.cmd("set radio2.cross on");
+      f.cmd("set radio2 912.5,500,8,5,rxtx,80"); f.advance(2000);
+      f.cmd(command); f.advance(2000);
+      assert(!f.radio.p.secondary.params.preamble && f.radio.p.cross == mesh::RadioCrossMode::On);
+      const auto committed = f.fs.files["/radio_profiles"];
+      f.fs.fail_write = true;
+      f.cmd(range ? "set radio2 mediamesh" : "set radio2 mediamesh-range", false);
+      assert(f.radio.p.secondary.params == config.params
+          && f.fs.files["/radio_profiles"] == committed);
+    }
+  }
+  Fixture invalid;
+  for (const char* command : {"set radio2 mediamesh-extra", "set radio2 mediamesh,32",
+                              "set tempradio2 mediamesh", "set radioat2 mediamesh"}) {
+    invalid.cmd(command, false);
+    assert(!invalid.radio.p.enabled() && invalid.fs.files.empty());
+  }
+  invalid.radio.minimum_frequency = 912;
+  invalid.cmd("set radio2 mediamesh", false); // The hardware validator still applies.
+  assert(!invalid.radio.p.enabled() && invalid.fs.files.empty());
+}
+
 int main(int argc, char** argv) {
+  static_assert(uint8_t(mesh::RadioCrossMode::Auto)==0 && uint8_t(mesh::RadioCrossMode::On)==1
+      && uint8_t(mesh::RadioCrossMode::Off)==2, "saved crossover encoding must remain compatible");
+  {
+    Fixture fresh;
+    assert(fresh.radio.p.cross==mesh::RadioCrossMode::Off && !fresh.radio.p.canCross());
+    assert(!strcmp(fresh.cmd("get radio2.cross"),"> off") && fresh.fs.files.empty());
+    for(const char* mode:{"auto","on","off"}) {
+      char command[40];snprintf(command,sizeof(command),"set radio2.cross %s",mode);fresh.cmd(command);
+      const auto expected=!strcmp(mode,"auto")?mesh::RadioCrossMode::Auto
+          : !strcmp(mode,"on")?mesh::RadioCrossMode::On:mesh::RadioCrossMode::Off;
+      assert(fresh.fs.files["/radio_profiles"][18]==uint8_t(expected));
+      Radio reboot;mesh::RadioProfileCLI restored;restored.begin(&fresh.fs,&reboot,&fresh.clock);
+      assert(reboot.p.cross==expected);
+      restored.handle("get radio2.cross",fresh.reply);
+      char reply[16];snprintf(reply,sizeof(reply),"> %s",mode);assert(!strcmp(fresh.reply,reply));
+    }
+    fresh.cmd("set radio2.cross on");fresh.fs.files.clear();
+    fresh.cli.begin(&fresh.fs,&fresh.radio,&fresh.clock);
+    assert(fresh.radio.p.cross==mesh::RadioCrossMode::Off);
+    assert(!strcmp(fresh.cmd("get radio2.cross"),"> off"));
+  }
+  for(bool semantic:{false,true}) {
+    Fixture invalid;invalid.cmd("set radio2.cross auto");
+    auto& image=invalid.fs.files["/radio_profiles"];
+    if(semantic) {
+      image[18]=255;
+      uint32_t crc=0xffffffffU;
+      for(size_t i=0;i<20;++i) {crc^=image[i];for(unsigned bit=0;bit<8;++bit)crc=(crc>>1)^((crc&1)?0xedb88320U:0);}
+      memcpy(image.data()+20,&crc,4);
+    } else image[0]^=1;
+    Radio radio;radio.p.cross=mesh::RadioCrossMode::On;
+    mesh::RadioProfileCLI restored;restored.begin(&invalid.fs,&radio,&invalid.clock);
+    assert(radio.p.cross==mesh::RadioCrossMode::Off);
+    restored.handle("get radio2.cross",invalid.reply);assert(!strcmp(invalid.reply,"> off"));
+  }
   if (argc == 2) {
     if (!strcmp(argv[1], "permanent_order")) permanentScheduleOrder();
     else if (!strcmp(argv[1], "temporary_boundary")) adjacentTemporarySchedules();
@@ -223,6 +592,8 @@ int main(int argc, char** argv) {
     else if (!strcmp(argv[1], "schedule_permutations")) schedulePermutations();
     else if (!strcmp(argv[1], "storage_isolation")) storageBackoffDoesNotDelayTemporaryWindows();
     else if (!strcmp(argv[1], "relative_schedule")) relativeSchedules();
+    else if (!strcmp(argv[1], "spectrum_overlap")) spectrumOverlap();
+    else if (!strcmp(argv[1], "mediamesh")) mediaMeshPresets();
     else return 2;
     return 0;
   }
@@ -358,7 +729,7 @@ int main(int argc, char** argv) {
   {
     Fixture f;
     assert(!strcmp(f.cmd("get radio2"),"> off"));
-    assert(!strcmp(f.cmd("get radio2.cross"),"> auto"));
+    assert(!strcmp(f.cmd("get radio2.cross"),"> off"));
     assert(strstr(f.cmd("set radio2 910.5,500,7,5,rxtx"),"timing self-test pending"));
     assert(!f.radio.p.enabled()); f.advance(2000); assert(f.radio.p.enabled());
     assert(strstr(f.cmd("get radio2.timing"),"self-test pending"));
@@ -386,6 +757,44 @@ int main(int argc, char** argv) {
     assert(!f.radio.p.secondary_temporary && f.radio.p.secondary.params.freq==910.5f);
     f.cmd("set radio2 off"); f.advance(2000); assert(!f.radio.p.enabled());
     f.cmd("get radio2.status");
+  }
+  {
+    Fixture f;
+    f.cmd("set radio2 910.5,500,7,5,rx");
+    f.advance(2000);
+    for (unsigned i=0;i<mesh::RadioProfiles::SwitchTestSamplesPerDirection;++i) {
+      f.radio.p.sampleSwitch(0,1,545,g_mock_millis);
+      f.radio.p.sampleSwitch(1,0,545,g_mock_millis);
+    }
+    assert(f.radio.p.switchTestReady() && !f.radio.p.recommendationReady());
+    const auto wire_preamble = f.radio.p.preamble(1,32);
+    assert(wire_preamble==64 && f.radio.p.switchBudgetUs()==600);
+    assert(strstr(f.cmd("get radio2"),"rx,64 (auto)"));
+    assert(strstr(f.reply,"wait=120s") && !strstr(f.reply,"WARN"));
+    assert(strstr(f.cmd("get radio2.timing"),"provisional switch=600us"));
+    assert(!strstr(f.reply,"need=") && !strstr(f.reply,"WARN"));
+    f.advance(119999);
+    f.radio.p.sampleSwitch(0,1,545,g_mock_millis);
+    assert(!f.radio.p.recommendationReady());
+    assert(strstr(f.cmd("get radio2.timing"),"wait=1s"));
+    f.advance(1);
+    assert(!f.radio.p.recommendationReady()); // No synthetic retune at deadline.
+    f.radio.p.sampleSwitch(1,0,545,g_mock_millis);
+    assert(f.radio.p.recommendationReady());
+    assert(f.radio.p.preamble(1,32)==wire_preamble && f.radio.p.switchBudgetUs()==600);
+    assert(strstr(f.cmd("get radio2.timing"),"need=32,64"));
+    assert(strstr(f.reply,"WARN recommended preamble: radio2=64"));
+    assert(!strstr(f.reply,"timing self-test pending"));
+    // The UI delay never changes ongoing maximum-based timing policy.
+    f.radio.p.sampleSwitch(0,1,8428,g_mock_millis);
+    assert(f.radio.p.switchBudgetUs()==9271);
+    assert(strstr(f.cmd("get radio2.timing"),"switch=9271us"));
+    f.cmd("set radio2 910.5,500,7,5,rx");
+    assert(f.radio.p.recommendationReady()); // No-op leaves the window intact.
+    f.cmd("set radio2 911.5,500,7,5,rx");
+    f.advance(2000);
+    assert(!f.radio.p.recommendationReady());
+    assert(strstr(f.cmd("get radio2.timing"),"wait=120s"));
   }
   {
     Fixture f;
@@ -487,9 +896,13 @@ int main(int argc, char** argv) {
     f.advance(2000);
     f.finishTimingTest(8428);
     assert(f.radio.p.switchBudgetUs()==9271);
-    assert(f.radio.p.preamble(0,32)==128);
-    assert(strstr(f.cmd("get radio2.timing"),"WARN need >128: radio"));
-    assert(strstr(f.cmd("get radio2.status"),"WARN need >128: radio"));
+    assert(f.radio.p.preamble(0,32)==168);
+    assert(!strstr(f.cmd("get radio2.timing"),"WARN need >"));
+    assert(!strstr(f.cmd("get radio2.status"),"WARN need >"));
+    f.finishTimingTest(40000);
+    assert(f.radio.p.preamble(0,32)==512);
+    assert(strstr(f.cmd("get radio2.timing"),"WARN need >512: radio"));
+    assert(strstr(f.cmd("get radio2.status"),"WARN need >512: radio"));
   }
   {
     Fixture f;

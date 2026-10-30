@@ -14,6 +14,8 @@ public:
   HeltecMeshPocket() : NRF52Board("MESH_POCKET_OTA") {}
   void begin();
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
     int adcvalue = 0;
     analogReadResolution(12);
@@ -26,7 +28,7 @@ public:
     adcvalue = analogRead(PIN_VBAT_READ);
     digitalWrite(PIN_BAT_CTL, LOW);
 
-    return (uint16_t)((float)adcvalue * MV_LSB * 4.9);
+    return calibrateBatteryMillivolts((uint16_t)((float)adcvalue * MV_LSB * 4.9));
   }
 
   const char* getManufacturerName() const override {

@@ -13,6 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 RTOS = r'''
 #pragma once
 #include <cstdint>
+#define PINS_COUNT 64
+#define LED_STATE_ON 1
+#define LED_BLUE 12
+#define OUTPUT 1
+inline int digitalPinToPinName(int pin) { return pin; }
+inline void digitalWrite(int, int) {}
+inline void pinMode(int, int) {}
 using BaseType_t = int;
 using UBaseType_t = unsigned;
 using TaskHandle_t = void*;
@@ -31,6 +38,7 @@ HARNESS = r'''
 #include <helpers/BleMotaProtocol.h>
 #include <helpers/nrf52/SecuritySessionTimer.h>
 #include <helpers/nrf52/BleDebugTrace.h>
+#include <helpers/nrf52/SleepCycleState.h>
 #ifndef COMPANION_FEATURE_BLE_MOTA_SOURCE
 #define COMPANION_FEATURE_BLE_MOTA_SOURCE 1
 #endif
@@ -88,6 +96,7 @@ extern "C" BaseType_t __real_xTaskCreate(TaskFunction_t, const char* name,
   return pdPASS;
 }
 struct Settings {
+  bool isRunning() const { return false; }
   template<class... T> void clearBonds(T...) {}
   template<class... T> void setMITM(T...) {}
   template<class... T> void setPIN(T...) {}
@@ -131,8 +140,13 @@ struct BluefruitStub {
   }
   void setTxPower(int) {}
   void setName(const char*) {}
+  void autoConnLed(bool) {}
+  void _setConnLed(bool) {}
+  void _startConnLed() {}
+  unsigned connected() const { return 0; }
   template<class T> void setEventCallback(T) {}
 } Bluefruit;
+#include <helpers/nrf52/BluetoothLed.h>
 struct Service {
   int id;
   int begin() { return fail_service == id ? 1 : ERROR_NONE; }
@@ -150,6 +164,7 @@ struct MotaStream {
 @FORMAT_DEVICE_NAME@
 struct SerialBLEInterface {
   @STARTUP_FIELDS@
+  bool _isEnabled = false;
   std::atomic<bool> _companionDataSeen{false};
   SecuritySessionTimer _companion_start_timer;
   std::atomic<bool> _successfulConnectionPending{false};
@@ -194,7 +209,17 @@ int main() {
     // services are extensions: registration failure must leave UART BLE
     // available for pairing, diagnostics, and recovery.
     const bool expected = fault != 1 && fault != 2;
+    auto& sleep_state = mesh_nrf52::sleepCycleState();
+    const uint32_t before_start = sleep_state.begin();
+    assert(sleep_state.publish(before_start, false, 42));
+    mesh_nrf52::SleepCycleSnapshot snapshot;
+    assert(sleep_state.snapshot(snapshot));
+    assert(snapshot.generation == before_start);
     assert(port.begin("MC-", "T096", 123456) == expected);
+    // Even a failed/partial SoftDevice start invalidates the pre-start view:
+    // the next sleep decision must query and publish fresh SDK state.
+    assert(!sleep_state.current(before_start));
+    assert(!sleep_state.snapshot(snapshot));
     assert(Bluefruit.mtu == COMPANION_BLE_PRPH_MTU);
     assert(Bluefruit.event_length == COMPANION_BLE_PRPH_EVENT_LENGTH);
     assert(Bluefruit.hvn_queue == COMPANION_BLE_PRPH_HVN_QUEUE);
@@ -202,9 +227,18 @@ int main() {
     assert(Bluefruit.starts == starts + 1);
     assert((instance == &port) == expected);
     // Retrying a failed partial init must never allocate another stack/FIFO.
+    // Likewise, an already-attempted begin does not invalidate a fresh sleep
+    // snapshot because it never attempts SoftDevice startup again.
     for (int retry = 0; retry < 4; ++retry) {
+      const uint32_t before_retry = sleep_state.begin();
+      assert(sleep_state.publish(before_retry, expected, 43 + retry));
       assert(port.begin("MC-", "T096", 123456) == expected);
       assert(Bluefruit.starts == starts + 1);
+      assert(sleep_state.current(before_retry));
+      assert(sleep_state.snapshot(snapshot));
+      assert(snapshot.generation == before_retry);
+      assert(snapshot.softdevice_enabled == expected);
+      assert(snapshot.usb_status == unsigned(43 + retry));
     }
   }
 }
@@ -230,6 +264,7 @@ class Nrf52BleStartupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="meshcore-ble-start-") as temp:
             temp = Path(temp)
             (temp / "Arduino.h").write_text(RTOS)
+            (temp / "bluefruit.h").write_text("#pragma once\n")
             for name in ("FreeRTOS.h", "task.h"):
                 (temp / name).write_text('#include "Arduino.h"\n')
             cpp = temp / "startup.cpp"

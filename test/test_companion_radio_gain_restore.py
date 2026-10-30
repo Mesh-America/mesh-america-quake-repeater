@@ -41,12 +41,13 @@ struct Board {
   bool isLoRaFemLnaEnabled(){return false;}
 } board;
 struct Driver {
-  bool gain=false,supported=true;
+  bool gain=false,supported=true,hardware_present=true;
   int power=0;
   unsigned gain_calls=0,power_calls=0;
   std::deque<bool> gain_results,power_results;
   bool supportsRxBoostedGainMode(){return supported;}
   bool setRxBoostedGainMode(bool value){
+    assert(hardware_present);
     ++gain_calls;
     bool ok=nextResult(gain_results,true);
     if(ok)gain=value;
@@ -54,13 +55,14 @@ struct Driver {
   }
   bool getRxBoostedGainMode(){return gain;}
   bool setTxPower(int value){
+    assert(hardware_present);
     ++power_calls;
     bool ok=nextResult(power_results,true);
     if(ok)power=value;
     return ok;
   }
   bool supportsRxPowerSaving(){return false;}
-  bool setRxPowerSaving(bool,uint32_t,uint32_t){return true;}
+  bool setRxPowerSaving(bool,uint32_t,uint32_t){assert(hardware_present);return true;}
   void setCADScanTimeoutMillis(int){}
 } radio_driver;
 struct Radio {
@@ -87,6 +89,8 @@ struct MyMesh {
   bool millisHasNowPassed(uint32_t at){return int32_t(now_ms-at)>0;}
   uint32_t futureMillis(uint32_t delay){return now_ms+delay;}
   Apply tryApplyRadioParams(float freq,float,uint8_t,uint8_t,bool=false,uint16_t=0){
+    if(!_radio_available)return Apply::FAILED;
+    assert(radio_driver.hardware_present);
     ++applies;
     Apply result=nextResult(apply_results,Apply::APPLIED);
     if(result==Apply::APPLIED)live_freq=freq;
@@ -140,6 +144,22 @@ static void checkStartupAndRetry(){
     MyMesh m;m._radio_available=false;
     m.configureRadioFromPrefs();
     assert(!m.saved_radio_apply_pending && !m.applies && !radio_driver.gain_calls);
+  }
+  {
+    // A rejected command may retain saved settings while hardware is absent.
+    // Do not touch the missing radio or consume that intent during retries.
+    MyMesh m;m._radio_available=false;radio_driver.hardware_present=false;
+    m._prefs.rx_boosted_gain=1;m.saved_radio_apply_pending=true;
+    for(int i=0;i<3;++i){
+      m.recover();now_ms+=1000;
+      assert(m.saved_radio_apply_pending && !m.radio_apply_retry_at && !m.radio_apply_failures);
+      assert(!m.applies && !radio_driver.gain_calls && !radio_driver.power_calls);
+    }
+    m._radio_available=true;radio_driver.hardware_present=true;
+    m.recover();
+    assert(!m.saved_radio_apply_pending && radio_driver.gain);
+    assert(m.live_freq==m._prefs.freq && radio_driver.power==m._prefs.tx_power_dbm);
+    assert(m.applies==1 && radio_driver.gain_calls==1 && radio_driver.power_calls==1 && !m.saves);
   }
   {
     MyMesh m;radio_driver.supported=false;radio_driver.gain_results={false};

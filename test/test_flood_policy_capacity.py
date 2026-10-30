@@ -35,20 +35,21 @@ PRELUDE = r'''
 namespace mesh {
 File openFileRead(FILESYSTEM* fs, const char* path) { return fs->open(path); }
 struct Utils {
-  static void sha256(void*, size_t, const uint8_t*, size_t) {
-    assert(false && "crypto is outside these capacity fixtures");
+  static void sha256(void* out, size_t size, const uint8_t*, size_t key_size) {
+    // Cryptography has separate tests. Only the derived one-byte channel hash
+    // is required by these real storage paths; preserve the complete key.
+    assert(size == 1 && (key_size == 16 || key_size == 32));
+    std::memset(out,0,size);
   }
 };
 }
 struct RegionMap {
   static bool is_name_char(uint8_t c) { return std::isalnum(c) || c=='_' || c=='-'; }
 };
-struct StrHelper {
-  static void strzcpy(char* out, const char* in, size_t size) {
+void StrHelper::strzcpy(char* out, const char* in, size_t size) {
     if (out!=in) std::memmove(out,in,std::min(size,std::strlen(in)+1));
     if (size) out[size-1]=0;
-  }
-};
+}
 '''
 CLASS = r'''
 class MyMesh {
@@ -76,7 +77,53 @@ public:
   bool isFloodChannelDataRule(const FloodPacketFilterEntry&) const;
 };
 '''
+ROOM_CLASS = r'''
+class FloodRuleEngine {
+public:
+  static constexpr uint8_t RULE_SLOTS = 31, NAME_LEN = 32, PATH_PREFIX_BYTES_MAX = 9;
+@ENTRY@;
+  FILESYSTEM* _fs;
+  Entry storage[RULE_SLOTS]{};
+  Entry* _entries = storage;
+  explicit FloodRuleEngine(MemoryFS& fs): _fs(&fs) {}
+  bool save();
+};
+static const char RULE_FILE[] = "/flood_filter";
+static const char RULE_TEMP_FILE[] = "/flood_filter.tmp";
+static const char RULE_BACKUP_FILE[] = "/flood_filter.bak";
+'''
 SCENARIOS = r'''
+template<class Entry>
+auto setScope(Entry& row, const char* name, int) -> decltype(row.target_name, void()) {
+  row.target_is_region = false;
+  std::strcpy(row.target_name, name);
+}
+template<class Entry>
+void setScope(Entry& row, const char* name, long) { std::strcpy(row.scope_name,name); }
+template<class Entry> void canonicalRule(Entry& row) {
+  row.active=true;row.payload_type=PAYLOAD_TYPE_ADVERT;
+  row.min_hops=2;row.max_hops=63;row.suspend_on_temp_radio=true;
+  setScope(row,"#Town",0);row.match_blacklisted_path=true;
+  row.scope_uses_slow_timing=true;row.incoming_scope_kind=FloodFilterPolicy::RULE_IN_ALLOWED;
+  row.path_hash_size=3;row.rate_limit_enabled=true;row.rate_per_minute=1234;
+  row.priority=7;row.stop_on_match=true;row.retry_on_match=true;
+  row.rate_window_started=0xfedcba98;row.rate_window_count=17;row.rate_window_active=true;
+}
+template<class Entry> void extendedRule(Entry& row) {
+  row={};row.active=true;row.payload_type=PAYLOAD_TYPE_GRP_TXT;row.max_hops=63;
+  row.channel_key_len=16;row.channel_secret[0]=0x42;
+  std::strcpy(row.channel_name,"Weather");
+  row.path_hash_size=3;row.path_hops=4;
+  for(unsigned index=0;index<9;++index)row.path[index]=uint8_t(index+1);
+  row.drop_on_match=true;
+  row.extra.min_payload=20;row.extra.max_payload=80;row.extra.payload_set=1;
+  row.extra.route=FloodRuleExtensions::FloodRoute;
+  row.extra.probability=17;row.extra.path_position=FloodRuleExtensions::Suffix;
+  row.extra.disabled=1;
+  row.extra.path_tail[0]=10;row.extra.path_tail[1]=11;row.extra.path_tail[2]=12;
+  std::strcpy(row.extra.sender,"^(Alice|Bob) [0-9]+$");
+  std::strcpy(row.extra.text,"weather (rain|sun)");
+}
 std::vector<uint8_t> fixture(uint8_t slots, uint8_t highest) {
   MemoryFS fs;MyMesh writer(fs,slots);
   for (uint8_t index : {uint8_t(0),highest}) {
@@ -96,7 +143,113 @@ std::map<std::string,std::vector<uint8_t>> snapshot(const MemoryFS& fs) {
   for (const auto& row:fs.files) result[row.first]=*row.second;
   return result;
 }
+void extendedStorage() {
+    // Disabled high slots remain allocated and durable. They must neither be
+    // trimmed from the file nor silently discarded by smaller-capacity builds.
+    MemoryFS fs;MyMesh writer(fs,63);extendedRule(writer.storage[62]);
+    assert(writer.saveFloodPacketFilters());
+    const auto image=fs.get(FLOOD_PACKET_FILTER_FILE);
+    assert(!std::memcmp(image.data(),"FPF8",4) && image[4]==63);
+    MyMesh reader(fs,63);assert(reader.loadFloodPacketFilters());
+    assert(FloodFilterPolicy::sameRuleConfiguration(writer.storage[62],reader.storage[62]));
+    assert(reader.storage[62].active && reader.storage[62].extra.disabled);
+    assert(reader.saveFloodPacketFilters() && fs.get(FLOOD_PACKET_FILTER_FILE)==image);
+    MyMesh smaller(fs,4);assert(!smaller.loadFloodPacketFilters());
+    assert(smaller.flood_policy_capacity_limited && !smaller.saveFloodPacketFilters());
+    assert(fs.get(FLOOD_PACKET_FILTER_FILE)==image);
+    // A room server serializes the same extension and the repeater consumes it.
+    MemoryFS room_fs;FloodRuleEngine room(room_fs);extendedRule(room.storage[3]);
+    assert(room.save());assert(!std::memcmp(room_fs.get(FLOOD_PACKET_FILTER_FILE).data(),"FPF8",4));
+    MyMesh from_room(room_fs,63);assert(from_room.loadFloodPacketFilters());
+    assert(FloodRuleExtensions::sameFields(room.storage[3].extra,from_room.storage[3].extra));
+    assert(from_room.storage[3].path_hops==4 && from_room.storage[3].path_hash_size==3);
+    assert(!std::memcmp(room.storage[3].path,from_room.storage[3].path,9));
+    // No truncated FPF8 forwarding row may activate a partial policy. The
+    // optional FPS1 extension follows the rows and has separate legacy rules.
+    for(size_t length=0;length<image.size()-9;++length) {
+      MemoryFS cut;cut.put(FLOOD_PACKET_FILTER_FILE,{image.begin(),image.begin()+length});
+      MyMesh boot(cut,63);assert(boot.loadFloodPacketFilters());
+      assert(boot.seeded==1 && !boot.flood_policy_capacity_limited);
+      assert(std::none_of(boot.storage.begin(),boot.storage.end(),[](const auto& row){return row.active;}));
+    }
+    // Verify failed staging and publication still leave a complete old or new
+    // FPF8 policy recoverable, including all extended fields.
+    for(const char* fault : {"open:w:/flood_filter.tmp", "open:r:/flood_filter.tmp",
+        "rename:/flood_filter:/flood_filter.bak", "rename:/flood_filter.tmp:/flood_filter"}) {
+      MemoryFS failed;failed.put(FLOOD_PACKET_FILTER_FILE,image);
+      MyMesh saving(failed,63);assert(saving.loadFloodPacketFilters());
+      saving.storage[62].extra.probability=18;failed.faults.insert(fault);
+      assert(!saving.saveFloodPacketFilters());
+      failed.faults.clear();MyMesh reboot(failed,63);assert(reboot.loadFloodPacketFilters());
+      assert(reboot.storage[62].active && reboot.storage[62].extra.disabled);
+      assert(reboot.storage[62].extra.probability==17 || reboot.storage[62].extra.probability==18);
+      assert(!std::strcmp(reboot.storage[62].extra.sender,writer.storage[62].extra.sender));
+    }
+}
 int main() {
+  extendedStorage();
+  // Canonical FPF7 bytes remain independent of the compact in-memory layout.
+  // Exercise every persisted packed flag plus the addressable retry flag.
+  {
+    MemoryFS fs;MyMesh writer(fs,63);auto& row=writer.storage[0];
+    canonicalRule(row);
+    std::vector<uint8_t> expected={'F','P','F','7',1,1,PAYLOAD_TYPE_ADVERT,2,63,1};
+    const auto zeroes=[&expected](size_t count) {expected.insert(expected.end(),count,0);};
+    expected.insert(expected.end(),{'#','T','o','w','n'});zeroes(27);
+    expected.insert(expected.end(),{1,1,1,3});zeroes(32);
+    expected.push_back(0x80);zeroes(32+32);
+    expected.insert(expected.end(),{3,0});zeroes(9);
+    expected.insert(expected.end(),{0,1,0xd2,0x04});zeroes(32);
+    expected.insert(expected.end(),{7,1,'F','P','S','1',0xff,0xff,0,0,0});
+    assert(writer.saveFloodPacketFilters());assert(fs.get(FLOOD_PACKET_FILTER_FILE)==expected);
+    MyMesh reader(fs,63);assert(reader.loadFloodPacketFilters());const auto& loaded=reader.storage[0];
+    assert(loaded.active && loaded.suspend_on_temp_radio && loaded.match_blacklisted_path);
+    assert(loaded.scope_uses_slow_timing && !loaded.drop_on_match && loaded.rate_limit_enabled);
+    assert(loaded.stop_on_match && loaded.retry_on_match && loaded.rate_per_minute==1234);
+    assert(!loaded.rate_window_active && loaded.rate_window_started==0 && loaded.rate_window_count==0);
+    // Execute the real room serializer too. It retains its 31 padded slots,
+    // and the same canonical row must load through the repeater path.
+    MemoryFS room_fs;FloodRuleEngine room(room_fs);canonicalRule(room.storage[0]);
+    auto room_expected=expected;room_expected[4]=31;
+    const size_t row_stride=expected.size()-5-9;
+    room_expected.insert(room_expected.end()-9,30*row_stride,0);
+    assert(room.save());assert(room_fs.get(FLOOD_PACKET_FILTER_FILE)==room_expected);
+    MyMesh from_room(room_fs,63);assert(from_room.loadFloodPacketFilters());
+    assert(from_room.storage[0].scope_uses_slow_timing && from_room.storage[0].stop_on_match);
+    assert(from_room.storage[0].retry_on_match && from_room.storage[0].rate_per_minute==1234);
+    // A drop rule exercises the remaining persisted packed flag without an
+    // incompatible scope/rate/retry action, while preserving the same format.
+    row={};row.active=true;row.payload_type=PAYLOAD_TYPE_ADVERT;row.max_hops=63;row.drop_on_match=true;
+    assert(writer.saveFloodPacketFilters());MyMesh drop(fs,63);assert(drop.loadFloodPacketFilters());
+    assert(drop.storage[0].active && drop.storage[0].drop_on_match && !drop.storage[0].retry_on_match);
+  }
+  {
+    MemoryFS fs;MyMesh writer(fs,63);auto& row=writer.storage[62];
+    row.active=true;row.payload_type=PAYLOAD_TYPE_ADVERT;row.max_hops=63;
+    row.target_is_region=true;
+    std::strcpy(row.target_name,"1234567890123456789012345678901");
+    assert(writer.saveFloodPacketFilters());
+    const auto image=fs.get(FLOOD_PACKET_FILTER_FILE);
+    MyMesh reader(fs,63);assert(reader.loadFloodPacketFilters());
+    assert(reader.storage[62].active && reader.storage[62].target_is_region);
+    assert(!std::strcmp(reader.storage[62].regionName(), row.target_name));
+    assert(reader.storage[62].scopeName()[0]==0);
+    assert(reader.saveFloodPacketFilters() && fs.get(FLOOD_PACKET_FILTER_FILE)==image);
+    // The stored region field starts at byte 153 of a 187-byte FPF7 row.
+    // A direct scope and region target in one old-format row is invalid;
+    // compaction must never silently choose one.
+    const size_t stride=(image.size()-5-9)/63;
+    assert(stride==187);
+    for(bool terminate : {true,false}) {
+      auto malformed=image;
+      const size_t scope=5+62*stride+5;
+      malformed[scope]='#';malformed[scope+1]='X';
+      if(!terminate)std::fill_n(malformed.begin()+scope,32,'X');
+      MemoryFS bad;bad.put(FLOOD_PACKET_FILTER_FILE,malformed);
+      MyMesh boot(bad,63);assert(boot.loadFloodPacketFilters());
+      assert(boot.seeded==1 && !boot.storage[62].active);
+    }
+  }
   const auto large=fixture(63,62),small=fixture(4,2);
   // Older writers stored every slot, including inactive trailing entries.
   // Build the exact production wire format and replace the final active row
@@ -198,6 +351,8 @@ class FloodPolicyCapacityTests(unittest.TestCase):
     def test_saved_rules_survive_smaller_firmware_capacity(self):
         source=(ROOT/'examples/simple_repeater/MyMesh.cpp').read_text()
         header=(ROOT/'examples/simple_repeater/MyMesh.h').read_text()
+        room_source=(ROOT/'examples/simple_room_server/FloodRuleEngine.cpp').read_text()
+        room_header=(ROOT/'examples/simple_room_server/FloodRuleEngine.h').read_text()
         fs=HARNESS[:HARNESS.index('@STORE@')]
         fs=fs.replace('bool valid = false;', 'bool valid = false;\n  size_t cursor=0;')
         fs=fs.replace('size_t write(const uint8_t*, size_t);', '''size_t write(const uint8_t*, size_t);
@@ -216,6 +371,11 @@ class FloodPolicyCapacityTests(unittest.TestCase):
                        'bool MyMesh::isFloodChannelDataRule(', 'bool MyMesh::loadFloodPacketFilters(',
                        'bool MyMesh::saveFloodPacketFilters('):
             parts.append(extract_braced(source,marker))
+        parts.append(ROOM_CLASS.replace('@ENTRY@',extract_braced(room_header,'struct Entry')))
+        for marker in ('static File openRead(', 'static File openWrite(',
+                       'static uint32_t updateFileHash(', 'static bool verifyWrittenFile(',
+                       'bool FloodRuleEngine::save('):
+            parts.append(extract_braced(room_source,marker))
         parts.append(SCENARIOS)
         with tempfile.TemporaryDirectory(prefix='flood-policy-capacity-') as temp:
             p=Path(temp);cpp=p/'test.cpp';cpp.write_text('\n'.join(parts))

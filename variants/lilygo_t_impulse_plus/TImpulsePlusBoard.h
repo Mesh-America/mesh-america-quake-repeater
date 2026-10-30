@@ -9,17 +9,24 @@ protected:
   uint8_t btn_prev_state;
 
 public:
-  TImpulsePlusBoard() : NRF52Board("T-Impulse-Plus OTA") {}
+  TImpulsePlusBoard() : NRF52Board("T-Impulse-Plus_OTA") {}
   void begin();
 
 #if defined(P_LORA_TX_LED)
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
   }
   void onAfterTransmit() override {
     digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED off
   }
 #endif
+
+  bool supportsBatteryCalibration() const override { return true; }
 
   uint16_t getBattMilliVolts() override {
     // enable battery voltage measurement
@@ -40,7 +47,7 @@ public:
     // disable battery voltage measurement
     digitalWrite(BATTERY_MEASUREMENT_CONTROL, LOW);
 
-    return ((adcvalue * ((3000.0 / 4096.0)))) * 2.0;
+    return calibrateBatteryMillivolts(((adcvalue * ((3000.0 / 4096.0)))) * 2.0);
   }
 
   const char* getManufacturerName() const override {

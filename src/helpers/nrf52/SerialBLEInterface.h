@@ -5,6 +5,7 @@
 #include "../BleTxStallWatchdog.h"
 #include "../UsbLogging.h"
 #include "SecuritySessionTimer.h"
+#include "BleRxFrameQueue.h"
 #include <bluefruit.h>
 #include <atomic>
 #if COMPANION_FEATURE_BLE_MOTA_SOURCE
@@ -104,15 +105,30 @@ class SerialBLEInterface : public BaseSerialInterface {
   
   uint8_t send_queue_len;
   Frame send_queue[FRAME_QUEUE_SIZE];
+  // Only the application task mutates the TX queue and retry state. Deferred
+  // Bluefruit callbacks request a reset instead of interrupting queue copies.
+  std::atomic<bool> _tx_reset_pending{false};
+  uint32_t _send_queue_generation = 0;
+  uint16_t _tx_recovery_handle = BLE_CONN_HANDLE_INVALID;
+  uint32_t _tx_recovery_generation = 0;
   
-  uint8_t recv_queue_len;
-  Frame recv_queue[FRAME_QUEUE_SIZE];
+  struct RxQueueGuard {
+    RxQueueGuard() { taskENTER_CRITICAL(); }
+    ~RxQueueGuard() { taskEXIT_CRITICAL(); }
+  };
+  using RxQueue = mesh_nrf52::BleRxFrameQueue<Frame, FRAME_QUEUE_SIZE,
+                                             RxQueueGuard>;
+  RxQueue recv_queue;
 
   void clearBuffers();
+  void resetTxState();
+  bool servicePendingTxReset();
+  bool hasRequiredReplyCapacity() const;
   void shiftSendQueueLeft();
-  void shiftRecvQueueLeft();
   size_t writeBleUartFrame(const Frame& frame);
-  void recoverStalledTx(const char* cause);
+  void recoverStalledTx(const char* cause,
+                        uint16_t expected_handle = BLE_CONN_HANDLE_INVALID,
+                        uint32_t expected_generation = 0);
   void serviceTxRecovery(uint32_t now);
   bool removeStoredBondForPeer(const char* cause);
   void noteSuccessfulConnection(const ble_gap_addr_t& peer_address);
@@ -155,7 +171,6 @@ public:
     _bonded_only = false;
     _bonded_only_configure_pending = false;
     send_queue_len = 0;
-    recv_queue_len = 0;
   }
 
   /**
@@ -209,6 +224,7 @@ public:
 #if COMPANION_FEATURE_BLE_MOTA_SOURCE
   Stream& motaStream() { return _mota_stream; }
   bool isMotaChannelReady();
+  uint16_t motaResponseCapacity();
   bool isMotaStreamActive() const { return _mota_stream.isActive(); }
   void setMotaStreamActive(bool active) {
     _mota_stream.setActive(active);

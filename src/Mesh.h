@@ -216,9 +216,11 @@ class Mesh : public Dispatcher {
   void decayOtaRelayBackoff();
   void serviceLoopMaintenance();
   //void routeRecvAcks(Packet* packet, uint32_t delay_millis);
-  DispatcherAction forwardMultipartDirect(Packet* pkt);
+  DispatcherAction forwardMultipartDirect(Packet* pkt, uint32_t delay_millis);
 
 protected:
+  static bool isTelemetryHistoryPayload(const Packet* packet);
+
   // Roles with lazily persisted state can veto an OTA reset until that state
   // is durable. The OTA apply remains armed and is retried later.
   virtual bool prepareForOtaReboot() { return true; }
@@ -323,6 +325,10 @@ protected:
    * \returns true if at least one active retry sequence was cancelled.
    */
   bool cancelActiveRetries(const uint8_t retry_key[MAX_HASH_SIZE]);
+  // Cancel one locally identified message delivery across both radio profiles.
+  // This does not rely on the retained text or a short destination path hash.
+  bool cancelActiveMessageRetries(const uint8_t message_key[MAX_HASH_SIZE],
+                                  uint32_t message_timestamp);
 
   /**
    * \brief  After a replacement packet is queued, retire the prior retry
@@ -554,6 +560,12 @@ protected:
   // OTA mesh-integration is centralized in Mesh::begin()/loop()/dispatch, so every role (repeater,
   // companion, room, sensor, ...) gets fetch/serve/apply without per-example wiring.
   static bool otaSendAdapter(void* ctx, const uint8_t* msg, uint16_t len, bool flood);
+#if MESH_ENABLE_OTA_KISS_DIRECT
+  bool allowDirectOtaTransmit(uint8_t profile, uint32_t generation) const override;
+  uint32_t directOtaEpoch() const override;
+  bool onDirectOtaRadioFrame(const uint8_t* bytes, size_t length, uint8_t profile,
+                            uint32_t generation) override;
+#endif
   void syncOtaTiming(ota::OtaManager& manager);
   unsigned long _next_ota_tick = 0;
   ota::LongTimer _ota_announce_timer;     // supports long scaled intervals across millis rollovers
@@ -573,6 +585,14 @@ protected:
    * \returns  Number of channels with matching hash
    */
   virtual int searchChannelsByHash(const uint8_t* hash, GroupChannel channels[], int max_matches);
+
+  // Use captured RX origin: queued packets can outlive a transceiver retune.
+  virtual int searchChannelsForPacket(const Packet* packet, const uint8_t* hash,
+                                     GroupChannel channels[], int max_matches) {
+    return searchChannelsByHash(hash, channels, max_matches);
+  }
+  // Known wrong-profile traffic must not poison global receive deduplication.
+  virtual bool allowGroupPacketOnRadio(Packet* packet) { return true; }
 
   /**
    * \brief  A structurally valid encrypted group packet has been observed.
@@ -605,6 +625,13 @@ protected:
 public:
   void begin();
   void loop();
+
+#if MESH_ENABLE_TX_BEACONS
+  bool validateTextBeacon(const BeaconSlot& slot) const;
+  bool queueTextBeacon(const BeaconSlot& slot, const char* node_name,
+                       uint32_t mt_from, uint32_t mt_id);
+  uint32_t beaconNodeId() const;
+#endif
 
   LocalIdentity self_id;
 

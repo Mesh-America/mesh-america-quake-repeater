@@ -1,0 +1,782 @@
+#include "FleetCommand.h"
+#include "RadioProfilePresets.h"
+#include <SHA256.h>
+#include <math.h>
+#include <string.h>
+
+namespace mesh {
+namespace {
+
+constexpr char Domain[] = "MeshCoreFleet1";
+constexpr size_t SignedMessageCapacity = sizeof(Domain) - 1
+    + FleetCommand::KeySize + FleetCommand::MaxEnvelopeLength
+    - FleetCommand::SignatureSize;
+static_assert(FleetCommand::HeaderSize + FleetCommand::FixedTargetMaxCommandLength
+              + FleetCommand::SignatureSize <= FleetCommand::MaxEnvelopeLength,
+              "Fixed-target fleet envelope must fit the two-packet budget");
+static_assert(FleetCommand::MinHeaderSize + FleetCommand::MaxCommandLength
+              + FleetCommand::SignatureSize <= FleetCommand::MaxEnvelopeLength,
+              "Compact fleet envelope must fit the two-packet budget");
+static_assert(FleetCommand::MaxCommandLength <= UINT8_MAX,
+              "Fleet command length must fit the signed length byte");
+constexpr uint8_t PublicKey[FleetCommand::KeySize] = {
+  0x8b, 0x33, 0x87, 0xe9, 0xc5, 0xcd, 0xea, 0x6a,
+  0xc9, 0xe5, 0xed, 0xba, 0xa1, 0x15, 0xcd, 0x72
+};
+
+bool zero(const uint8_t* value, size_t size) {
+  uint8_t combined = 0;
+  for (size_t i = 0; i < size; ++i) combined |= value[i];
+  return combined == 0;
+}
+
+void erase(uint8_t* bytes, size_t length) {
+  volatile uint8_t* destination = bytes;
+  while (length--) *destination++ = 0;
+}
+
+void write32(uint8_t* dest, uint32_t value) {
+  for (unsigned i = 0; i < 4; ++i) dest[i] = value >> (i * 8);
+}
+
+uint32_t read32(const uint8_t* source) {
+  uint32_t value = 0;
+  for (unsigned i = 0; i < 4; ++i) value |= uint32_t(source[i]) << (i * 8);
+  return value;
+}
+
+void targetHash(const uint8_t* full_key, uint8_t* target) {
+  SHA256 hash;
+  hash.update(full_key, PUB_KEY_SIZE);
+  hash.finalize(target, FleetCommand::TargetSize);
+}
+
+bool regionNameAllowed(const char* name, size_t length) {
+  if (!length || length > FleetCommand::MaxRegionNameLength) return false;
+  for (size_t i = 0; i < length; ++i) {
+    const unsigned char value = name[i];
+    // Match RegionMap's name characters within printable ASCII only.
+    if (value != '-' && value != '$' && value != '#'
+        && !(value >= '0' && value <= '9')
+        && !(value >= 'A' && value <= '~')) return false;
+  }
+  return true;
+}
+
+bool coordinatesAllowed(int32_t latitude_e6, int32_t longitude_e6) {
+  return latitude_e6 >= -90000000 && latitude_e6 <= 90000000
+      && longitude_e6 >= -180000000 && longitude_e6 <= 180000000;
+}
+
+bool geoAllowed(int32_t latitude_e6, int32_t longitude_e6, uint32_t radius) {
+  return coordinatesAllowed(latitude_e6, longitude_e6)
+      && radius >= FleetCommand::MinRadiusMeters && radius <= FleetCommand::MaxRadiusMeters;
+}
+
+// Convert bounded decimal text to fixed point without floating-point rounding,
+// exponent aliases, silently dropped precision, or intermediate overflow.
+bool scaledDecimal(const char* text, size_t length, unsigned precision,
+                   uint32_t maximum, bool signed_value, int32_t& result) {
+  if (!length) return false;
+  size_t cursor = 0;
+  bool negative = false;
+  if (text[cursor] == '+' || text[cursor] == '-') {
+    if (!signed_value || ++cursor == length) return false;
+    negative = text[0] == '-';
+  }
+  if (text[cursor] < '0' || text[cursor] > '9') return false;
+  if (text[cursor] == '0' && cursor + 1 < length
+      && text[cursor + 1] >= '0' && text[cursor + 1] <= '9') return false;
+  uint32_t scale = 1;
+  for (unsigned i = 0; i < precision; ++i) scale *= 10;
+  const uint32_t maximum_whole = maximum / scale;
+  uint32_t whole = 0;
+  while (cursor < length && text[cursor] >= '0' && text[cursor] <= '9') {
+    const uint32_t digit = unsigned(text[cursor++] - '0');
+    if (digit > maximum_whole || whole > (maximum_whole - digit) / 10) return false;
+    whole = whole * 10 + digit;
+  }
+  uint32_t fraction = 0;
+  unsigned digits = 0;
+  if (cursor < length) {
+    if (text[cursor++] != '.' || cursor == length) return false;
+    while (cursor < length) {
+      if (text[cursor] < '0' || text[cursor] > '9' || digits == precision) return false;
+      fraction = fraction * 10 + unsigned(text[cursor++] - '0');
+      ++digits;
+    }
+  }
+  while (digits++ < precision) fraction *= 10;
+  const uint32_t magnitude = whole * scale + fraction;
+  if (magnitude > maximum) return false;
+  result = negative ? -int32_t(magnitude) : int32_t(magnitude);
+  return true;
+}
+
+bool parseGeo(const char* token, size_t length, int32_t& latitude_e6,
+              int32_t& longitude_e6, uint32_t& radius) {
+  size_t cursor = 4; // gps:
+  int32_t values[3];
+  for (unsigned i = 0; i < 3; ++i) {
+    const size_t start = cursor;
+    const char separator = i == 0 ? ',' : ':';
+    while (cursor < length && token[cursor] != separator) ++cursor;
+    if ((i < 2 && cursor == length) || (i == 2 && cursor != length)
+        || !scaledDecimal(token + start, cursor - start, i == 2 ? 3 : 6,
+                         i == 0 ? 90000000 : i == 1 ? 180000000 : FleetCommand::MaxRadiusMeters,
+                         i != 2, values[i])) return false;
+    if (cursor < length) ++cursor;
+  }
+  latitude_e6 = values[0]; longitude_e6 = values[1]; radius = uint32_t(values[2]);
+  return geoAllowed(latitude_e6, longitude_e6, radius);
+}
+
+// Validate every record, including records after one that matches this node.
+// An absent self key is used by encode to validate externally supplied lists.
+bool targetRecords(const uint8_t* data, size_t available, uint8_t count,
+                   const uint8_t* self, size_t& consumed, bool& matched,
+                   bool& broadcast, FleetCommand::RegionMatcher matcher = nullptr,
+                   void* context = nullptr, FleetCommand::GeoMatcher geo_matcher = nullptr,
+                   void* geo_context = nullptr) {
+  consumed = 0;
+  matched = count == 0;
+  broadcast = count == 0 || count > 1;
+  if (count > FleetCommand::MaxTargetCount) return false;
+  uint8_t hash[FleetCommand::TargetSize];
+  bool hashed = false;
+  for (unsigned i = 0; i < count; ++i) {
+    if (consumed >= available) return false;
+    const uint8_t type = data[consumed++];
+    if (type == FleetCommand::GeoRecordType) {
+      constexpr size_t fields = FleetCommand::GeoRecordLength - 1;
+      if (fields > available - consumed || consumed + fields > FleetCommand::MaxTargetBytes) return false;
+      const int32_t latitude_e6 = int32_t(read32(data + consumed));
+      const int32_t longitude_e6 = int32_t(read32(data + consumed + 4));
+      const uint32_t radius = read32(data + consumed + 8);
+      if (!geoAllowed(latitude_e6, longitude_e6, radius)) return false;
+      broadcast = true;
+      if (self && geo_matcher && geo_matcher(geo_context, latitude_e6, longitude_e6, radius)) matched = true;
+      consumed += fields;
+      continue;
+    }
+    if (type == FleetCommand::RegionRecordType || type == FleetCommand::HomeRecordType) {
+      if (consumed >= available) return false;
+      const uint8_t length = data[consumed++];
+      if (length > available - consumed || consumed + length > FleetCommand::MaxTargetBytes
+          || !regionNameAllowed(reinterpret_cast<const char*>(data + consumed), length)) return false;
+      broadcast = true;
+      if (self && matcher && matcher(context, type == FleetCommand::RegionRecordType
+              ? FleetCommand::RegionTarget::Configured : FleetCommand::RegionTarget::Home,
+              reinterpret_cast<const char*>(data + consumed), length)) matched = true;
+      consumed += length;
+      continue;
+    }
+    if (type != 4 && type != 6 && type != FleetCommand::TargetSize) return false;
+    if (type > available - consumed
+        || consumed + type > FleetCommand::MaxTargetBytes) return false;
+    if (type != FleetCommand::TargetSize) broadcast = true;
+    if (self) {
+      if (type == FleetCommand::TargetSize && !hashed) {
+        targetHash(self, hash);
+        hashed = true;
+      }
+      const uint8_t* expected = type == FleetCommand::TargetSize ? hash : self;
+      if (!memcmp(data + consumed, expected, type)) matched = true;
+    }
+    consumed += type;
+  }
+  return true;
+}
+
+int hexDigit(char digit) {
+  if (digit >= '0' && digit <= '9') return digit - '0';
+  if (digit >= 'a' && digit <= 'f') return digit - 'a' + 10;
+  if (digit >= 'A' && digit <= 'F') return digit - 'A' + 10;
+  return -1;
+}
+
+bool lifetimeAllowed(uint32_t sequence, uint32_t expires) {
+  return sequence >= FleetCommand::MinEpoch && expires >= sequence
+      && expires - sequence <= FleetCommand::MaxLifetime;
+}
+
+size_t signedMessage(const uint8_t* key, const uint8_t* payload,
+                     size_t length, uint8_t* output) {
+  const size_t prefix = sizeof(Domain) - 1 + FleetCommand::KeySize;
+  memcpy(output, Domain, sizeof(Domain) - 1);
+  memcpy(output + sizeof(Domain) - 1, key, FleetCommand::KeySize);
+  memcpy(output + prefix, payload, length);
+  return prefix + length;
+}
+
+bool keyEquals(const char* key, size_t length, const char* candidate) {
+  return strlen(candidate) == length && !memcmp(key, candidate, length);
+}
+
+// The CLI handler owns board-specific range checks. Authorization admits
+// only the exact namespace and a strictly numeric optional row suffix.
+bool rowKey(const char* key, size_t length, const char* family) {
+  const size_t family_length = strlen(family);
+  if (length < family_length || memcmp(key, family, family_length)) return false;
+  if (length == family_length) return true;
+  if (key[family_length] != '.') return false;
+  size_t cursor = family_length + 1;
+  if (cursor == length || key[cursor] < '1' || key[cursor] > '9') return false;
+  unsigned row = 0;
+  for (; cursor < length; ++cursor) {
+    if (key[cursor] < '0' || key[cursor] > '9') return false;
+    row = row * 10 + unsigned(key[cursor] - '0');
+    if (row > 255) return false;
+  }
+  return true;
+}
+
+enum class CommandKind : uint8_t {
+  Filter, Row, Advert, Schedule, SecondarySchedule, Radio, RadioStatus, Cross, Guest, Guests, Setting
+};
+
+struct CommandFamily {
+  const char* name;
+  CommandKind kind;
+};
+
+// Match the signed namespace once. Row families alone accept a numeric suffix;
+// sharing the lookup also keeps the sender's full authorization policy compact.
+const CommandFamily* commandFamily(const char* key, size_t length) {
+  static const CommandFamily families[] = {
+    {"flood.filter", CommandKind::Filter},
+    {"flood.rule", CommandKind::Filter},
+    {"fr", CommandKind::Filter},
+    {"flood.filter.blacklist", CommandKind::Row},
+    {"fb", CommandKind::Row},
+    {"flood.moderation", CommandKind::Row},
+    {"fm", CommandKind::Row},
+    {"flood.channel.scope", CommandKind::Row},
+    {"fs", CommandKind::Row},
+    {"flood.channel.scope.require", CommandKind::Row},
+    {"fsr", CommandKind::Row},
+    {"flood.advert", CommandKind::Advert},
+    {"fa", CommandKind::Advert},
+    {"radioat", CommandKind::Schedule},
+    {"tempradioat", CommandKind::Schedule},
+    {"radioat2", CommandKind::SecondarySchedule},
+    {"tempradioat2", CommandKind::SecondarySchedule},
+    {"radio2", CommandKind::Radio},
+    {"tempradio2", CommandKind::Radio},
+    {"radio2.status", CommandKind::RadioStatus},
+    {"radio2.timing", CommandKind::RadioStatus},
+    {"radio2.cross", CommandKind::Cross},
+    {"guest", CommandKind::Guest},
+    {"guests", CommandKind::Guests},
+    {"logins", CommandKind::Guests},
+    {"flood.channel.data", CommandKind::Setting},
+    {"flood.channel.data.hops", CommandKind::Setting},
+    {"flood.max", CommandKind::Setting},
+    {"flood.max.unscoped", CommandKind::Setting},
+    {"flood.max.advert", CommandKind::Setting},
+  };
+  for (const auto& family : families) {
+    const bool row = family.kind == CommandKind::Filter || family.kind == CommandKind::Row;
+    if (row ? rowKey(key, length, family.name) : keyEquals(key, length, family.name)) return &family;
+  }
+  return nullptr;
+}
+
+// Regex punctuation is data only in the two content-pattern fields. Keep the
+// existing management-command character policy for every other argument.
+bool filterPatternCharactersAllowed(const char* text) {
+  while (*text) {
+    while (*text == ' ') ++text;
+    if (!*text) break;
+    const char* key = text;
+    while (*text && *text != '=' && *text != ' ') {
+      if (*text == '|' || *text == '\\') return false;
+      ++text;
+    }
+    const size_t key_length = size_t(text - key);
+    const bool pattern = keyEquals(key, key_length, "sender")
+        || keyEquals(key, key_length, "n") || keyEquals(key, key_length, "text")
+        || keyEquals(key, key_length, "x");
+    if (*text == '=') ++text;
+    const char quote = *text == '"' || *text == '\'' ? *text++ : 0;
+    bool closed = quote == 0;
+    while (*text) {
+      if (quote ? *text == quote : *text == ' ') {
+        if (quote) { ++text; closed = true; }
+        break;
+      }
+      if (*text == '|' && !pattern) return false;
+      if (*text == '\\') {
+        if (!pattern || !text[1]) return false;
+        text += 2;
+      } else {
+        ++text;
+      }
+    }
+    if (!closed || (*text && *text != ' ')) return false;
+  }
+  return true;
+}
+
+bool decimalToken(const char* text, size_t length) {
+  if (!length) return false;
+  bool dot = false, digit = false;
+  for (size_t i = 0; i < length; ++i) {
+    if (text[i] >= '0' && text[i] <= '9') digit = true;
+    else if (text[i] == '.' && !dot) dot = true;
+    else return false;
+  }
+  return digit;
+}
+
+bool integerToken(const char* text, size_t length) {
+  if (!length) return false;
+  for (size_t i = 0; i < length; ++i)
+    if (text[i] < '0' || text[i] > '9') return false;
+  return true;
+}
+
+bool boundedIntegerToken(const char* text, size_t length, uint32_t maximum,
+                         uint32_t& value) {
+  if (!length) return false;
+  value = 0;
+  for (size_t i = 0; i < length; ++i) {
+    if (text[i] < '0' || text[i] > '9') return false;
+    const uint32_t digit = uint32_t(text[i] - '0');
+    if (digit > maximum || value > (maximum - digit) / 10U) return false;
+    value = value * 10U + digit;
+  }
+  return true;
+}
+
+bool scheduleTimeToken(const char* text, size_t length) {
+  if (!length) return false;
+  const bool relative = text[0] == '+';
+  uint32_t value;
+  // The scheduler resolves +N whole minutes against its current RTC and
+  // performs future/overflow/endpoint-order checks using that one snapshot.
+  return boundedIntegerToken(text + relative, length - relative,
+                             relative ? UINT32_MAX / 60U : UINT32_MAX, value)
+      && value != 0;
+}
+
+bool preambleToken(const char* text, size_t length) {
+  if (keyEquals(text, length, "auto")) return true;
+  uint32_t value;
+  return boundedIntegerToken(text, length, 65528U, value)
+      && (value == 0 || value >= 8);
+}
+
+bool scheduleSelector(const char* arguments, bool secondary) {
+  if (!*arguments || !strcmp(arguments, "all")) return true;
+  if (*arguments < '1' || *arguments > '9') return false;
+  uint32_t value;
+  // Primary capacity is role/build configurable. Match the bounded row
+  // authorization policy and let the role reject nonexistent slots.
+  return boundedIntegerToken(arguments, strlen(arguments), secondary ? 4U : 255U, value);
+}
+
+bool scheduledRadioTuple(const char* arguments, bool temporary, bool secondary) {
+  unsigned fields = 0;
+  const unsigned time_index = secondary ? 5 : 4;
+  const unsigned expected = time_index + (temporary ? 2 : 1);
+  const char* cursor = arguments;
+  for (;;) {
+    const char* end = strchr(cursor, ',');
+    const size_t length = end ? size_t(end - cursor) : strlen(cursor);
+    bool valid = false;
+    if (fields < 2) valid = decimalToken(cursor, length);
+    else if (fields < 4) {
+      uint32_t value;
+      valid = boundedIntegerToken(cursor, length, 255U, value);
+    } else if (secondary && fields == 4) {
+      valid = keyEquals(cursor, length, "rx") || keyEquals(cursor, length, "rxtx");
+    } else if (fields < expected) valid = scheduleTimeToken(cursor, length);
+    else if (fields == expected) valid = preambleToken(cursor, length);
+    if (!valid || ++fields > expected + 1) return false;
+    if (!end) return fields == expected || fields == expected + 1;
+    cursor = end + 1;
+  }
+}
+
+bool radioTuple(const char* arguments, bool temporary) {
+  if (!strcmp(arguments, "off")) return true;
+  unsigned fields = 0;
+  const unsigned expected = temporary ? 6 : 5;
+  const char* cursor = arguments;
+  for (;;) {
+    const char* end = strchr(cursor, ',');
+    const size_t length = end ? size_t(end - cursor) : strlen(cursor);
+    bool valid;
+    if (fields < 2) valid = decimalToken(cursor, length);
+    else if (fields < 4 || (temporary && fields == 5))
+      valid = integerToken(cursor, length);
+    else if (fields == 4) valid = keyEquals(cursor, length, "rx")
+        || keyEquals(cursor, length, "rxtx");
+    else valid = fields == expected
+        && (integerToken(cursor, length) || keyEquals(cursor, length, "auto"));
+    if (!valid || ++fields > expected + 1) return false;
+    if (!end) return fields == expected || fields == expected + 1;
+    cursor = end + 1;
+  }
+}
+
+} // namespace
+
+bool FleetCommand::privateKeyAllowed(const uint8_t* key) {
+  return key && !zero(key, KeySize) && memcmp(key, PublicKey, KeySize) != 0;
+}
+
+bool FleetCommand::parseTarget(const char* text, uint8_t* target) {
+  if (!text || !target) return false;
+  if (!strcmp(text, "all")) {
+    memset(target, 0, TargetSize);
+    return true;
+  }
+  if (strlen(text) != PUB_KEY_SIZE * 2) return false;
+  uint8_t full_key[PUB_KEY_SIZE];
+  for (size_t i = 0; i < PUB_KEY_SIZE; ++i) {
+    const int upper = hexDigit(text[i * 2]);
+    const int lower = hexDigit(text[i * 2 + 1]);
+    if (upper < 0 || lower < 0) return false;
+    full_key[i] = uint8_t((upper << 4) | lower);
+  }
+  // An invalid zero identity must not masquerade as the reserved all target.
+  if (zero(full_key, PUB_KEY_SIZE)) return false;
+  targetHash(full_key, target);
+  return !zero(target, TargetSize);
+}
+
+bool FleetCommand::parseTargets(const char* text, size_t length, Targets& targets) {
+  memset(&targets, 0, sizeof(targets));
+  if (!text || !length || length > MaxTargetCount * (PUB_KEY_SIZE * 2 + 1)) return false;
+  if (length == 3 && !memcmp(text, "all", 3)) return true;
+  // Clear partial output on failure without retaining another 88-byte list
+  // on the command parser's stack.
+  const auto fail = [&targets]() {
+    memset(&targets, 0, sizeof(targets));
+    return false;
+  };
+  size_t cursor = 0;
+  while (cursor < length) {
+    const size_t start = cursor;
+    // A semicolon always terminates a target. GPS owns its one coordinate
+    // comma, so malformed coordinates cannot consume another target.
+    while (cursor < length && text[cursor] != ';') ++cursor;
+    const size_t token_length = cursor - start;
+    if (!token_length || targets.count == MaxTargetCount) return fail();
+    const char* token = text + start;
+    const bool gps = token_length >= 4 && !memcmp(token, "gps:", 4);
+    const bool region = token_length >= 7 && !memcmp(token, "region:", 7);
+    const bool home = token_length >= 5 && !memcmp(token, "home:", 5);
+    const bool explicit_name = region || home;
+    const bool key = !explicit_name && !gps
+        && (token_length == 8 || token_length == 12 || token_length == PUB_KEY_SIZE * 2);
+    if (gps) {
+      int32_t latitude_e6, longitude_e6;
+      uint32_t radius;
+      if (targets.length + GeoRecordLength > MaxTargetBytes
+          || !parseGeo(token, token_length, latitude_e6, longitude_e6, radius)) return fail();
+      targets.data[targets.length++] = GeoRecordType;
+      write32(targets.data + targets.length, uint32_t(latitude_e6));
+      write32(targets.data + targets.length + 4, uint32_t(longitude_e6));
+      write32(targets.data + targets.length + 8, radius);
+      targets.length += GeoRecordLength - 1;
+    } else if (key) {
+      const size_t type = token_length == PUB_KEY_SIZE * 2 ? TargetSize : token_length / 2;
+      if (targets.length + 1 + type > MaxTargetBytes) return fail();
+      uint8_t full_key[PUB_KEY_SIZE];
+      const size_t byte_length = token_length / 2;
+      for (size_t i = 0; i < byte_length; ++i) {
+        const int upper = hexDigit(token[i * 2]);
+        const int lower = hexDigit(token[i * 2 + 1]);
+        if (upper < 0 || lower < 0) return fail();
+        full_key[i] = uint8_t((upper << 4) | lower);
+      }
+      if (type == TargetSize && zero(full_key, PUB_KEY_SIZE)) return fail();
+      targets.data[targets.length++] = uint8_t(type);
+      if (type == TargetSize) targetHash(full_key, targets.data + targets.length);
+      else memcpy(targets.data + targets.length, full_key, type);
+      targets.length += uint8_t(type);
+    } else {
+      if (!explicit_name) {
+        if (keyEquals(token, token_length, "all") || keyEquals(token, token_length, "get")
+            || keyEquals(token, token_length, "set") || keyEquals(token, token_length, "del")
+            || keyEquals(token, token_length, "time") || keyEquals(token, token_length, "clock")) return fail();
+        bool all_hex = true;
+        for (size_t i = 0; i < token_length; ++i) all_hex = all_hex && hexDigit(token[i]) >= 0;
+        if (all_hex) return fail();
+      }
+      const size_t prefix = region ? 7 : home ? 5 : 0;
+      const char* name = token + prefix;
+      size_t name_length = token_length - prefix;
+      if (name_length && *name == '#') { ++name; --name_length; }
+      if (!regionNameAllowed(name, name_length)
+          || targets.length + 2 + name_length > MaxTargetBytes) return fail();
+      targets.data[targets.length++] = home ? HomeRecordType : RegionRecordType;
+      targets.data[targets.length++] = uint8_t(name_length);
+      memcpy(targets.data + targets.length, name, name_length);
+      targets.length += uint8_t(name_length);
+    }
+    ++targets.count;
+    if (cursor < length && ++cursor == length) return fail();
+  }
+  return true;
+}
+
+bool FleetCommand::withinRadius(int32_t center_latitude_e6, int32_t center_longitude_e6,
+                                uint32_t radius_meters, int32_t local_latitude_e6,
+                                int32_t local_longitude_e6) {
+  if (!geoAllowed(center_latitude_e6, center_longitude_e6, radius_meters)
+      || !coordinatesAllowed(local_latitude_e6, local_longitude_e6)) return false;
+  constexpr double radians_per_e6_degree = 0.000001 * 0.017453292519943295769;
+  const double center_latitude = double(center_latitude_e6) * radians_per_e6_degree;
+  const double local_latitude = double(local_latitude_e6) * radians_per_e6_degree;
+  const double latitude_half = (double(local_latitude_e6) - center_latitude_e6) * radians_per_e6_degree / 2;
+  const double longitude_half = (double(local_longitude_e6) - center_longitude_e6) * radians_per_e6_degree / 2;
+  const double latitude_sine = sin(latitude_half), longitude_sine = sin(longitude_half);
+  double haversine = latitude_sine * latitude_sine
+      + cos(center_latitude) * cos(local_latitude) * longitude_sine * longitude_sine;
+  if (haversine < 0) haversine = 0;
+  else if (haversine > 1) haversine = 1;
+  const double distance = 2 * 6371008.8 * atan2(sqrt(haversine), sqrt(1 - haversine));
+  return distance <= double(radius_meters);
+}
+
+bool FleetCommand::commandAllowed(const char* command) {
+  if (!command) return false;
+  size_t length = 0;
+  bool pattern_characters = false;
+  while (command[length]) {
+    const unsigned char byte = command[length];
+    if (++length > MaxCommandLength || byte < 0x20 || byte > 0x7e
+        || byte == ';' || byte == '&' || byte == '`') return false;
+    pattern_characters = pattern_characters || byte == '|' || byte == '\\';
+  }
+  if (!length || command[0] == ' ' || command[length - 1] == ' ') return false;
+  if (!strcmp(command, "clock") || !strcmp(command, "clock sync")) return true;
+  if (!strncmp(command, "time ", 5)) {
+    uint32_t value;
+    return boundedIntegerToken(command + 5, length - 5, UINT32_MAX, value)
+        && value >= MinEpoch;
+  }
+  bool get = false, set = false, del = false, clear = false;
+  if (!strncmp(command, "get ", 4)) get = true;
+  else if (!strncmp(command, "set ", 4)) set = true;
+  else if (!strncmp(command, "del ", 4)) del = true;
+  else if (!strncmp(command, "clear ", 6)) clear = true;
+  else return false;
+  const char* key = command + (clear ? 6 : 4);
+  const char* separator = strchr(key, ' ');
+  const size_t key_length = separator ? size_t(separator - key) : strlen(key);
+  const char* arguments = separator ? separator + 1 : "";
+  if (!key_length || (separator && (!*arguments || *arguments == ' '))) return false;
+
+  const CommandFamily* family = commandFamily(key, key_length);
+  if (!family) return false;
+  const CommandKind kind = family->kind;
+  const bool filter_rows = kind == CommandKind::Filter;
+  if (pattern_characters && (!set || !filter_rows
+          || !filterPatternCharactersAllowed(arguments))) return false;
+
+  if (kind == CommandKind::Advert) {
+    if (get) {
+      if (!*arguments) return true;
+      const bool detail = !strncmp(arguments, "key ", 4);
+      const char* number = arguments + (detail ? 4 : 0);
+      uint32_t value;
+      return *number >= '1' && *number <= '9'
+          && boundedIntegerToken(number, strlen(number), 65535, value);
+    }
+    if (!clear) return false;
+    if (!strcmp(arguments, "all")) return true;
+    if (strlen(arguments) != PUB_KEY_SIZE * 2) return false;
+    for (size_t i = 0; arguments[i]; ++i) if (hexDigit(arguments[i]) < 0) return false;
+    return true;
+  }
+  if (clear) return false;
+  if (kind == CommandKind::Guest) {
+    return get ? !*arguments : set && (!strcmp(arguments, "on") || !strcmp(arguments, "off"));
+  }
+  if (kind == CommandKind::Guests) {
+    uint32_t page = 0;
+    return get && (!*arguments || (arguments[0] >= '1' && arguments[0] <= '9'
+        && boundedIntegerToken(arguments, strlen(arguments), 65535, page)));
+  }
+
+  const bool scheduled_secondary = kind == CommandKind::SecondarySchedule;
+  if (kind == CommandKind::Schedule || scheduled_secondary) {
+    return set ? scheduledRadioTuple(arguments, key[0] == 't', scheduled_secondary)
+        : (get || del) && scheduleSelector(arguments, scheduled_secondary);
+  }
+  if (kind == CommandKind::Radio) {
+    return get ? !*arguments : set && ((key_length == 6
+        && cli::radio2PresetTuple(arguments)) || radioTuple(arguments, key_length == 10));
+  }
+  if (kind == CommandKind::RadioStatus) return get && !*arguments;
+  if (kind == CommandKind::Cross) {
+    return get ? !*arguments : set && (!strcmp(arguments, "on")
+        || !strcmp(arguments, "off") || !strcmp(arguments, "auto"));
+  }
+  if (filter_rows || kind == CommandKind::Row) return get ? (!*arguments || (filter_rows
+          && key_length > strlen(family->name)
+          && (!strcmp(arguments, "sender") || !strcmp(arguments, "n")
+              || !strcmp(arguments, "text") || !strcmp(arguments, "x"))))
+      : set ? *arguments != 0 : del && (!*arguments || !strcmp(arguments, "all"));
+  return kind == CommandKind::Setting && (get ? !*arguments : set && *arguments);
+}
+
+size_t FleetCommand::encode(const LocalIdentity& publisher, const uint8_t* key,
+                           uint32_t sequence, uint32_t expires,
+                           const uint8_t* target, const char* command,
+                           uint8_t* output, size_t capacity) {
+  if (!privateKeyAllowed(key) || !target || !output
+      || !lifetimeAllowed(sequence, expires) || !commandAllowed(command)
+      || zero(publisher.pub_key, PUB_KEY_SIZE)) return 0;
+  const size_t command_length = strlen(command);
+  const size_t unsigned_length = HeaderSize + command_length;
+  const size_t length = unsigned_length + SignatureSize;
+  if (length > MaxEnvelopeLength || capacity < length) return 0;
+  memcpy(output, "FMC1", 4);
+  write32(output + 4, sequence);
+  write32(output + 8, expires);
+  memcpy(output + 12, target, TargetSize);
+  output[28] = uint8_t(command_length);
+  memcpy(output + HeaderSize, command, command_length);
+  uint8_t message[SignedMessageCapacity];
+  const size_t message_length = signedMessage(key, output, unsigned_length, message);
+  publisher.sign(output + unsigned_length, message, int(message_length));
+  erase(message, sizeof(message));
+  return length;
+}
+
+size_t FleetCommand::encode(const LocalIdentity& publisher, const uint8_t* key,
+                           uint32_t sequence, uint32_t expires,
+                           const Targets& targets, const char* command,
+                           uint8_t* output, size_t capacity) {
+  if (!privateKeyAllowed(key) || !output || targets.length > MaxTargetBytes
+      || !lifetimeAllowed(sequence, expires) || !commandAllowed(command)
+      || zero(publisher.pub_key, PUB_KEY_SIZE)) return 0;
+  size_t consumed;
+  bool matched, broadcast;
+  if (!targetRecords(targets.data, targets.length, targets.count, nullptr,
+                     consumed, matched, broadcast) || consumed != targets.length) return 0;
+  // Broadcast has no target record in FMC2. A single complete key retains
+  // its original encoding, which is smaller than a one-record FMC2 envelope.
+  if (targets.count == 1 && targets.data[0] == TargetSize
+      && !zero(targets.data + 1, TargetSize)) {
+    return encode(publisher, key, sequence, expires, targets.data + 1, command, output, capacity);
+  }
+  const size_t command_length = strlen(command);
+  const size_t unsigned_length = MinHeaderSize + targets.length + command_length;
+  const size_t length = unsigned_length + SignatureSize;
+  if (length > MaxEnvelopeLength || capacity < length) return 0;
+  memcpy(output, "FMC2", 4);
+  write32(output + 4, sequence);
+  write32(output + 8, expires);
+  output[12] = targets.count;
+  memcpy(output + 13, targets.data, targets.length);
+  output[13 + targets.length] = uint8_t(command_length);
+  memcpy(output + MinHeaderSize + targets.length, command, command_length);
+  uint8_t message[SignedMessageCapacity];
+  const size_t message_length = signedMessage(key, output, unsigned_length, message);
+  publisher.sign(output + unsigned_length, message, int(message_length));
+  erase(message, sizeof(message));
+  return length;
+}
+
+bool FleetCommand::decode(const Identity& publisher, const uint8_t* key,
+                         const uint8_t* payload, size_t length, uint32_t now,
+                         const uint8_t* self_public_key, Decoded& output,
+                         RegionMatcher matcher, void* context,
+                         GeoMatcher geo_matcher, void* geo_context,
+                         SignatureGate signature_gate, void* signature_context) {
+  memset(&output, 0, sizeof(output));
+  if (!privateKeyAllowed(key) || !payload || !self_public_key
+      || zero(publisher.pub_key, PUB_KEY_SIZE) || zero(self_public_key, PUB_KEY_SIZE)
+      || now < MinEpoch || length < MinHeaderSize + SignatureSize
+      || length > MaxEnvelopeLength) return false;
+  const size_t unsigned_length = length - SignatureSize;
+  size_t command_offset;
+  bool broadcast;
+  if (!memcmp(payload, "FMC1", 4)) {
+    if (length < HeaderSize + SignatureSize) return false;
+    broadcast = zero(payload + 12, TargetSize);
+    if (!broadcast) {
+      uint8_t target[TargetSize];
+      targetHash(self_public_key, target);
+      if (memcmp(target, payload + 12, TargetSize)) return false;
+    }
+    command_offset = HeaderSize;
+  } else if (!memcmp(payload, "FMC2", 4)) {
+    size_t consumed;
+    bool matched;
+    if (!targetRecords(payload + 13, unsigned_length - 13, payload[12],
+                       self_public_key, consumed, matched, broadcast, matcher, context,
+                       geo_matcher, geo_context)
+        || !matched) return false;
+    command_offset = MinHeaderSize + consumed;
+    if (command_offset > unsigned_length) return false;
+  } else return false;
+  const size_t command_length = payload[command_offset - 1];
+  if (!command_length || command_length > MaxCommandLength
+      || unsigned_length != command_offset + command_length) return false;
+  const uint32_t sequence = read32(payload + 4), expires = read32(payload + 8);
+  if (!lifetimeAllowed(sequence, expires) || expires < now
+      || (sequence > now && sequence - now > MaxClockLead)) return false;
+  // Reject embedded NUL bytes, which would authorize a different text from
+  // the signed byte string when passed to the CLI parser.
+  if (memchr(payload + command_offset, 0, command_length)) return false;
+  char command[MaxCommandLength + 1];
+  memcpy(command, payload + command_offset, command_length);
+  command[command_length] = 0;
+  if (!commandAllowed(command)) return false;
+  if (signature_gate && !signature_gate(signature_context)) return false;
+  uint8_t message[SignedMessageCapacity];
+  const size_t message_length = signedMessage(key, payload, unsigned_length, message);
+  const bool valid = publisher.verify(payload + unsigned_length, message, int(message_length));
+  erase(message, sizeof(message));
+  if (!valid) return false;
+  output.sequence = sequence;
+  output.expires = expires;
+  output.broadcast = broadcast;
+  memcpy(output.command, command, command_length + 1);
+  return true;
+}
+
+size_t FleetCommand::fragment(const uint8_t* envelope, size_t length, uint8_t index,
+                              uint8_t* output, size_t capacity) {
+  if (!envelope || !output || length <= MaxPayloadLength
+      || length > MaxEnvelopeLength || index > 1
+      || (memcmp(envelope, "FMC1", 4) && memcmp(envelope, "FMC2", 4))) return 0;
+  const size_t offset = size_t(index) * FragmentDataLength;
+  const size_t chunk_length = index ? length - offset : FragmentDataLength;
+  const size_t fragment_length = FragmentHeaderSize + chunk_length;
+  if (capacity < fragment_length) return 0;
+  memcpy(output, "FMP1", 4);
+  memcpy(output + 4, envelope + 4, 4); // The receiver checks this against signed UTC sequence.
+  output[8] = uint8_t(length);
+  output[9] = uint8_t(length >> 8);
+  output[10] = index;
+  memcpy(output + FragmentHeaderSize, envelope + offset, chunk_length);
+  return fragment_length;
+}
+
+bool FleetCommand::parseFragment(const uint8_t* payload, size_t length, Fragment& output) {
+  output = {};
+  if (!payload || length < FragmentHeaderSize || length > MaxPayloadLength
+      || memcmp(payload, "FMP1", 4)) return false;
+  const uint16_t total = uint16_t(payload[8]) | (uint16_t(payload[9]) << 8);
+  const uint8_t index = payload[10];
+  if (total <= MaxPayloadLength || total > MaxEnvelopeLength || index > 1) return false;
+  const size_t chunk_length = index ? total - FragmentDataLength : FragmentDataLength;
+  if (length != FragmentHeaderSize + chunk_length) return false;
+  output.sequence = read32(payload + 4);
+  output.total_length = total;
+  output.index = index;
+  output.data = payload + FragmentHeaderSize;
+  output.length = chunk_length;
+  return true;
+}
+
+} // namespace mesh

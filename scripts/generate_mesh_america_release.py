@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 from urllib.parse import quote
+from package_cascade_release import embedded_bootloader_variant
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +85,7 @@ def read_stage(stage):
             logical_target = row["artifact_target"]
             if row.get("verified") is not True or row.get("source_commit", source) != source:
                 raise ValueError("unqualified or wrong-source release profile")
+            embedded_bootloader_variant(row)
             files = []
             for name in row["files"]:
                 if Path(name).name != name or name not in checksums:
@@ -173,6 +175,9 @@ def generate(catalog, plan, family, records, profiles, repo):
                    "Reduced optional sensors + LoRa OTA" if sensor == "reduced" else
                    "Full profile" if row["build_profile"] == "full" or parsed["mode"] == "full" else
                    "Standard profile")
+        bootloader = row.get("embedded_bootloader")
+        if bootloader:
+            profile += " + OTAFIX " + bootloader["release"] + " bootloader"
         url = f"https://github.com/{repo}/releases/download/{tag}/"
         cap = next(name for name in row["files"] if name.endswith(".capabilities.json"))
         memory = next(name for name in row["files"] if name.endswith(".memory.json"))
@@ -184,7 +189,10 @@ def generate(catalog, plan, family, records, profiles, repo):
         if platform == "esp32":
             notes.append("INSTALL - The merged .bin installs the bootloader, partitions and application over USB. An app-only .bin requires a compatible existing partition layout. Use the exact board and role migration ZIP from the utility release when expanding partitions over Wi-Fi or LoRa; follow its README and install its supplied Full application.")
         elif platform == "nrf52":
-            notes.append("INSTALL - UF2 and Serial DFU ZIP files contain application firmware. LoRa updates require the matching board and storage OTAFIX bootloader. Use the firmware picker's exact bootloader mapping.")
+            if bootloader:
+                notes.append("INSTALL - This application carries the exact-board OTAFIX " + bootloader["release"] + " bootloader and checks it for installation 70 seconds after startup. Match the board and storage profile; recovery and unrecognized bootloaders require the documented migration route.")
+            else:
+                notes.append("INSTALL - Ordinary UF2 and Serial DFU ZIP files contain application firmware and preserve the installed bootloader. LoRa updates require the matching board and storage OTAFIX bootloader. Use the firmware picker's exact bootloader mapping.")
         if row.get("reductions"):
             notes.append("CAPACITY - " + "; ".join(row["reductions"]))
         if "-full-usb-wifi" in target:

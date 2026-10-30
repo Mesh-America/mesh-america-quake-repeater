@@ -1,8 +1,13 @@
 #include "RegionMap.h"
 #include <helpers/RegionNameUtils.h>
 #include <helpers/TxtDataHelpers.h>
-#if defined(NRF52_PLATFORM)
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
 #include <helpers/AtomicFileWriter.h>
+#elif defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+#include <helpers/ContactFileTransaction.h>
+#endif
+#if defined(ESP32_PLATFORM)
+#include <helpers/FilePresence.h>
 #endif
 #include <SHA256.h>
 
@@ -62,25 +67,35 @@ static const char* skip_hash(const char* name) {
   return RegionNameUtils::canonical(name);
 }
 
-#if !defined(NRF52_PLATFORM)
+#if !defined(NRF52_PLATFORM) && !defined(STM32_PLATFORM) && !defined(ESP32_PLATFORM) && !defined(RP2040_PLATFORM)
 static File openWrite(FILESYSTEM* _fs, const char* filename) {
-  #if defined(STM32_PLATFORM)
-    _fs->remove(filename);
-    return _fs->open(filename, FILE_O_WRITE);
-  #elif defined(RP2040_PLATFORM)
-    return _fs->open(filename, "w");
-  #else
-    return _fs->open(filename, "w", true);
-  #endif
+  return _fs->open(filename, "w", true);
 }
 #endif
 
+static bool regionPathSupported(FILESYSTEM* fs, const char* path) {
+  if (fs == nullptr || path == nullptr || path[0] == 0) return false;
+#if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+  // Transaction siblings have 48 bytes, including the suffix and terminator.
+  if (strlen(path) > 43) return false;
+#endif
+  return true;
+}
+
 bool RegionMap::load(FILESYSTEM* _fs, const char* path) {
-  if (_fs->exists(path ? path : "/regions2")) {
+  const char* target_path = path ? path : "/regions2";
+  if (!regionPathSupported(_fs, target_path)) return false;
+#if defined(ESP32_PLATFORM)
+  if (!mesh::ContactFileTransaction::recover(
+          _fs, target_path, mesh::filePresence<FILESYSTEM>)) return false;
+#elif defined(RP2040_PLATFORM)
+  if (!mesh::ContactFileTransaction::recover(_fs, target_path)) return false;
+#endif
+  if (_fs->exists(target_path)) {
   #if defined(RP2040_PLATFORM)
-    File file = _fs->open(path ? path : "/regions2", "r");
+    File file = _fs->open(target_path, "r");
   #else
-    File file = _fs->open(path ? path : "/regions2");
+    File file = _fs->open(target_path);
   #endif
 
     if (file) {
@@ -191,8 +206,13 @@ bool RegionMap::load(FILESYSTEM* _fs, const char* path) {
 
 bool RegionMap::save(FILESYSTEM* _fs, const char* path) {
   const char* target_path = path ? path : "/regions2";
-#if defined(NRF52_PLATFORM)
+  if (!regionPathSupported(_fs, target_path)) return false;
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   mesh::AtomicFileWriter file(_fs, target_path);
+#elif defined(ESP32_PLATFORM)
+  mesh::ContactFileTransaction file(_fs, target_path, mesh::filePresence<FILESYSTEM>);
+#elif defined(RP2040_PLATFORM)
+  mesh::ContactFileTransaction file(_fs, target_path);
 #else
   File file = openWrite(_fs, target_path);
 #endif
@@ -218,7 +238,7 @@ bool RegionMap::save(FILESYSTEM* _fs, const char* path) {
         if (!success) break; // write failed
       }
     }
-#if defined(NRF52_PLATFORM)
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM) || defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
     success = file.commit(success);
 #else
     file.close();
@@ -288,6 +308,10 @@ int RegionMap::getTransportKeysFor(const RegionEntry& src, TransportKey dest[], 
 }
 
 RegionEntry* RegionMap::findMatch(const mesh::Packet* packet, uint8_t mask) {
+  if (packet->transport_codes[0] == 0) {
+    // Zero means unscoped, not an exemption from the wildcard's deny policy.
+    return (wildcard.flags & mask) == 0 ? &wildcard : NULL;
+  }
   for (int i = 0; i < num_regions; i++) {
     auto region = &regions[i];
     if ((region->flags & mask) == 0) {   // does region allow this? (per 'mask' param)
@@ -462,11 +486,12 @@ size_t RegionMap::exportTo(char *dest, size_t max_len) const {
 }
 
 int RegionMap::exportNamesTo(char *dest, int max_len, uint8_t mask, bool invert) {
+  if (!dest || max_len <= 0) return 0;
   char *dp = dest;
   
   // Check wildcard region
   bool wildcard_matches = invert ? (wildcard.flags & mask) : !(wildcard.flags & mask);
-  if (wildcard_matches) {
+  if (wildcard_matches && max_len >= 2) {
     *dp++ = '*';
     *dp++ = ',';
   }

@@ -1,11 +1,18 @@
+#include <helpers/RegulatorSettings.h>
+#include <helpers/LedSettings.h>
 #include <Arduino.h>   // needed for PlatformIO
 #include <helpers/ui/StartupScreen.h>
 #include <helpers/ui/DisplayPowerSettings.h>
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+#include <helpers/ui/OLEDControllerSettings.h>
+#endif
 #include <helpers/UsbLoggingWatchdog.h>
 #include <helpers/UsbLoggingClientActivity.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <Mesh.h>
 #include <helpers/BluetoothMac.h>
 #include "MyMesh.h"
+#include <helpers/CompanionReader.h>
 #include "CompanionBluetooth.h"
 #include "CompanionWireless.h"
 #include "CompanionWiFi.h"
@@ -25,6 +32,8 @@ void companionPairingUiHilProbe();
 #include "esp_pm.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
+#include <helpers/esp32/ProfileIdleSleep.h>
+#include <helpers/esp32/LightSleepPolicy.h>
 #if defined(CONFIG_BLUEDROID_ENABLED) && !defined(MESH_USE_NIMBLE_ARDUINO)
 #include <esp_bt_main.h>
 #endif
@@ -60,6 +69,7 @@ static uint32_t _atoi(const char* sp) {
 
 // interface manager
 #include <helpers/MultiSerialInterface.h>
+#include <helpers/UsbBluetoothPriority.h>
 MultiSerialInterface interface_manager;
 
 // include bluetooth interface
@@ -100,6 +110,8 @@ MultiSerialInterface interface_manager;
     #include <helpers/WiFiReconnectPolicy.h>
     #include <helpers/WiFiPowerSave.h>
     #include <helpers/CompanionWiFiNtpPolicy.h>
+    #include <helpers/CompanionWiFiStatusFormat.h>
+    #include <helpers/WiFiNetworkPowerPolicy.h>
     #include <helpers/ui/DisplayTextLayout.h>
     #include <helpers/ui/IndicatorRenderProfile.h>
     #include <helpers/ui/WiFiSetupQrDisplay.h>
@@ -111,7 +123,11 @@ MultiSerialInterface interface_manager;
     #include <atomic>
     #include <esp_sntp.h>
     #include <esp_wifi.h>
+    #if defined(ESP32_PLATFORM) && defined(ENABLE_OTA)
+      #include <helpers/esp32/WiFiOtaSeeder.h>
+    #endif
     SerialWifiInterface wifi_interface;
+    static bool companion_wifi_interface_registered = false;
     #ifndef WIFI_PWD
       #define WIFI_PWD ""
     #endif
@@ -221,6 +237,7 @@ static bool isNetworkTerminalActive();
   #endif
   #if defined(QSPIFLASH)
     #include <CustomLFS_QSPIFlash.h>
+    #include <helpers/nrf52/QspiFlashWake.h>
     DataStore store(InternalFS, QSPIFlash, rtc_clock);
   #else
     #if defined(EXTRAFS)
@@ -251,11 +268,27 @@ static bool isNetworkTerminalActive();
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
+#if COMPANION_MESH_PSRAM_STORAGE
+static mesh::CompanionPsramMesh<MyMesh> companion_mesh_storage;
+MyMesh& companionMeshInstance() { return companion_mesh_storage.get(); }
+
+static bool initializeCompanionMeshStorage() {
+  const auto result = companion_mesh_storage.begin(
+      radio_driver, fast_rng, rtc_clock, tables, store, &ui_task);
+  using Result = mesh::CompanionPsramMesh<MyMesh>::Result;
+  if (result == Result::Ready) return true;
+  mesh::usbLoggingPort().println(result == Result::MissingPsram
+      ? "ERROR: Full Companion requires working PSRAM; check the board/image"
+      : "ERROR: insufficient PSRAM for Full Companion; startup stopped");
+  return false;
+}
+#else
 MyMesh the_mesh(radio_driver, fast_rng, rtc_clock, tables, store
    #ifdef DISPLAY_CLASS
       , &ui_task
    #endif
 );
+#endif
 
 #if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI) && defined(PIN_USER_BTN)
 namespace {
@@ -384,7 +417,7 @@ public:
                "; cleared %u oldest queued messages for OTA", (unsigned)drained);
     }
 
-    context.manager.announce();
+    // The mesh loop announces the fully enumerated source with a bounded burst.
     mesh::usbLoggingPort().println("Bluetooth mOTA source attached");
     return true;
   }
@@ -461,7 +494,17 @@ public:
   }
 
 private:
-  mesh::ota::SerialMotaSource _source;
+  class Source : public mesh::ota::SerialMotaSource {
+  public:
+    using mesh::ota::SerialMotaSource::SerialMotaSource;
+  protected:
+    uint16_t responseFrameCapacity() const override {
+      return bluetooth_interface.motaResponseCapacity();
+    }
+  };
+  static_assert(sizeof(Source) == sizeof(mesh::ota::SerialMotaSource),
+                "BLE source MTU policy must not allocate additional state");
+  Source _source;
   uint32_t _packets_sent_at_start;
   uint32_t _last_packets_sent;
 };
@@ -512,17 +555,9 @@ static void serviceCompanionRadioRecovery() {
 #ifdef ESP32_PLATFORM
 static int8_t applied_power_saving = -1;
 static int8_t attempted_power_saving = -1;
+static uint16_t applied_cpu_frequency = UINT16_MAX;
+static uint16_t attempted_cpu_frequency = UINT16_MAX;
 static unsigned long power_saving_retry_at = 0;
-
-static uint32_t companionNominalCpuMhz() {
-#ifdef ESP32_POST_BOOT_CPU_FREQ
-  return ESP32_POST_BOOT_CPU_FREQ;
-#elif defined(ESP32_CPU_FREQ)
-  return ESP32_CPU_FREQ;
-#else
-  return F_CPU / 1000000UL;
-#endif
-}
 
 #if COMPANION_BT_MODEM_SLEEP_AVAILABLE
 static void applyCompanionBluetoothSleep(bool enabled,
@@ -541,11 +576,17 @@ static void applyCompanionBluetoothSleep(bool enabled,
 #endif
 
 static bool applyCompanionPowerSaving(bool enabled) {
-  const uint32_t nominal_mhz = companionNominalCpuMhz();
-  const uint32_t max_mhz = enabled && nominal_mhz > 80 ? 80 : nominal_mhz;
-
+  const uint16_t selected = the_mesh.getNodePrefs()->cpu_freq_mhz;
+  board.setRadioProfileCpuClockPolicy(the_mesh.isDualRadioActive());
+  const uint32_t max_mhz = board.resolveCpuFrequencyMHz(selected, enabled);
+  if (!board.applyCpuFrequencyMHz(selected, enabled)) {
+    mesh::usbLoggingPort().printf("Device power saving failed: CPU clock policy rejected\r\n");
+    return false;
+  }
 #if COMPANION_IDF_PM_AVAILABLE
-  const uint32_t min_mhz = enabled && max_mhz > 40 ? 40 : max_mhz;
+  const uint32_t min_mhz = !selected && enabled && max_mhz > 40
+      && !mesh::esp32::cpuclock::profilePerformanceEnabled(the_mesh.isDualRadioActive())
+      ? 40 : max_mhz;
 #if (defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT) \
     || defined(ENABLE_USB_INTERFACE)
   // Automatic light sleep interrupts native USB CDC and USB companions.
@@ -554,35 +595,6 @@ static bool applyCompanionPowerSaving(bool enabled) {
 #else
   const bool automatic_light_sleep = enabled;
 #endif
-#if CONFIG_IDF_TARGET_ESP32C3
-  esp_pm_config_esp32c3_t pm_config;
-#elif CONFIG_IDF_TARGET_ESP32S3
-  esp_pm_config_esp32s3_t pm_config;
-#elif CONFIG_IDF_TARGET_ESP32
-  esp_pm_config_esp32_t pm_config;
-#else
-  esp_pm_config_t pm_config;
-#endif
-  pm_config.max_freq_mhz = max_mhz;
-  pm_config.min_freq_mhz = min_mhz;
-  pm_config.light_sleep_enable = automatic_light_sleep;
-
-  esp_err_t pm_result = esp_pm_configure(&pm_config);
-  if (pm_result != ESP_OK) {
-    mesh::usbLoggingPort().printf("Device power saving failed: %s\r\n",
-                                  esp_err_to_name(pm_result));
-    return false;
-  }
-#else
-  // Arduino's prebuilt ESP-IDF normally has CONFIG_PM_ENABLE disabled, in
-  // which case esp_pm_configure() is a stub returning ESP_ERR_NOT_SUPPORTED.
-  // Keep frequency throttling functional instead of retrying that stub.
-  if (!setCpuFrequencyMhz(max_mhz)) {
-    mesh::usbLoggingPort().printf(
-        "Device power saving failed: CPU %lu MHz is unsupported\r\n",
-        (unsigned long)max_mhz);
-    return false;
-  }
 #endif
 
 #if COMPANION_BT_MODEM_SLEEP_AVAILABLE
@@ -608,19 +620,23 @@ static bool applyCompanionPowerSaving(bool enabled) {
 }
 
 static void serviceCompanionPowerSaving(bool force = false) {
-  const int8_t requested = the_mesh.getNodePrefs()->powersaving_enabled ? 1 : 0;
-  if (!force && applied_power_saving == requested) return;
+  const int8_t requested = (the_mesh.getNodePrefs()->powersaving_enabled ? 1 : 0)
+      | (mesh::esp32::cpuclock::profilePerformanceEnabled(the_mesh.isDualRadioActive()) ? 2 : 0);
+  const uint16_t selected = the_mesh.getNodePrefs()->cpu_freq_mhz;
+  if (!force && applied_power_saving == requested && applied_cpu_frequency == selected) return;
 
   const unsigned long now = millis();
-  if (!force && attempted_power_saving == requested
+  if (!force && attempted_power_saving == requested && attempted_cpu_frequency == selected
       && power_saving_retry_at != 0
       && (int32_t)(now - power_saving_retry_at) < 0) {
     return;
   }
 
   attempted_power_saving = requested;
-  if (applyCompanionPowerSaving(requested != 0)) {
+  attempted_cpu_frequency = selected;
+  if (applyCompanionPowerSaving((requested & 1) != 0)) {
     applied_power_saving = requested;
+    applied_cpu_frequency = selected;
     power_saving_retry_at = 0;
   } else {
     power_saving_retry_at = now + 5000;
@@ -635,6 +651,38 @@ static void cancelCompanionEthernetSession(void*) {
   the_mesh.cancelSerialOperationsForRoute(&ethernet_interface);
   interface_manager.forgetReplyRouteForDisconnected(&ethernet_interface);
 }
+#if defined(OTA_RAK15002_SD_STORE) && defined(ETHERNET_USE_RAK13800)
+static bool prepareCompanionRakEthernet(void*) {
+  auto* context = mesh::ota::ota_context_if_active();
+  return !context || context->prepareRakSdForEthernet();
+}
+static bool canReleaseCompanionRakEthernet(void*) {
+  auto* context = mesh::ota::ota_context_if_active();
+  return !context || context->canReleaseRakSdForEthernet();
+}
+static bool releasedCompanionRakEthernet(void*) {
+  auto* context = mesh::ota::ota_context_if_active();
+  return !context || context->releasedRakSdEthernet();
+}
+
+bool handleRak4631PeripheralCommand(const char* command, char* reply, size_t capacity) {
+  const bool get = strcmp(command, "get eth") == 0;
+  const char* value = strncmp(command, "set eth ", 8) == 0 ? command + 8 : nullptr;
+  if (get || value) {
+    if (value && strcmp(value, "on") && strcmp(value, "off")) {
+      snprintf(reply, capacity, "Error: use set eth on|off");
+    } else if (value && !(strcmp(value, "on") == 0
+        ? ethernet_interface.tryEnable() : ethernet_interface.tryDisable())) {
+      snprintf(reply, capacity, "Error: %s", ethernet_interface.last_error());
+    } else {
+      snprintf(reply, capacity, "%s eth=%s; RAK13800 (this boot)", get ? ">" : "OK -",
+               ethernet_interface.status());
+    }
+    return true;
+  }
+  return false;
+}
+#endif
 #endif
 
 #if defined(ENABLE_USB_INTERFACE)
@@ -679,6 +727,14 @@ static bool usb_mota_disconnect_armed = false;
 // their ordinary stream.
 static Stream& usbTerminalOutput() {
   return mesh::usbTerminalPort();
+}
+
+static void syncUsbTerminalInputEditing() {
+#if COMPANION_FEATURE_TEXT_TERMINAL
+  the_mesh.setTerminalInputEditing(usbTerminalOutput(),
+      usb_terminal_line_len != 0 || usb_terminal_discard_line
+      || mesh::usbCompanionPort().available() > 0);
+#endif
 }
 
 static void clearUsbTerminalLine() {
@@ -988,6 +1044,9 @@ static bool usb_terminal_host_reset_completion_pending = false;
 static uint32_t usb_terminal_host_reset_retry_at = 0;
 
 static void resetUsbTerminalHostSession() {
+#if COMPANION_FEATURE_READER
+  mesh::cancelReaderCommand(&mesh::usbTerminalPort());
+#endif
   // Stop only work routed to the old USB host; a simultaneous BLE/WiFi
   // transaction is independent and must continue. Clear the route after
   // stopping its producer so no response can fall back to another transport.
@@ -1047,6 +1106,14 @@ static void serviceUsbTerminalHostSessionReset() {
   }
 #elif defined(ESP32) && defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 1 \
     && defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  // Consume hardware and watchdog boundaries before retrying their cleanup.
+  // This clears the old USB owner exactly once, including when its queues are
+  // already empty, before the same quarantined epoch is allowed to reopen.
+  const bool hardware_bus_reset = mesh::takeUsbTerminalSessionReset();
+  if (hardware_bus_reset) {
+    resetUsbTerminalHostSession();
+    return;
+  }
   if (usb_terminal_host_reset_completion_pending) {
     if ((int32_t)(millis() - usb_terminal_host_reset_retry_at) >= 0) {
       if (mesh::resetUsbCompanionTransport()) {
@@ -1064,12 +1131,11 @@ static void serviceUsbTerminalHostSessionReset() {
   (void)usb_hwcdc_host_presence.observeHost(
       host_present, millis(), USB_HOST_LOSS_EDGE_MS,
       USB_HOST_LOSS_GRACE_MS);
-  const bool hardware_bus_reset = mesh::takeUsbTerminalSessionReset();
   const bool physical_host_loss =
       usb_hwcdc_host_presence.takeHostLossEdge();
   const bool sustained_host_loss =
       usb_hwcdc_host_presence.takeSustainedHostLoss();
-  if (hardware_bus_reset || physical_host_loss || sustained_host_loss) {
+  if (physical_host_loss || sustained_host_loss) {
     resetUsbTerminalHostSession();
   }
 #endif
@@ -1102,6 +1168,56 @@ static void beginUsbDefaultSession() {
       usb_serial_interface.getCompletedFrameCount());
   serviceUsbAsciiSessionDefault();
 }
+
+#if defined(ESP32_PLATFORM) \
+    && (!defined(ARDUINO_USB_CDC_ON_BOOT) || !ARDUINO_USB_CDC_ON_BOOT) \
+    && !defined(SERIAL_RX) && !defined(SERIAL_TX)
+static bool usb_uart_quiet_parked = false;
+static bool usb_uart_quiet_restore_enabled = false;
+
+static bool transitionCompanionUartQuietSession(
+    void*, mesh::esp32::UartQuietSessionAction action) {
+  if (action == mesh::esp32::UartQuietSessionAction::Park) {
+    if (usb_uart_quiet_parked) return true;
+    if (!usb_protocol_initialized || usb_serial_interface.hasPendingIO()
+        || mesh::hasPendingUsbTerminalOutput()) return false;
+#if COMPANION_FEATURE_USB_MOTA_SOURCE
+    if (usb_mota_mode
+        || mesh::ota::OtaContext::serialFolderSource().hasPendingResponse()) return false;
+#endif
+    usb_uart_quiet_restore_enabled = usb_serial_interface.isEnabled();
+    // End only this host's ownership. The inbox and BLE/WiFi transactions
+    // remain live while the physical UART is unavailable.
+    cancelUsbSerialOperations();
+#if COMPANION_FEATURE_READER
+    mesh::cancelReaderCommand(&mesh::usbTerminalPort());
+#endif
+    the_mesh.resetUsbHostSessionInput();
+    if (the_mesh.isTerminalMode()) leaveUsbTerminalMode(false);
+    usb_binary_startup_probe.cancel();
+    usb_ascii_session_default.cancel();
+    mesh::discardUsbTerminalOutput();
+    clearUsbTerminalLine();
+    usb_terminal_discard_line = false;
+    usb_logging_terminal_mode = false;
+    usb_serial_interface.disable();
+    usb_uart_quiet_parked = true;
+    return true;
+  }
+
+  if (!usb_uart_quiet_parked) return true;
+  if (!Serial) return false; // The board must restore the driver first.
+  if (usb_uart_quiet_restore_enabled && interface_manager.isEnabled()) {
+    usb_serial_interface.enable();
+    // A new session must not inherit old parser bytes or reply destinations.
+    // Default ASCII is silent until input, so a framed client gets no banner.
+    beginUsbDefaultSession();
+  }
+  usb_uart_quiet_parked = false;
+  usb_uart_quiet_restore_enabled = false;
+  return true;
+}
+#endif
 
 static void serviceUsbLoggingOwnership(bool logging_enabled);
 
@@ -1229,7 +1345,10 @@ static void serviceUsbTerminal() {
         usb_logging_terminal_mode = false;
       }
 #endif
-      usbTerminalOutput().print("> ");
+#if COMPANION_FEATURE_READER
+      if (!mesh::readerCommandActive(&usbTerminalOutput()))
+#endif
+        usbTerminalOutput().print("> ");
       return; // service at most one command per mesh loop
     }
 
@@ -1460,7 +1579,7 @@ bool MyMesh::beginStreamTerminal(Stream& output) {
           hasObservableActiveUsbTerminalClient(), input_idle,
           usb_serial_interface.getCompletedFrameCount())) return false;
   if (ascii_selected) leaveUsbTerminalMode(false);
-  if (enterNetworkTerminalMode(output)) {
+  if (enterNetworkTerminalMode(output, true)) {
     serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled());
     return true;
   }
@@ -1481,7 +1600,7 @@ void MyMesh::endStreamTerminal(Stream& output) {
 }
 #elif defined(WITH_WEBCONFIG)
 bool MyMesh::beginStreamTerminal(Stream& output) {
-  return enterNetworkTerminalMode(output);
+  return enterNetworkTerminalMode(output, true);
 }
 
 void MyMesh::endStreamTerminal(Stream& output) {
@@ -1508,6 +1627,12 @@ void halt() {
   static bool companion_wifi_active = false;
   static bool companion_wifi_disable_in_progress = false;
   static bool companion_wifi_services_stopped = false;
+  static bool companion_wifi_background_stopped = false;
+  static bool companion_wifi_espnow_restore_pending = false;
+  static uint32_t companion_wifi_espnow_restore_at = 0;
+#ifdef WITH_WEBCONFIG
+  static bool companion_wifi_webconfig_start_pending = false;
+#endif
   static volatile bool companion_wifi_setup_requested = false;
   static volatile bool companion_wifi_setup_stop_requested = false;
   static bool companion_wifi_credential_reload_pending = false;
@@ -1560,7 +1685,9 @@ void halt() {
         "Companion transport: exclusive %s selected for this boot\r\n",
         companion_wifi_requested ? "WiFi" : "Bluetooth");
   }
+#endif
 
+#if defined(BLE_PIN_CODE)
   static void releaseCompanionBluetoothMemoryForWiFi() {
     const esp_err_t result = esp_bt_mem_release(ESP_BT_MODE_BTDM);
     if (result == ESP_OK) {
@@ -1634,6 +1761,10 @@ void halt() {
   }
 
   static void serviceCompanionWiFiNtp() {
+    if (mesh::wifi::networkPower().backgroundSuspended()) {
+      cancelCompanionWiFiNtp(false);
+      return;
+    }
     // Configured MQTT builds already perform a fresh startup NTP sync and a
     // daily refresh. The common Companion owner covers every non-MQTT or
     // runtime-unconfigured WiFi node without racing MQTT's SNTP proof.
@@ -1729,7 +1860,8 @@ void halt() {
             : getCompanionTransportMode();
     return active_mode == CompanionTransportMode::Bluetooth;
 #elif defined(BLE_PIN_CODE)
-    return true;
+    return mesh::wifi::activeCompanionMode()
+        != mesh::wifi::CompanionMode::WiFiOnly;
 #else
     return false;
 #endif
@@ -1790,10 +1922,18 @@ void halt() {
         && mode == mesh::wifi::kPowerSaveMax) {
       return CompanionWiFiPowerSaveResult::PrimaryEspNowConflict;
     }
-    if (mesh::wifi::effectivePowerSave(
+    const bool bluetooth_conflict = mesh::wifi::effectivePowerSave(
             mode, companionWiFiBluetoothActive(),
             mesh::wifi::kPrimaryEspNowRadio)
-        != mode) {
+        != mode;
+    const bool next_boot_wifi_only =
+#if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
+        false;
+#else
+        mesh::wifi::configuredCompanionMode()
+            == mesh::wifi::CompanionMode::WiFiOnly;
+#endif
+    if (bluetooth_conflict && !next_boot_wifi_only) {
       return CompanionWiFiPowerSaveResult::BluetoothConflict;
     }
     Preferences nvs;
@@ -1801,9 +1941,16 @@ void halt() {
       return CompanionWiFiPowerSaveResult::StorageError;
     }
     const bool saved =
-        nvs.putUChar("powersave", mode) == sizeof(uint8_t);
+        nvs.putUChar("powersave", mode) == sizeof(uint8_t)
+        && nvs.getUChar("powersave", 255) == mode;
     nvs.end();
     if (!saved) return CompanionWiFiPowerSaveResult::StorageError;
+
+    if (bluetooth_conflict) {
+      // Persist the requested next-boot value without feeding WIFI_PS_NONE to
+      // the SDK while the current boot still owns a Bluetooth controller.
+      return CompanionWiFiPowerSaveResult::SavedForNextBoot;
+    }
 
     companion_wifi_power_save = mode;
     companion_wifi_power_save_loaded = true;
@@ -1813,6 +1960,71 @@ void halt() {
     return applyCompanionWiFiPowerSave()
         ? CompanionWiFiPowerSaveResult::Applied
         : CompanionWiFiPowerSaveResult::SavedForNextConnection;
+  }
+
+  bool handleCompanionWiFiCompatibilityCommand(const char* command, char* reply,
+                                              size_t reply_size) {
+    if (!command || !reply || !reply_size) return false;
+    if (strcmp(command, "get wifi.protocol") == 0) {
+      snprintf(reply, reply_size, "%s (boot=%s%s)",
+               mesh::wifi::stationProtocolName(mesh::wifi::configuredStationProtocol()),
+               mesh::wifi::stationProtocolName(mesh::wifi::activeStationProtocol()),
+               mesh::wifi::stationProtocolRestartPending() ? "; reboot required" : "");
+      return true;
+    }
+    if (strncmp(command, "set wifi.protocol", 17) == 0
+        && (command[17] == 0 || command[17] == ' ' || command[17] == '\t')) {
+      const char* value = command + 17;
+      while (*value == ' ' || *value == '\t') ++value;
+      mesh::wifi::StationProtocol selected;
+      if (!mesh::wifi::parseStationProtocol(value, &selected)) {
+        snprintf(reply, reply_size, "Error: use set wifi.protocol bg|bgn");
+      } else {
+        const auto result = mesh::wifi::saveStationProtocol(selected);
+        if (result == mesh::wifi::CompatibilitySaveResult::RadioConflict) {
+          snprintf(reply, reply_size, "Error: bg conflicts with ESP-NOW/LR; use bgn");
+        } else if (result != mesh::wifi::CompatibilitySaveResult::Saved) {
+          snprintf(reply, reply_size, "Error: WiFi protocol could not be saved");
+        } else {
+          snprintf(reply, reply_size, "OK - wifi.protocol %s saved; reboot required", value);
+        }
+      }
+      return true;
+    }
+#if !defined(COMPANION_EXCLUSIVE_WIFI_BLE)
+    if (strcmp(command, "get wifi.mode") == 0) {
+      snprintf(reply, reply_size, "%s (boot=%s%s)",
+               mesh::wifi::companionModeName(mesh::wifi::configuredCompanionMode()),
+               mesh::wifi::companionModeName(mesh::wifi::activeCompanionMode()),
+               mesh::wifi::companionModeRestartPending() ? "; reboot required" : "");
+      return true;
+    }
+    if (strncmp(command, "set wifi.mode", 13) == 0
+        && (command[13] == 0 || command[13] == ' ' || command[13] == '\t')) {
+      const char* value = command + 13;
+      while (*value == ' ' || *value == '\t') ++value;
+      mesh::wifi::CompanionMode selected;
+      if (!mesh::wifi::parseCompanionMode(value, &selected)) {
+        snprintf(reply, reply_size, "Error: use set wifi.mode normal|wifi-only");
+      } else if (selected == mesh::wifi::CompanionMode::WiFiOnly
+                 && !the_mesh.getNodePrefs()->wifi_enabled) {
+        snprintf(reply, reply_size, "Error: set wifi.enabled 1 before selecting wifi-only");
+      } else if (mesh::wifi::saveCompanionMode(selected)
+                 != mesh::wifi::CompatibilitySaveResult::Saved) {
+        snprintf(reply, reply_size, "Error: WiFi mode could not be saved");
+      } else {
+        snprintf(reply, reply_size, "OK - wifi.mode %s saved; reboot required%s", value,
+                 selected == mesh::wifi::CompanionMode::WiFiOnly
+                     ? "; Bluetooth will not start" : "");
+      }
+      return true;
+    }
+#endif
+    if (strcmp(command, "get wifi.status") == 0) {
+      formatCompanionWiFiStatus(reply, reply_size);
+      return true;
+    }
+    return false;
   }
 
   static void loadCompanionWiFiCredentials() {
@@ -1832,6 +2044,7 @@ void halt() {
 
   void scheduleCompanionWiFiCredentialReload() {
     loadCompanionWiFiCredentials();
+    mesh::wifi::networkPower().requestProbe();
     companion_wifi_credential_reload_pending = true;
     companion_wifi_credential_reload_at = millis() + 1500UL;
     if (companion_wifi_credential_reload_at == 0) {
@@ -1875,29 +2088,119 @@ void halt() {
         esp_wifi_sta_get_ap_info(&access_point) == ESP_OK;
     snprintf(reply, reply_size,
              "> state=%s, frames=%lu, display=%u/%02X, requested=%u, services=%u, "
-             "wl=%d, idf=%u, IP=%s",
+             "wl=%d, idf=%u, IP=%s, tcp=%u",
              names[state], (unsigned long)companion_wifi_display_frames,
              companion_display_available ? 1U : 0U,
              (unsigned int)companion_display_begin_status,
              companion_wifi_requested ? 1U : 0U,
              companion_wifi_active ? 1U : 0U, (int)WiFi.status(),
              idf_associated ? 1U : 0U,
-             WiFi.localIP().toString().c_str());
+             WiFi.localIP().toString().c_str(),
+             wifi_interface.getStatus().listening ? 1U : 0U);
   }
 
-#ifdef WITH_WEBCONFIG
-  void formatCompanionWiFiStatus(char* reply, size_t reply_size) {
-    const mesh::wifi::CompanionWiFiRuntimeState runtime = {
-        companion_wifi_requested,
-        companion_wifi_active,
-        companion_wifi_credential_reload_pending,
-    };
-    WebConfigServer::formatWiFiStatus(reply, reply_size, &runtime);
+  void formatCompanionWiFiTcpStatus(char* reply, size_t reply_size) {
+    if (reply == nullptr || reply_size == 0) return;
+    const auto status = wifi_interface.getStatus();
+    // Fit even full-width counters in the 160-byte Companion CLI reply. No
+    // self-probe connection: it would displace the user's single TCP session.
+    snprintf(reply, reply_size,
+             "> tcp=%u %s reg=%u ip=%u client=%u fail=%lu err=%d retry=%lus "
+             "acc=%lu rx=%lu/%02X tx=%lu/%02X drop=%s",
+             (unsigned int)(status.port ? status.port : TCP_PORT),
+             SerialWifiInterface::stateName(status.state),
+             companion_wifi_interface_registered ? 1U : 0U,
+             status.addressReady ? 1U : 0U, status.clientConnected ? 1U : 0U,
+             (unsigned long)status.beginFailures, status.lastErrno,
+             (unsigned long)((status.retryInMs + 999U) / 1000U),
+             (unsigned long)status.acceptedClients,
+             (unsigned long)status.validFrames, (unsigned int)status.lastOpcode,
+             (unsigned long)status.txFrames, (unsigned int)status.lastTxOpcode,
+             SerialWifiInterface::disconnectReasonName(status.lastDisconnectReason));
   }
+
+  void formatCompanionWiFiStatus(char* reply, size_t reply_size) {
+    if (!reply || !reply_size) return;
+    char ssid[33] = {}, ip[16] = {}, phy[8] = "n/a";
+    const char* state = "unconfigured";
+    const wl_status_t status = WiFi.status();
+    bool setup_ap = false, has_rssi = false;
+    int rssi = 0;
+#ifdef WITH_WEBCONFIG
+    setup_ap = WebConfigServer::getSetupInfo(ssid, sizeof(ssid), ip, sizeof(ip));
 #endif
+    if (!setup_ap && (WiFi.getMode() & WIFI_AP)
+        && static_cast<uint32_t>(WiFi.softAPIP()) != 0) {
+      setup_ap = true;
+      snprintf(ssid, sizeof(ssid), "%s", WiFi.softAPSSID().c_str());
+      snprintf(ip, sizeof(ip), "%s", WiFi.softAPIP().toString().c_str());
+    }
+    if (setup_ap) {
+      state = "setup-ap";
+    } else {
+      snprintf(ssid, sizeof(ssid), "%s", configured_wifi_ssid);
+      if (mesh::wifi::networkPower().backgroundSuspended()
+          && !mesh::wifi::networkPower().foregroundActive()) {
+        state = "suspended(30m)";
+      } else if (status == WL_CONNECTED) {
+        state = "connected";
+        snprintf(ssid, sizeof(ssid), "%s", WiFi.SSID().c_str());
+        snprintf(ip, sizeof(ip), "%s", WiFi.localIP().toString().c_str());
+        has_rssi = true;
+        rssi = WiFi.RSSI();
+      } else if (!companion_wifi_has_credentials) {
+        state = "unconfigured";
+      } else if (!companion_wifi_requested) {
+        state = "off";
+      } else if (!companion_wifi_active) {
+        state = "inactive";
+      } else if (companion_wifi_credential_reload_pending) {
+        state = "reconnect-pending";
+      } else {
+        switch (status) {
+          case WL_NO_SSID_AVAIL: state = "ssid-not-found"; break;
+          case WL_CONNECT_FAILED: state = "connect-failed"; break;
+          case WL_CONNECTION_LOST: state = "link-lost"; break;
+          default: state = "connecting/retrying"; break;
+        }
+      }
+    }
+    uint8_t protocols = 0;
+    wifi_ps_type_t power_save = WIFI_PS_MIN_MODEM;
+    if (esp_wifi_get_protocol(WIFI_IF_STA, &protocols) == ESP_OK) {
+      snprintf(phy, sizeof(phy), "0x%02x", protocols);
+    }
+    const bool ps_ready = esp_wifi_get_ps(&power_save) == ESP_OK;
+    const char* mode_saved;
+    const char* mode_boot;
+#if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
+    mode_saved = getCompanionTransportMode() == CompanionTransportMode::WiFi ? "wifi" : "ble";
+    mode_boot = companionTransportWiFiActiveAtBoot() ? "wifi" : "ble";
+#else
+    mode_saved = mesh::wifi::companionModeName(mesh::wifi::configuredCompanionMode());
+    mode_boot = mesh::wifi::companionModeName(mesh::wifi::activeCompanionMode());
+#endif
+    bool ota_listening = false, ota_attached = false;
+    uint16_t ota_port = 0;
+#if defined(ESP32_PLATFORM) && defined(ENABLE_OTA)
+    ota_listening = mesh::ota::WiFiOtaSeeder::isListening();
+    ota_attached = mesh::ota::WiFiOtaSeeder::isAttached();
+    ota_port = mesh::ota::WiFiOtaSeeder::port();
+#endif
+    const mesh::wifi::CompanionWiFiStatusSnapshot snapshot = {
+        state, ssid, ip, has_rssi, rssi,
+        mesh::wifi::stationProtocolName(mesh::wifi::configuredStationProtocol()),
+        mesh::wifi::stationProtocolName(mesh::wifi::activeStationProtocol()), phy,
+        mode_saved, mode_boot,
+        !ps_ready ? "n/a" : power_save == WIFI_PS_NONE ? "none"
+            : power_save == WIFI_PS_MAX_MODEM ? "max" : "min",
+        companionWiFiBluetoothActive(), ota_listening, ota_attached, ota_port};
+    mesh::wifi::formatCompanionWiFiStatusSnapshot(reply, reply_size, snapshot);
+  }
 
   void requestCompanionWiFiSetup() {
     if (mesh::wireless::control().blocked(mesh::wireless::WiFi)) return;
+    mesh::wifi::networkPower().requestProbe();
     companion_wifi_setup_stop_requested = false;
     companion_wifi_setup_requested = true;
   }
@@ -1921,6 +2224,7 @@ void halt() {
       return false;
     }
     companion_wifi_requested = enabled;
+    if (enabled) mesh::wifi::networkPower().requestProbe();
     if (!companion_wifi_requested && companion_wifi_active) {
       companion_wifi_disable_in_progress = true;
     }
@@ -2073,6 +2377,7 @@ void halt() {
    the same role CLI here as its USB terminal. Other OTA-enabled Companion
    builds expose local maintenance commands and `ota ...` commands. */
 #if defined(ESP32) && defined(WIFI_SSID) && defined(ENABLE_OTA)
+  #include <lwip/sockets.h>
   #include <helpers/ota/OtaCli.h>          // mesh::ota::handle_ota_command(line, reply, board)
   #include <helpers/esp32/WiFiOtaSeeder.h>
   #ifndef OTA_CONSOLE_TCP_PORT
@@ -2083,6 +2388,17 @@ void halt() {
   static char    ota_console_line[MAX_TRANS_UNIT * 2 + 32];
   static size_t ota_console_len = 0;
   static bool ota_console_discard_line = false;
+#if COMPANION_FEATURE_NETWORK_TERMINAL && COMPANION_FEATURE_READER
+  static size_t ota_console_try_reader_write(Stream& output,
+                                             const uint8_t* data, size_t size) {
+    // WiFiClient::write retries socket readiness with one-second waits.
+    // A paused chapter reader must instead leave its cursor for the next loop.
+    const int socket = static_cast<WiFiClient&>(output).fd();
+    if (socket < 0) return 0;
+    const int written = ::send(socket, data, size, MSG_DONTWAIT);
+    return written > 0 ? static_cast<size_t>(written) : 0;
+  }
+#endif
 #if COMPANION_FEATURE_NETWORK_TERMINAL && defined(ENABLE_USB_INTERFACE)
   static mesh::UsbTcpTerminalHandoff ota_console_usb_handoff;
 #endif
@@ -2206,8 +2522,16 @@ void halt() {
           ota_console_discard_line = false;
           return;
         }
+#if COMPANION_FEATURE_READER
+        the_mesh.handleTerminalCommand(ota_console_line, true,
+                                       ota_console_try_reader_write);
+#else
         the_mesh.handleTerminalCommand(ota_console_line);
-        ota_console_client.print("> ");
+#endif
+#if COMPANION_FEATURE_READER
+        if (!mesh::readerCommandActive(&ota_console_client))
+#endif
+          ota_console_client.print("> ");
 #else
         char reply[160]; reply[0] = 0;
         if (!handleCompanionWirelessCommand(ota_console_line, reply, sizeof(reply), CompanionWirelessSource::Network)
@@ -2230,6 +2554,60 @@ void halt() {
 #endif
 
 #if defined(ESP32) && defined(WIFI_SSID)
+  static bool companionWiFiBackgroundSuspended() {
+    // MQTT publishes this flag only after its own TLS and SNTP work is quiet.
+    // A foreground OTA command can acquire the radio before its next pass.
+    return mesh::wifi::networkPower().backgroundSuspended()
+        && !mesh::wifi::networkPower().foregroundActive()
+        && !board.isOTAUpdateRunning();
+  }
+
+  static bool companionWiFiAutomaticRecoveryAllowed() {
+    // MQTT owns one combined outage/cooldown clock. Raising an automatic AP
+    // during that grace period would create a foreground owner indefinitely.
+    return !mesh::wifi::networkPower().managed();
+  }
+
+#ifdef WITH_WEBCONFIG
+  static void startCompanionWiFiAutoWebConfig() {
+    companion_wifi_webconfig_start_pending = false;
+    if (!WebConfigServer::loadEnabled(true)) return;
+    if (companion_wifi_has_credentials && WiFi.status() != WL_CONNECTED) {
+      // The Companion owns the initial saved-SSID attempt. Do not ask the
+      // portal to start its separate fifteen-second AP fallback at boot.
+      companion_wifi_webconfig_start_pending = true;
+      return;
+    }
+    char web_reply[160];
+    the_mesh.startWebConfig(!companion_wifi_has_credentials, web_reply);
+    WIFI_DEBUG_PRINTLN("%s", web_reply);
+  }
+
+  static void serviceCompanionWiFiAutoWebConfig() {
+    if (!companion_wifi_webconfig_start_pending || !companion_wifi_requested
+        || !companion_wifi_active || companionWiFiBackgroundSuspended()) return;
+    if (!WebConfigServer::loadEnabled(true)) {
+      companion_wifi_webconfig_start_pending = false;
+      return;
+    }
+    if (WiFi.status() != WL_CONNECTED
+        || the_mesh.isWebConfigActiveOrStopping()) return;
+    startCompanionWiFiAutoWebConfig();
+  }
+#endif
+
+  static void serviceCompanionWiFiNetworkPowerHold() {
+    bool active = wifi_interface.isConnected()
+        || companion_wifi_credential_reload_pending
+        || companion_wifi_setup_requested
+        || board.isOTAUpdateRunning();
+#ifdef ENABLE_OTA
+    active = active || ota_console_client.connected();
+#endif
+    mesh::wifi::networkPower().setHold(
+        mesh::wifi::NetworkPowerHold::CompanionClient, active);
+  }
+
   static void resetCompanionWiFiRecoveryState() {
     wifi_reconnect_tracker = WiFiReconnectPolicy::Tracker();
     wifi_setup_attempted = false;
@@ -2242,6 +2620,7 @@ void halt() {
         || static_cast<int32_t>(millis() - companion_wifi_credential_reload_at) < 0) {
       return;
     }
+    if (companionWiFiBackgroundSuspended()) return;
 #ifdef WITH_WEBCONFIG
     if (the_mesh.isWebConfigActiveOrStopping()) return;
 #endif
@@ -2250,6 +2629,7 @@ void halt() {
 
     companion_wifi_credential_reload_pending = false;
     companion_wifi_credential_reload_at = 0;
+    companion_wifi_espnow_restore_pending = false;
     loadCompanionWiFiCredentials();
     resetCompanionWiFiRecoveryState();
     if (!companion_wifi_requested || !companion_wifi_active
@@ -2270,9 +2650,11 @@ void halt() {
   static void startCompanionWiFi() {
     if (mesh::wireless::control().blocked(mesh::wireless::WiFi)) return;
     if (companion_wifi_active) return;
+    if (companionWiFiBackgroundSuspended()) return;
     if (!mesh::wifi::stationMutationAllowed()) return;
 
     board.setInhibitSleep(true);
+    companion_wifi_espnow_restore_pending = false;
     mesh::wifi::setStationAutoReconnect(true);
     resetCompanionWiFiRecoveryState();
 
@@ -2290,21 +2672,20 @@ void halt() {
     }
 #endif
 #ifdef WITH_WEBCONFIG
-    if (WebConfigServer::loadEnabled(true)) {
-      char web_reply[160];
-      the_mesh.startWebConfig(!companion_wifi_has_credentials, web_reply);
-      WIFI_DEBUG_PRINTLN("%s", web_reply);
-    }
+    startCompanionWiFiAutoWebConfig();
 #endif
 
     applyCompanionWiFiPowerSave();
-    wifi_interface.begin(TCP_PORT);
-    wifi_interface.enable();
+    if (companion_wifi_interface_registered) {
+      wifi_interface.begin(TCP_PORT);
+      wifi_interface.enable();
+    }
 #ifdef ENABLE_OTA
     ota_console_start();
 #endif
     companion_wifi_active = true;
     companion_wifi_services_stopped = false;
+    companion_wifi_background_stopped = false;
     WIFI_DEBUG_PRINTLN("WiFi enabled by BOOT/GPIO 0 control");
   }
 
@@ -2329,17 +2710,82 @@ void halt() {
 
   static void stopCompanionInfrastructureWiFi() {
     WiFi.setAutoReconnect(false);
-#if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
-    // ESP-NOW is the mesh radio on this target. Drop the station/AP services
-    // without stopping the driver, then restore its fixed LR mesh channel.
-    WiFi.disconnect(false, false);
-    WiFi.mode(WIFI_STA);
-    mesh::wifi::applyProtocolMask(WIFI_IF_STA);
-    mesh::wifi::restoreEspNowChannel();
-#else
-    WiFi.disconnect(true, false);
-    WiFi.mode(WIFI_OFF);
+    if (mesh::wifi::espNowChannelConstrained()) {
+      // Primary ESP-NOW and a live optional bridge both share this driver.
+      // Drop only station association and keep their fixed mesh channel.
+      WiFi.disconnect(false, false);
+      WiFi.mode(WIFI_STA);
+      mesh::wifi::applyProtocolMask(WIFI_IF_STA);
+      companion_wifi_espnow_restore_pending =
+          mesh::wifi::restoreEspNowChannel() != ESP_OK;
+      companion_wifi_espnow_restore_at = millis() + 1000UL;
+    } else {
+      companion_wifi_espnow_restore_pending = false;
+      WiFi.disconnect(true, false);
+      WiFi.mode(WIFI_OFF);
+    }
+  }
+
+  static void serviceCompanionEspNowChannelRestore() {
+    if (!companion_wifi_espnow_restore_pending) return;
+    if (!mesh::wifi::espNowChannelConstrained()) {
+      companion_wifi_espnow_restore_pending = false;
+      return;
+    }
+    if (board.isOTAUpdateRunning()
+        || mesh::wifi::networkPower().foregroundActive()
+        || !mesh::wifi::stationMutationAllowed()) return;
+    const uint32_t now = millis();
+    if (static_cast<int32_t>(now - companion_wifi_espnow_restore_at) < 0) return;
+    // esp_wifi_set_channel may fail until an asynchronous disconnect/scan
+    // completes. Retry the channel only; repeated disconnects would prevent
+    // the shared ESP-NOW receiver from recovering during a long cooldown.
+    companion_wifi_espnow_restore_pending =
+        mesh::wifi::restoreEspNowChannel() != ESP_OK;
+    companion_wifi_espnow_restore_at = now + 1000UL;
+  }
+
+  static void serviceCompanionWiFiBackgroundPower() {
+    serviceCompanionEspNowChannelRestore();
+    if (!companion_wifi_active || !companion_wifi_requested) return;
+    if (companionWiFiBackgroundSuspended()) {
+      if (companion_wifi_background_stopped) return;
+      // Settings and MQTT's scheduling task stay enabled. These idle socket
+      // listeners and the common NTP request own no useful foreground work.
+      cancelCompanionWiFiNtp(false);
+      wifi_interface.end();
+#ifdef ENABLE_OTA
+      ota_console_stop();
 #endif
+      stopCompanionInfrastructureWiFi();
+      board.setInhibitSleep(mesh::wifi::espNowChannelConstrained());
+      companion_wifi_background_stopped = true;
+      WIFI_DEBUG_PRINTLN("Network unavailable; WiFi suspended until the next recovery probe");
+      return;
+    }
+    if (!companion_wifi_background_stopped) return;
+    if (!mesh::wifi::stationMutationAllowed()) return;
+
+    board.setInhibitSleep(true);
+    companion_wifi_espnow_restore_pending = false;
+    resetCompanionWiFiRecoveryState();
+    if (companion_wifi_has_credentials) {
+      WiFi.mode(WIFI_STA);
+      mesh::wifi::applyProtocolMask(WIFI_IF_STA);
+      mesh::wifi::setStationAutoReconnect(true);
+      wifi_reconnect_tracker.noteDisconnected(millis());
+      mesh::wifi::beginStation(configured_wifi_ssid, configured_wifi_password);
+    }
+    applyCompanionWiFiPowerSave();
+    if (companion_wifi_interface_registered) {
+      wifi_interface.begin(TCP_PORT);
+      wifi_interface.enable();
+    }
+#ifdef ENABLE_OTA
+    ota_console_start();
+#endif
+    companion_wifi_background_stopped = false;
+    WIFI_DEBUG_PRINTLN("WiFi resumed for a bounded network recovery probe");
   }
 
   static bool finishStoppingCompanionWiFi() {
@@ -2368,6 +2814,10 @@ void halt() {
     board.setInhibitSleep(false);
     resetCompanionWiFiRecoveryState();
     companion_wifi_active = false;
+    companion_wifi_background_stopped = false;
+#ifdef WITH_WEBCONFIG
+    companion_wifi_webconfig_start_pending = false;
+#endif
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
     WIFI_DEBUG_PRINTLN(
         "Companion WiFi services disabled; ESP-NOW mesh radio remains active");
@@ -2388,6 +2838,10 @@ void halt() {
     if (companion_wifi_requested && !companion_wifi_active) {
       startCompanionWiFi();
     }
+    serviceCompanionWiFiBackgroundPower();
+#ifdef WITH_WEBCONFIG
+    serviceCompanionWiFiAutoWebConfig();
+#endif
   }
 #endif
 
@@ -2491,9 +2945,36 @@ void halt() {
     if (companion_bluetooth_start_at == 0) companion_bluetooth_start_at = 1;
   }
 
+  static void serviceCompanionUsbBluetoothPriority() {
+#if defined(T1000_E) && defined(USE_TINYUSB)
+    static mesh::UsbBluetoothPriority priority;
+    const bool inhibited = priority.update(board.isUsbHostConnected(), millis());
+    if (inhibited && !interface_manager.isBluetoothInhibited()) {
+      // Abandon only this transport's work; USB must not inherit a partially
+      // streamed Bluetooth reply when the link is disconnected.
+      the_mesh.cancelSerialResponseStream(&bluetooth_interface);
+      the_mesh.cancelSerialOperationsForRoute(&bluetooth_interface);
+    }
+    interface_manager.setBluetoothInhibited(inhibited);
+    if (inhibited) {
+      interface_manager.forgetReplyRouteForDisconnected(&bluetooth_interface);
+    }
+#endif
+  }
+
   static void startCompanionBluetooth() {
     if (companion_bluetooth_initialized) return;
     companion_bluetooth_start_at = 0;
+#if defined(ESP32) && defined(WIFI_SSID) \
+    && !defined(COMPANION_EXCLUSIVE_WIFI_BLE)
+    if (mesh::wifi::activeCompanionMode()
+        == mesh::wifi::CompanionMode::WiFiOnly) {
+      snprintf(companion_bluetooth_start_failure,
+               sizeof(companion_bluetooth_start_failure),
+               "wifi-only boot; set wifi.mode normal and reboot to enable Bluetooth");
+      return;
+    }
+#endif
 
     mesh::usbLoggingPort().println("Companion: starting Bluetooth");
     CompanionNodePrefs* prefs = the_mesh.getNodePrefs();
@@ -2576,8 +3057,9 @@ void halt() {
 #endif
     companion_bluetooth_initialized = true;
     companion_bluetooth_start_failure[0] = 0;
+    serviceCompanionUsbBluetoothPriority();
     if (interface_manager.isEnabled() && the_mesh.isBluetoothEnabledPreference()) {
-      bluetooth_interface.enable();
+      interface_manager.enableBluetooth();
     }
   }
 
@@ -2803,7 +3285,12 @@ bool handleCompanionBluetoothCommand(const char* command, char* reply,
   if (action == CompanionBluetoothCommand::Get) {
     snprintf(reply, reply_size, "bluetooth %s%s",
              interface_manager.isBluetoothEnabled() ? "on" : "off",
-             companion_bluetooth_off_at ? " (off pending)" : "");
+             companion_bluetooth_off_at ? " (off pending)"
+#if defined(ESP32_PLATFORM)
+                 : bluetooth_interface.isPowerTransitionPending() ? " (change pending)"
+#endif
+                 : interface_manager.isBluetoothInhibited()
+                     ? " (USB data connected)" : "");
     return true;
   }
   if (action == CompanionBluetoothCommand::On) {
@@ -2824,7 +3311,16 @@ bool handleCompanionBluetoothCommand(const char* command, char* reply,
     }
     interface_manager.setBluetoothAutoEnable(true);
     interface_manager.enableBluetooth();
-    if (interface_manager.isBluetoothEnabled()) {
+    if (interface_manager.isBluetoothInhibited()) {
+      companion_bluetooth_off_at = 0;
+      snprintf(reply, reply_size,
+               "OK - Bluetooth on (saved); paused while USB data is connected");
+#if defined(ESP32_PLATFORM)
+    } else if (bluetooth_interface.isPowerTransitionPending()) {
+      companion_bluetooth_off_at = 0;
+      snprintf(reply, reply_size, "OK - Bluetooth on (saved); start pending");
+#endif
+    } else if (interface_manager.isBluetoothEnabled()) {
       companion_bluetooth_off_at = 0;
       snprintf(reply, reply_size, "OK - Bluetooth on (saved)");
     } else if (the_mesh.setBluetoothEnabledPreference(previous_preference)) {
@@ -2843,6 +3339,7 @@ bool handleCompanionBluetoothCommand(const char* command, char* reply,
     }
     companion_bluetooth_off_at = 0;
     interface_manager.setBluetoothAutoEnable(false);
+    disableCompanionBluetoothForCli();
     snprintf(reply, reply_size, "OK - Bluetooth already off (saved)");
     return true;
   }
@@ -2961,6 +3458,10 @@ public:
       companion_bluetooth_off_at = 0;
       if (on) interface_manager.enableBluetooth();
       else disableCompanionBluetoothForCli();
+      if (on && interface_manager.isBluetoothInhibited()) return Result::Done;
+#if defined(ESP32_PLATFORM)
+      if (bluetooth_interface.isPowerTransitionPending()) return Result::Pending;
+#endif
       return interface_manager.isBluetoothEnabled() == on ? Result::Done : Result::Failed;
     }
 #endif
@@ -3014,27 +3515,31 @@ static bool companionNativeUsbLightSleepReady() {
   // Full compiles every transport, but a compiled driver is not an active
   // receiver. Preserve live services and pending replies while permitting
   // the same short sleep slice when those services have been turned off.
-  if (companion_wireless.enabled() != 0 || interface_manager.hasPendingIO()
+  uint8_t enabled_services = companion_wireless.enabled();
+#if defined(ESP32) && defined(WIFI_SSID)
+  // The user's saved WiFi preference and an idle WebConfig listener remain
+  // enabled during automatic suspension. Only a confirmed physical power-off
+  // releases their sleep blocker; foreground work and shared ESP-NOW retain it.
+  if (companion_wifi_background_stopped
+      && mesh::wifi::networkPower().backgroundSuspended()
+      && !mesh::wifi::networkPower().foregroundActive()
+      && !mesh::wifi::espNowChannelConstrained()) {
+    wifi_mode_t parked_mode = WIFI_MODE_NULL;
+    const esp_err_t parked_result = esp_wifi_get_mode(&parked_mode);
+    if ((parked_result == ESP_OK && parked_mode == WIFI_MODE_NULL)
+        || parked_result == ESP_ERR_WIFI_NOT_INIT
+        || parked_result == ESP_ERR_WIFI_NOT_STARTED) {
+      enabled_services &= static_cast<uint8_t>(~mesh::wireless::WiFi);
+    }
+  }
+#endif
+#if defined(BLE_PIN_CODE)
+  if (bluetooth_interface.isPowerTransitionPending()) return false;
+#endif
+  if (enabled_services != 0 || interface_manager.hasPendingIO()
       || board.isOTAUpdateRunning() || board.isRadioTestActive()
       || sensors.gpsUsesSerialUart(1)) return false;
-#if defined(BLE_PIN_CODE) && !CONFIG_IDF_TARGET_ESP32C6
-  // Stopped advertising is not a stopped controller. Manual light sleep
-  // requires the RF driver to be disabled, including during BLE teardown.
-  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED)
-    return false;
-#if defined(CONFIG_BLUEDROID_ENABLED) && !defined(MESH_USE_NIMBLE_ARDUINO)
-  if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED) return false;
-#endif
-#endif
-#if defined(ESP32) && defined(WIFI_SSID)
-  // Catch an unfinished teardown even if the logical WiFi owner is off.
-  wifi_mode_t mode = WIFI_MODE_NULL;
-  const esp_err_t result = esp_wifi_get_mode(&mode);
-  if (result == ESP_OK) return mode == WIFI_MODE_NULL;
-  return result == ESP_ERR_WIFI_NOT_INIT || result == ESP_ERR_WIFI_NOT_STARTED;
-#else
-  return true;
-#endif
+  return mesh::esp32::manualLightSleepReady();
 }
 #endif
 
@@ -3090,7 +3595,30 @@ void setup() {
   mesh::serialLogBegin();
 #endif
   mesh::beginUsbLoggingPort();
+#if defined(ESP32_PLATFORM)
+  board.setCompanionCpuClockPolicy(true);
+#endif
   board.begin();
+#if COMPANION_MESH_PSRAM_STORAGE
+  if (!initializeCompanionMeshStorage()) {
+    // No partial mesh, radio, display or network service may start without
+    // the required external storage. Keep USB available to report the error.
+    for (;;) delay(1000);
+  }
+#endif
+
+#if defined(ESP32) && defined(WIFI_SSID)
+  // MyMesh::begin can already read the power-save policy for MQTT/WebConfig.
+  // Freeze compatibility before that first read and before either RF stack.
+  mesh::wifi::loadStationProtocolForBoot();
+  mesh::wifi::loadCompanionModeForBoot();
+#if defined(BLE_PIN_CODE) && !defined(COMPANION_EXCLUSIVE_WIFI_BLE)
+  if (mesh::wifi::activeCompanionMode()
+      == mesh::wifi::CompanionMode::WiFiOnly) {
+    releaseCompanionBluetoothMemoryForWiFi();
+  }
+#endif
+#endif
 
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.begin();
@@ -3138,6 +3666,20 @@ void setup() {
 #endif
 
 
+  FILESYSTEM* regulator_prefs_fs = store.getPrimaryFS();
+#if defined(NRF52_PLATFORM)
+  if (!mesh::storage::internalPrimaryFilesystemReady(primary_fs_boot)
+      || store.isVolatilePrimaryFS()) regulator_prefs_fs = nullptr;
+#endif
+#if !defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  mesh::leds::beginSettings(board, regulator_prefs_fs);
+#endif
+  if (!mesh::power::beginRegulatorSettings(board, radio_driver, regulator_prefs_fs)) {
+    MESH_DEBUG_PRINTLN("Regulator selection could not be applied");
+  }
+  mesh::RadioProfileCLI::configureBootTuning(regulator_prefs_fs, radio_driver);
+
+
 #ifdef DISPLAY_CLASS
   // Load only the display policy before radio and secondary-storage startup.
   FILESYSTEM* display_prefs_fs = store.getPrimaryFS();
@@ -3145,6 +3687,9 @@ void setup() {
   // Never open files on a primary store whose mount and RAM fallback failed.
   if (!mesh::storage::internalPrimaryFilesystemReady(primary_fs_boot)
       && !store.isVolatilePrimaryFS()) display_prefs_fs = nullptr;
+#endif
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+  mesh::ui::loadOLEDControllerSettings(regulator_prefs_fs);
 #endif
   mesh::ui::loadDisplayPowerSettings(display_prefs_fs,
 #ifdef BLE_PIN_CODE
@@ -3216,6 +3761,16 @@ void setup() {
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   #if defined(QSPIFLASH)
+    #if defined(XIAO_NRF52)
+    // The external NOR can remain asleep across an MCU/DFU reset. Wake it
+    // before CustomLFS activates QSPI, without changing any stored bytes.
+    const nrf_qspi_pins_t qspi_pins = {
+      (uint8_t)g_ADigitalPinMap[PIN_QSPI_SCK], (uint8_t)g_ADigitalPinMap[PIN_QSPI_CS],
+      (uint8_t)g_ADigitalPinMap[PIN_QSPI_IO0], (uint8_t)g_ADigitalPinMap[PIN_QSPI_IO1],
+      (uint8_t)g_ADigitalPinMap[PIN_QSPI_IO2], (uint8_t)g_ADigitalPinMap[PIN_QSPI_IO3]
+    };
+    mesh::nrf52::wakeQspiFlashBeforeActivate(qspi_pins);
+    #endif
     if (!QSPIFlash.begin()) {
       // debug output might not be available at this point, might be too early. maybe should fall back to InternalFS here?
       MESH_DEBUG_PRINTLN("CustomLFS_QSPIFlash: failed to initialize");
@@ -3337,6 +3892,7 @@ void setup() {
   // Keep stack registration available for a later USB `set bluetooth on`,
   // without advertising even briefly when startup enables all interfaces.
   interface_manager.setBluetoothAutoEnable(the_mesh.isBluetoothEnabledPreference());
+  serviceCompanionUsbBluetoothPriority();
 #endif
 
 // Lock the saved transport selection before bringing up either wireless stack.
@@ -3418,12 +3974,17 @@ void setup() {
                 "Failed to restore ESP-NOW/WiFi protocol coexistence");
           }
 #endif
-          WIFI_DEBUG_PRINTLN("connected! IP %s  (companion app on :%d)",
+          WIFI_DEBUG_PRINTLN("connected! IP %s  (companion TCP port :%d requested; get wifi.tcp for listener status)",
                              WiFi.localIP().toString().c_str(), TCP_PORT);
       }
   });
 
-  interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface);
+  companion_wifi_interface_registered =
+      interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface);
+  if (!companion_wifi_interface_registered) {
+    wifi_interface.disable();
+    WIFI_DEBUG_PRINTLN("Companion WiFi interface registration failed");
+  }
 #if !defined(COMPANION_EXCLUSIVE_WIFI_BLE)
   companion_wifi_requested = the_mesh.getNodePrefs()->wifi_enabled != 0;
 #endif
@@ -3461,6 +4022,14 @@ void setup() {
 
 // add usb interface
 #if defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
+#if defined(PICOW_COMBINED_COMPANION) && PICOW_COMBINED_COMPANION == 1 \
+    && defined(ENABLE_USB_INTERFACE) && defined(PIO_FRAMEWORK_ARDUINO_ENABLE_BLUETOOTH)
+  // Bind consolidation metadata to the actual combined transport setup path.
+  static const char combined_capability[] =
+      "meshcore.capability.companion.picow.combined.v1";
+  const volatile char* combined_marker = combined_capability;
+  (void)*combined_marker;
+#endif
   wifi_interface.setSessionChangedCallback([](void*) {
     the_mesh.cancelSerialResponseStream(&wifi_interface);
     the_mesh.cancelSerialOperationsForRoute(&wifi_interface);
@@ -3478,8 +4047,9 @@ void setup() {
     WiFi.setTimeout(WIFI_RETRY_TIMEOUT);
     WiFi.beginNoBlock(pico_wifi_ssid, pico_wifi_pwd);
     last_wifi_reconnect_attempt = millis();
-    wifi_interface.begin(TCP_PORT);
-    interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface);
+    if (interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface)) {
+      wifi_interface.begin(TCP_PORT);
+    }
   }
 #endif
 #if defined(ENABLE_USB_INTERFACE)
@@ -3528,6 +4098,12 @@ void setup() {
 #endif
   interface_manager.addInterface(InterfaceType::USB, &usb_serial_interface);
   usb_protocol_initialized = true;
+#if defined(ESP32_PLATFORM) \
+    && (!defined(ARDUINO_USB_CDC_ON_BOOT) || !ARDUINO_USB_CDC_ON_BOOT) \
+    && !defined(SERIAL_RX) && !defined(SERIAL_TX)
+  mesh::esp32::registerUartQuietSessionControl(
+      nullptr, transitionCompanionUartQuietSession);
+#endif
   // Select ASCII before any framed dispatch, including non-Full USB builds.
   // BLE/WiFi/Ethernet keep their existing Binary Companion transports.
   beginUsbDefaultSession();
@@ -3536,6 +4112,10 @@ void setup() {
 // add ethernet interface
 #if defined(ETHERNET_ENABLED)
   ethernet_interface.setSessionChangedCallback(cancelCompanionEthernetSession, nullptr);
+#if defined(OTA_RAK15002_SD_STORE) && defined(ETHERNET_USE_RAK13800)
+  ethernet_interface.setSpiOwnershipHooks(prepareCompanionRakEthernet,
+      canReleaseCompanionRakEthernet, releasedCompanionRakEthernet, nullptr);
+#endif
   ethernet_interface.begin();
   interface_manager.addInterface(InterfaceType::Ethernet, &ethernet_interface);
 #endif
@@ -3614,6 +4194,12 @@ static bool usbLoggingRecoverySafe(void*) {
 }
 
 void loop() {
+#if defined(BLE_PIN_CODE)
+  serviceCompanionUsbBluetoothPriority();
+#endif
+#if defined(NRF52_PLATFORM)
+  board.prepareSleepCycle();
+#endif
 #if defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
   if (pico_wifi_active && WiFi.status() != WL_CONNECTED
       && static_cast<uint32_t>(millis() - last_wifi_reconnect_attempt)
@@ -3624,6 +4210,9 @@ void loop() {
   }
 #endif
   mesh::wireless::control().service(millis());
+#if defined(ESP32) && defined(WIFI_SSID)
+  serviceCompanionWiFiNetworkPowerHold();
+#endif
 #if defined(NRF52_PLATFORM)
   board.feedWatchdog();
 #endif
@@ -3648,6 +4237,9 @@ void loop() {
   serviceUsbMotaResponseBoundary();
 #endif
 #endif
+#if defined(ENABLE_USB_INTERFACE)
+  syncUsbTerminalInputEditing();
+#endif
   the_mesh.loop();
 #if defined(NRF52_PLATFORM) && defined(EXTRAFS) && !defined(QSPIFLASH)
   // The flash-page number is retained across a software reset without trying
@@ -3669,6 +4261,7 @@ void loop() {
 #endif
 #if defined(ENABLE_USB_INTERFACE)
   serviceUsbTerminal();
+  syncUsbTerminalInputEditing();
   // Commands can synchronously enqueue a multi-line reply. Give it the
   // remaining CDC FIFO capacity now; later loops retain any unwritten suffix.
   mesh::serviceUsbTerminalPort();
@@ -3677,17 +4270,20 @@ void loop() {
 #if COMPANION_FEATURE_BLE_MOTA_SOURCE
   ble_mota_source_control.loop();
 #endif
-  sensors.loop();
+  const bool morse_timing = mesh::morseTimingActive(&radio_driver);
+  if (!morse_timing) sensors.loop();
 #if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI) && defined(PIN_USER_BTN)
   serviceWioE5HeadlessControls();
 #endif
 #ifdef DISPLAY_CLASS
+  // Keep button/touch and critical UI power checks live. UITask itself skips
+  // only background redraws while the radio needs precise Morse timing.
   #ifdef INDICATOR_WIFI_FONT_RECOVERY
   // The Indicator keeps rendering with its built-in fallback while a missing
   // SD font is recovered by a background TLS task.  This poll only launches
   // work after station Wi-Fi connects and installs a completed font on the
   // main/UI task.
-  display.serviceFontRecovery();
+  if (!morse_timing) display.serviceFontRecovery();
   #endif
   #if defined(ESP32) && defined(WIFI_SSID) && defined(WITH_WEBCONFIG) \
       && UI_WIFI_SETUP_HOME_PAGE != 1
@@ -3699,8 +4295,8 @@ void loop() {
   #if defined(TBEAM_1W) && defined(PIN_WIFI_BTN)
     ui_task.serviceWiFiToggleButton();
   #endif
-    ui_task.loop();  // Continue button/touch handling while the portal is active.
-    renderCompanionSetupDisplay();
+    ui_task.loop();
+    if (!morse_timing) renderCompanionSetupDisplay();
   } else {
     ui_task.loop();
   }
@@ -3709,9 +4305,10 @@ void loop() {
   #endif
 #endif
 #if defined(COMPANION_PAIRING_UI_HIL)
-  companionPairingUiHilProbe();
+  if (!morse_timing) companionPairingUiHilProbe();
 #endif
   rtc_clock.tick();
+  mesh::power::serviceRegulatorSettings();
   board.loop();
   if (mesh::serviceUsbLoggingWatchdog(usbLoggingRecoverySafe)) board.reboot();
 #ifdef TBEAM_1W
@@ -3722,24 +4319,46 @@ void loop() {
 #endif
 
 #ifdef ESP32_PLATFORM
+  board.servicePowerTestControls(!interface_manager.hasPendingIO());
   serviceCompanionPowerSaving();
+#endif
+#if defined(NRF52_PLATFORM)
+  if (the_mesh.getNodePrefs()->powersaving_enabled && the_mesh.isDualRadioActive()
+      && !morse_timing) board.prepareProfileIdleCycle();
 #endif
 
   // USB power alone (for example, a wall charger) does not inhibit sleep.
   // Host sessions, live logging, and button activity still need service.
-  bool can_sleep = the_mesh.getNodePrefs()->powersaving_enabled
-      && !the_mesh.hasPendingWork()
-      && !mesh::isUsbLoggingWatchdogArmed()
-      && !mesh::wireless::control().pending();
+  using mesh::powerdiag::Reason;
+  using mesh::powerdiag::mask;
+  // Keep the existing short-circuit policy: report the first guard that
+  // actually vetoed sleep, without polling otherwise skipped peripherals.
+  mesh::powerdiag::Mask sleep_reason = [&]() -> mesh::powerdiag::Mask {
+    if (!the_mesh.getNodePrefs()->powersaving_enabled) return mask(Reason::PolicyOff);
+#if defined(ESP32_PLATFORM)
+    if (!mesh::esp32::manualCpuSleepEnabled()) return mask(Reason::PolicyOff);
+#endif
+    if (morse_timing) return mask(Reason::Morse);
+    const auto pending = the_mesh.pendingWorkReason();
+    if (pending) return pending;
+    if (mesh::isUsbLoggingWatchdogArmed()) return mask(Reason::UsbRecovery);
+    if (mesh::wireless::control().pending()) return mask(Reason::Wireless);
+    return 0;
+  }();
 #if defined(ESP32_PLATFORM) && MESH_USB_LOGGING_AVAILABLE
   // The native-USB-only light-sleep path below bypasses ESP32Board::sleep.
-  can_sleep = can_sleep && !mesh::isUsbLoggingEnabled();
+  if (!sleep_reason && mesh::isUsbLoggingEnabled()) sleep_reason = mask(Reason::UsbLogging);
 #endif
 #if defined(ESP32_PLATFORM) && defined(ENABLE_USB_INTERFACE)
   const bool usb_sleep_held = board.isUsbSleepHeld();
-  can_sleep = can_sleep && !usb_sleep_held;
+  if (!sleep_reason && usb_sleep_held) sleep_reason = mask(Reason::UsbSession);
 #elif defined(NRF52_PLATFORM)
-  can_sleep = can_sleep && !board.isUsbHostConnected();
+  if (!sleep_reason && board.isUsbHostConnected()) sleep_reason = mask(Reason::UsbSession);
+#endif
+#if defined(NRF52_PLATFORM) && defined(ETHERNET_USE_RAK13800)
+  // Polled Ethernet has no GPIO wake for a client or parked worker. OFF also
+  // disables its logical transport before main-thread resource release ends.
+  if (!sleep_reason && ethernet_interface.hardwareActive()) sleep_reason = mask(Reason::Network);
 #endif
 #if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
     && MOMENTARY_BUTTON_WAKE_FROM_SLEEP \
@@ -3747,12 +4366,27 @@ void loop() {
   // GPIO wake starts the poller, but multi-click and long-press results
   // are due after a time interval rather than another edge. The G3 also
   // retains a two-minute wake interval after button activity.
-  can_sleep = can_sleep && !user_btn.needsPolling();
+  if (!sleep_reason && user_btn.needsPolling()) sleep_reason = mask(Reason::Button);
 #endif
-  if (can_sleep) {
+  uint32_t noise_floor_delay_ms = 0;
+  const bool noise_floor_wait = !sleep_reason
+      && the_mesh.getNextNoiseFloorWakeDelay(noise_floor_delay_ms);
+  if (noise_floor_wait && noise_floor_delay_ms == 0) sleep_reason = mask(Reason::Calibration);
+  if (mesh::powerdiag::enabled()) mesh::powerdiag::decision(sleep_reason, millis());
+  const bool can_sleep = sleep_reason == 0;
+  if (can_sleep && the_mesh.canIdleDualRadio()) {
+#if defined(ESP32_PLATFORM)
+    const uint32_t maximum_slice_ms = mesh::esp32::profileSleepSliceMillis();
+#else
+    const uint32_t maximum_slice_ms = 10;
+#endif
+    const uint32_t idle_slice_ms = noise_floor_wait && noise_floor_delay_ms < maximum_slice_ms
+        ? noise_floor_delay_ms : maximum_slice_ms;
 #if defined(NRF52_PLATFORM)
-    board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
+    if (noise_floor_wait) board.sleepMilliseconds(idle_slice_ms);
+    else board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
 #elif defined(ESP32_PLATFORM)
+    const uint32_t sleep_budget_started_us = static_cast<uint32_t>(esp_timer_get_time());
 #if defined(ENABLE_USB_INTERFACE) \
     && defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT \
     && !defined(ETHERNET_ENABLED) && !defined(SERIAL_RX)
@@ -3760,26 +4394,56 @@ void loop() {
     // core. A short timer slice gives idle battery builds real light sleep without
     // delaying radio, GPS, button, or newly attached USB work by more than the
     // normal 10 ms loop cadence. can_sleep already proved no USB host is up.
-    if (!companionNativeUsbLightSleepReady()
-        || esp_sleep_enable_timer_wakeup(10000ULL) != ESP_OK
-        || esp_light_sleep_start() != ESP_OK) {
-      vTaskDelay(pdMS_TO_TICKS(10));
+    bool sleep_failed = false;
+    if (!companionNativeUsbLightSleepReady()) {
+      if (mesh::powerdiag::enabled()) mesh::powerdiag::boardVeto(Reason::Board, millis());
+      sleep_failed = true;
+    } else if (the_mesh.isDualRadioActive()) {
+      // The scanner owns a shorter absolute deadline than the normal loop
+      // cadence. The board also arms a radio GPIO wake and rechecks elapsed
+      // time after its setup; short/expired visits keep polling.
+      if (!mesh::esp32::tryProfileIdleSleep(the_mesh, board, sleep_budget_started_us, idle_slice_ms)
+          && mesh::powerdiag::enabled())
+        mesh::powerdiag::decision(mask(Reason::DualRadio), millis());
+    } else {
+      esp_err_t error = esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(idle_slice_ms) * 1000ULL);
+      if (error == ESP_OK) {
+        if (mesh::powerdiag::enabled()) mesh::powerdiag::sleepBegin(micros(), millis());
+        error = esp_light_sleep_start();
+        if (mesh::powerdiag::enabled()) mesh::powerdiag::sleepEnd(micros());
+      }
+      if (error != ESP_OK) {
+        if (mesh::powerdiag::enabled()) mesh::powerdiag::boardError(error, millis());
+        sleep_failed = true;
+      }
     }
-#elif COMPANION_IDF_PM_AVAILABLE
-    // Yield long enough for ESP-IDF automatic light sleep to enter when no
-    // driver holds a power-management lock.
-    vTaskDelay(pdMS_TO_TICKS(10));
+    if (sleep_failed && !the_mesh.isDualRadioActive()) {
+      vTaskDelay(pdMS_TO_TICKS(idle_slice_ms));
+    }
 #else
-    // Connected transports need their own modem sleep and must retain the
-    // normal FreeRTOS idle behavior.
-    vTaskDelay(pdMS_TO_TICKS(10));
+    if (the_mesh.isDualRadioActive()) {
+      // A rounded RTOS delay can outlast a scanner visit. Use the same
+      // absolute, GPIO-wake deadline as infrastructure, with board USB,
+      // logging and physical wireless guards. A veto keeps polling.
+      if (!mesh::esp32::tryProfileIdleSleep(the_mesh, board, sleep_budget_started_us, idle_slice_ms)
+          && mesh::powerdiag::enabled())
+        mesh::powerdiag::decision(mask(Reason::DualRadio), millis());
+    } else {
+      // PM-enabled cores may use automatic sleep; other connected transports
+      // retain their modem sleep and normal FreeRTOS idle behavior.
+      vTaskDelay(pdMS_TO_TICKS(idle_slice_ms));
+    }
 #endif
 #elif defined(RP2040_PLATFORM) || defined(STM32_PLATFORM)
-    board.sleep(0); // event-driven idle; interrupts wake the main loop
+    if (noise_floor_wait) board.sleepMilliseconds(idle_slice_ms);
+    else board.sleep(0); // event-driven idle; interrupts wake the main loop
 #endif
   }
 #if defined(ESP32_PLATFORM)
-  else if (the_mesh.getNodePrefs()->powersaving_enabled) {
+  else if (!morse_timing && !the_mesh.isDualRadioActive()
+      && the_mesh.getNodePrefs()->powersaving_enabled) {
+    // The scanner has a zero-delay polling contract and sub-ms RX visits.
+    // Keep the idle yield for USB/logging/button holds, not live radio2.
     delay(1); // CPU idle remains available while USB/logging/button holds are active.
   }
 #endif
@@ -3800,8 +4464,11 @@ void loop() {
     }
   #endif
   serviceCompanionWiFiCredentialReload();
+  serviceCompanionWiFiNetworkPowerHold();
   serviceCompanionWiFiState();
-  if (companion_wifi_requested && companion_wifi_active) {
+  if (companion_wifi_requested && companion_wifi_active
+      && !companionWiFiBackgroundSuspended()
+      && !companion_wifi_background_stopped) {
   #ifdef ENABLE_OTA
     ota_console_loop();  // service the local text console (port 5002)
   #endif
@@ -3847,7 +4514,7 @@ void loop() {
     }
   } else if (configured_wifi_ssid[0]) {
     wifi_reconnect_tracker.noteDisconnected(wifi_now);
-    if (!wifi_setup_recovery_mode
+    if (!wifi_setup_recovery_mode && companionWiFiAutomaticRecoveryAllowed()
 #ifdef WITH_WEBCONFIG
         && !the_mesh.isWebConfigSetupActive()
 #else
@@ -3932,6 +4599,11 @@ void loop() {
 #endif
   serviceCompanionBluetoothIdentity();
   serviceCompanionBluetoothControl();
+#if defined(ESP32_PLATFORM)
+  // A logical off request must finish physical host/controller teardown even
+  // while this interface is disabled and no longer polled for frames.
+  bluetooth_interface.servicePowerState();
+#endif
 #if defined(NRF52_PLATFORM)
   serviceCompanionBluetoothName();
 #endif

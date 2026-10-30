@@ -3,21 +3,19 @@
 #include <Arduino.h>
 #include <new>
 #include <Mesh.h>
+#include <helpers/PacketFileLoggingConfig.h>
+#include <helpers/PowerSavingDiagnostics.h>
+#include <helpers/FloodGroupPlainText.h>
+#include <helpers/FloodRuleExtensions.h>
+#include <helpers/GuestLoginSettings.h>
+#include <helpers/LoginHistory.h>
 #if defined(ENABLE_OTA)
   #include <helpers/ota/OtaContext.h>
 #endif
 #include <RTClib.h>
 #include <CayenneLPP.h>
 #include <target.h>
-
-#ifndef MESH_ENABLE_TELEMETRY_HISTORY
-  // LoRa-E5-class STM32 repeater images have less than 3 KB of spare flash.
-  #if defined(STM32_PLATFORM)
-    #define MESH_ENABLE_TELEMETRY_HISTORY 0
-  #else
-    #define MESH_ENABLE_TELEMETRY_HISTORY 1
-  #endif
-#endif
+#include <helpers/TelemetryHistoryConfig.h>
 
 #ifndef MESH_ENABLE_TELEMETRY_GPS_HISTORY
   // Builds without a GPS provider only collect missing GPS positions. Omit
@@ -67,6 +65,11 @@
 #ifdef WITH_ESPNOW_BRIDGE
 #include "helpers/bridges/ESPNowBridge.h"
 #define WITH_BRIDGE
+#endif
+
+#ifdef WITH_UDP_BRIDGE
+#include "helpers/bridges/UDPBridge.h"
+#include "helpers/UDPBridgeSettings.h"
 #endif
 
 #ifdef WITH_MQTT_BRIDGE
@@ -119,6 +122,7 @@
 #if MESH_ENABLE_TELEMETRY_HISTORY
 #include <helpers/ExternalVoltageHistory.h>
 #include <helpers/TelemetryHistory.h>
+#include <helpers/NoiseFloorHistorySampler.h>
 #endif
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/RegionMap.h>
@@ -155,7 +159,7 @@ struct NeighbourInfo {
 };
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "14 Aug 2026"
+  #define FIRMWARE_BUILD_DATE   "15 Oct 2026"
 #endif
 #ifndef FIRMWARE_BUILD_EPOCH
   #define FIRMWARE_BUILD_EPOCH  0UL
@@ -170,7 +174,7 @@ struct NeighbourInfo {
   #endif
 #endif
 #ifndef FIRMWARE_VERSION
-  #define FIRMWARE_VERSION   "v1.17.1"
+  #define FIRMWARE_VERSION   "v1.18.0"
 #endif
 
 #define FIRMWARE_ROLE "repeater"
@@ -293,28 +297,43 @@ struct NeighbourInfo {
 #define RADIO_APPLY_RETRY_INTERVAL_MILLIS     1000UL
 #define SCHEDULED_RADIO_CLOCK_CHECKPOINT_SECS 60UL
 
+#if FLOOD_ADVERT_RTC_FAST_SLOTS || FLOOD_ADVERT_RTC_SLOW_SLOTS
+mesh::FloodAdvertLimiter::Entry* repeaterRtcAdvertFastBank();
+mesh::FloodAdvertLimiter::Entry* repeaterRtcAdvertSlowBank();
+#endif
+
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #ifdef WITH_WEBCONFIG
     , public WebConfigServer::Callbacks
 #endif
 {
   struct ScheduledRadioSetting {
+    // RAM only: group aligned fields to keep each schedule within 32 bytes.
+    uint64_t hard_end_uptime_millis;
+    float freq;
+    float bw;
+    uint32_t start_time;
+    uint32_t end_time;
     uint16_t preamble = 0;
+    uint8_t sf;
+    uint8_t cr;
     bool active;
     bool temporary;
     bool started;
-    float freq;
-    float bw;
-    uint8_t sf;
-    uint8_t cr;
-    uint32_t start_time;
-    uint32_t end_time;
-    uint64_t hard_end_uptime_millis;
   };
+  static_assert(sizeof(ScheduledRadioSetting) <= 32,
+                "Scheduled radio rows must retain their compact RAM layout");
+  static_assert(alignof(ScheduledRadioSetting) >= alignof(uint64_t),
+                "Scheduled radio uptime deadlines must remain naturally aligned");
 
   FILESYSTEM* _fs;
 #ifndef PORTABLE_MQTT_OBSERVER
+#if FLOOD_ADVERT_RTC_FAST_SLOTS || FLOOD_ADVERT_RTC_SLOW_SLOTS
+  mesh::StaticFloodAdvertLimiter<> flood_advert_limiter{
+      repeaterRtcAdvertFastBank(), repeaterRtcAdvertSlowBank()};
+#else
   mesh::StaticFloodAdvertLimiter<> flood_advert_limiter;
+#endif
   mesh::FloodAdvertLimiter* getFloodAdvertLimiter() override { return &flood_advert_limiter; }
 #endif
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
@@ -389,6 +408,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   RadioActivityWindow _activity;
 #endif
   NodePrefs _prefs;
+  mesh::GuestLoginSettings guest_login;
+  mesh::LoginHistory login_history;
+  bool handleGuestCommand(const char* command, char* reply, size_t capacity);
   ClientACL  acl;
   CommonCLI _cli;
 #if defined(ESP32_PLATFORM) || defined(USER_GPIO_CONTROL)
@@ -420,18 +442,37 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
     uint32_t last_heard_millis;
   };
   struct FloodPacketFilterEntry {
+#if MESH_ENABLE_FLOOD_RULE_ENGINE
+    // Keep multibyte counters naturally aligned. These eight independent
+    // flags share a byte; their bit order is never persisted (FPF7 serializes
+    // each field explicitly). active/retry remain addressable for the stored
+    // rule decoders. Rule mutations run on the mesh loop.
+    uint32_t rate_window_started;
+    uint16_t rate_per_minute;
+    uint16_t rate_window_count;
+    bool suspend_on_temp_radio : 1;
+    bool match_blacklisted_path : 1;
+    bool scope_uses_slow_timing : 1;
+    bool drop_on_match : 1;
+    bool rate_limit_enabled : 1;
+    bool stop_on_match : 1;
+    bool rate_window_active : 1;
+    bool target_is_region : 1;
     bool active;
+    bool retry_on_match;
     uint8_t payload_type;
     uint8_t min_hops;
     uint8_t max_hops;
-    bool suspend_on_temp_radio;
-    char scope_name[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN];
-    bool match_blacklisted_path;
-#if !MESH_ENABLE_FLOOD_RULE_ENGINE
-    bool scope_requires_region_match;
-#endif
-    bool scope_uses_slow_timing;
-#if MESH_ENABLE_FLOOD_RULE_ENGINE
+    // scope= and region= cannot coexist; retain their full name capacity.
+    char target_name[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN];
+    const char (&scopeName() const)[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN] {
+      static const char empty[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN] = {};
+      return target_is_region ? empty : target_name;
+    }
+    const char (&regionName() const)[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN] {
+      static const char empty[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN] = {};
+      return target_is_region ? target_name : empty;
+    }
     uint8_t incoming_scope_kind;
     char incoming_scope_name[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN];
     uint8_t channel_key_len;
@@ -441,17 +482,21 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
     uint8_t path_hash_size;
     uint8_t path_hops;
     uint8_t path[FLOOD_PACKET_FILTER_PATH_PREFIX_BYTES_MAX];
-    char target_region_name[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN];
-    bool drop_on_match;
-    bool rate_limit_enabled;
-    uint16_t rate_per_minute;
     uint8_t priority;
-    bool stop_on_match;
-    bool retry_on_match;
     uint8_t transport_modes;
-    uint32_t rate_window_started;
-    uint16_t rate_window_count;
-    bool rate_window_active;
+    FloodRuleExtensions::Fields extra;
+#else
+    bool active;
+    uint8_t payload_type;
+    uint8_t min_hops;
+    uint8_t max_hops;
+    bool suspend_on_temp_radio;
+    char scope_name[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN];
+    char (&scopeName())[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN] { return scope_name; }
+    const char (&scopeName() const)[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN] { return scope_name; }
+    bool match_blacklisted_path;
+    bool scope_requires_region_match;
+    bool scope_uses_slow_timing;
 #endif
   };
   struct FloodChannelScopeEntry {
@@ -495,7 +540,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   };
   mutable FloodRetryBridgeState flood_retry_bridge_states[TOTAL_FLOOD_RETRY_SLOTS];
   FloodRetryBridgeReachability flood_retry_bridge_reachability[FLOOD_RETRY_BRIDGE_BUCKETS + 1];
-  static_assert(sizeof(FloodPacketFilterEntry) <= (MESH_ENABLE_FLOOD_RULE_ENGINE ? 200 : 40),
+  static_assert(sizeof(FloodPacketFilterEntry) <= (MESH_ENABLE_FLOOD_RULE_ENGINE ? 304 : 40),
                 "Update the flood-table runtime RAM budget in check_firmware_ram.py");
   // The rule table is the single largest member of this object. It is heap
   // allocated in the constructor (before setup(), while the heap is still
@@ -505,6 +550,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   // zero-capacity node simply forwards without rule filtering.
   FloodPacketFilterEntry* flood_packet_filters;
   uint8_t flood_packet_filter_slots;
+#if MESH_ENABLE_FLOOD_RULE_ENGINE
+  uint32_t flood_filter_probability_seed;
+#endif
   uint8_t flood_packet_filter_blacklist_count;
   uint8_t flood_packet_filter_blacklist[FLOOD_PACKET_FILTER_BLACKLIST_MAX]
                                        [FLOOD_PACKET_FILTER_PATH_ID_SIZE];
@@ -558,6 +606,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #if MESH_ENABLE_TELEMETRY_HISTORY
   mesh::TelemetryHistory telemetry_history;
   mesh::ExternalVoltageHistory external_voltage_history;
+  mesh::NoiseFloorHistory noise_floor_history;
+  mesh::NoiseFloorHistorySampler noise_floor_sampler;
   bool telemetry_history_tx_prefs_healthy;
   bool telemetry_history_tx_enabled;
   uint8_t telemetry_history_tx_interval_days;
@@ -565,8 +615,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool telemetry_history_tx_manual;
   uint8_t telemetry_history_tx_external_channel;
   uint8_t telemetry_history_tx_external_chunk;
+  uint8_t telemetry_history_tx_types;
   uint64_t telemetry_history_next_tx_uptime;
   uint64_t telemetry_history_tx_resume_uptime;
+  uint64_t telemetry_history_last_tx_uptime;
 #endif
   unsigned long _ota_update_at = 0;  // deferred `ota update` fire time (0 = none scheduled)
   float active_bw;  // live BW, including temporary radio overrides
@@ -585,6 +637,15 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   unsigned long scheduled_radio_save_retry_at;
   uint8_t scheduled_radio_retry_failures;
   ScheduledRadioSetting scheduled_radio_settings[MAX_SCHEDULED_RADIO_SETTINGS];
+#if MESH_ENABLE_FLEET_CONTROL
+  // One verified fleet schedule waits for its own physical acknowledgement.
+  ScheduledRadioSetting fleet_schedule_setting_{};
+  uint8_t fleet_schedule_delete_mask_[(MAX_SCHEDULED_RADIO_SETTINGS + 7) / 8]{};
+  int fleet_schedule_slot_ = -1;
+  bool fleet_command_ = false, fleet_schedule_pending_ = false;
+  bool fleet_schedule_delivered_ = false, fleet_schedule_delete_all_temp_ = false;
+  void serviceFleetScheduleReply();
+#endif
   uint8_t _ota_update_channel = 0;  // Snapshot: later ota branch commands cannot retarget a queued update
   int  matching_peer_indexes[MAX_CLIENTS];
 #if defined(WITH_MQTT_BRIDGE)
@@ -608,6 +669,22 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   ESPNowBridge bridge;
   uint32_t shared_espnow_retry_at = 0;
 #endif
+#ifdef WITH_UDP_BRIDGE
+  mesh::bridge::udp::Settings udp_bridge_settings;
+  UDPBridge* udp_bridge = nullptr;
+  uint32_t udp_station_retry_at = 0;
+  bool udp_network_paused = false;
+  void serviceUDPBridge();
+  bool ensureUDPBridge();
+  const mesh::bridge::udp::Prefs* getUDPBridgePrefs() const override {
+    return &udp_bridge_settings.prefs();
+  }
+  bool setUDPBridgePrefs(const mesh::bridge::udp::Prefs& value) override;
+  void formatUDPBridgeStatus(char* reply, size_t capacity) override;
+  void formatUDPBridgeStats(const char* page, char* reply, size_t capacity) override;
+  bool sendUDPBridgeTest(uint8_t peer_index, uint32_t nonce) override;
+  bool resetUDPBridgeStats() override;
+#endif
 #ifdef WITH_BRIDGE
   AbstractBridge* activeBridge() {
 #ifdef WITH_MQTT_BRIDGE
@@ -630,6 +707,27 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
 
 #if defined(WITH_ESPNOW_BRIDGE)
+  ESPNowBridge& diagnosticEspNowBridge() {
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
+    return espnow_bridge;
+#else
+    return bridge;
+#endif
+  }
+  void formatEspNowStatus(char* reply, size_t capacity) override {
+    diagnosticEspNowBridge().formatStatus(reply, capacity);
+  }
+  void formatEspNowStats(const char* page, char* reply, size_t capacity) override {
+    diagnosticEspNowBridge().formatStats(page, reply, capacity);
+  }
+  bool sendEspNowTest(uint32_t nonce) override {
+    return diagnosticEspNowBridge().sendTest(nonce);
+  }
+  bool resetEspNowStats() override {
+    diagnosticEspNowBridge().resetStats();
+    return true;
+  }
+
   // Retry ESP-NOW without taking over an active OTA session. MQTT creates its
   // WiFi task asynchronously, so it must first associate on the shared channel.
   bool startSharedEspNowBridgeIfReady() {
@@ -670,6 +768,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool _unconfigured_setup_espnow_suspended = false;
   void suspendUnconfiguredSetupBridges();
   bool startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup);
+  bool webConfigOwnsWiFi() const;
   bool _wc_batch_active = false;
   bool _wc_restart_pending = false;
   uint8_t _wc_slot_restart_mask = 0;
@@ -691,20 +790,27 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
     ND_SEND_FAILED = 5,
   };
   struct NeighborDiscoverEntry {
-    mesh::Identity id;       // immutable snapshot: neighbour table can change mid-pass
-    uint32_t heard_timestamp;
-    int8_t snr;              // multiplied by 4
-    int16_t rssi;            // dBm from the last packet heard from this neighbour
-    uint32_t tag;            // anon-regions request tag we're waiting on
-    uint8_t status;          // NeighborDiscoverStatus
+    // Keep every full key in the immutable crypto overlay, even when the
+    // existing JSON/query budget cannot publish that neighbor this pass.
+    mesh::Identity id;
   };
+  struct NeighborDiscoverMetadata {
+    uint32_t heard_timestamp;
+    uint32_t tag;
+    int16_t rssi;
+    int8_t snr;
+    uint8_t status;
+  };
+  static_assert(sizeof(NeighborDiscoverMetadata) == 12,
+                "Discovery metadata must retain its complete compact layout");
   NeighborDiscoverEntry neighbor_discover[MAX_NEIGHBOURS];
   // Only the publishable prefix (plus the result that detects truncation)
   // receives scope queries. Keep every neighbor snapshot, without reserving
   // 96 response bytes for each entry that will never be queried.
   static constexpr size_t NEIGHBOR_SCOPE_RESULTS =
-      MAX_NEIGHBOURS < MQTTBridge::NEIGHBORS_MAX_PUBLISH_ENTRIES + 1
-          ? MAX_NEIGHBOURS : MQTTBridge::NEIGHBORS_MAX_PUBLISH_ENTRIES + 1;
+      MAX_NEIGHBOURS < MQTTBridge::NEIGHBORS_SCOPE_RESULT_CAPACITY
+          ? MAX_NEIGHBOURS : MQTTBridge::NEIGHBORS_SCOPE_RESULT_CAPACITY;
+  NeighborDiscoverMetadata neighbor_discover_metadata[NEIGHBOR_SCOPE_RESULTS];
   char neighbor_discover_scopes[NEIGHBOR_SCOPE_RESULTS][96];
   uint8_t neighbor_discover_count;
   uint8_t neighbor_discover_next;            // newest-first entry currently being queried
@@ -767,15 +873,18 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   FloodRetryBridgeState* floodRetryBridgeStateFor(const mesh::Packet* packet, bool create) const;
   void clearFloodRetryBridgeStateByKey(const uint8_t* retry_key, uint8_t radio_profile);
   void refreshFloodRetryReachability(const mesh::Packet* packet);
+  bool hasFloodRetryHeard(const mesh::Packet* packet) const;
   void formatFloodRetryPath(char* dest, size_t dest_len, const mesh::Packet* packet) const;
   bool handleClientPathCommand(ClientInfo* sender, char* command, char* reply);
   bool formatFloodRetryHeard(char* dest, size_t dest_len, const mesh::Packet* packet) const;
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr,
                     int16_t rssi);
   uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
-  uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
-  uint8_t handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
-  uint8_t handleAnonClockReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
+  void sendDefaultPasswordWarning(ClientInfo* client, uint32_t sender_timestamp,
+                                  uint8_t path_hash_size);
+  uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data, size_t data_len);
+  uint8_t handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data, size_t data_len);
+  uint8_t handleAnonClockReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data, size_t data_len);
   int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len,
                     size_t reply_capacity = MAX_PACKET_PAYLOAD - CIPHER_MAC_SIZE - (CIPHER_BLOCK_SIZE - 1));
   mesh::Packet* createSelfAdvert();
@@ -795,16 +904,23 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   void servicePostMeshLoop();
 #if MESH_ENABLE_TELEMETRY_HISTORY
   void sampleTelemetryHistory();
+  void sampleNoiseFloorHistory();
 #if MESH_ENABLE_TELEMETRY_GPS_HISTORY
   uint8_t resizeTelemetryGpsDays(uint8_t requested_days);
 #endif
   void loadTelemetryHistoryTxPrefs();
   bool saveTelemetryHistoryTxPrefs();
+  uint8_t availableTelemetryHistoryTxTypes() const;
+  void finishTelemetryHistoryTxBatch(uint64_t now);
+  bool handleTelemetryHistoryTxTypesCommand(char* command, char* reply,
+                                            bool permitted);
   void serviceTelemetryHistoryTx();
   bool sendTelemetryHistorySnapshot(mesh::TelemetryHistory::Series series);
+  bool sendNoiseFloorHistorySnapshot(uint8_t profile);
   bool sendExternalVoltageHistorySnapshot(uint8_t channel_index,
                                           uint8_t chunk_index);
   void formatTelemetryHistoryTxStatus(char* reply, size_t reply_size) const;
+  void recordTelemetryHistoryTx(const mesh::Packet* packet);
 #endif
   void sendSelfAdvertisementNow(uint32_t delay_millis, bool flood);
   bool sendRepeatersFloodText(const char* text, const TransportKey* scope = nullptr,
@@ -910,6 +1026,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   void deleteFloodChannelScopeRequirement(const char* args, char* reply);
   void loadFloodGroupModeration();
   bool saveFloodGroupModeration();
+  bool readFloodGroupModerationFile(const char* path, FloodGroupModerationEntry* entries,
+                                     bool* readable = nullptr) const;
+  bool recoverFloodGroupModeration();
   bool shouldBlockFloodGroupTextForward(const mesh::Packet* packet);
   void formatFloodGroupModeration(const char* args, char* reply) const;
   void formatFloodGroupModerationDetail(int index, char* reply, size_t reply_len) const;
@@ -917,6 +1036,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   void deleteFloodGroupModeration(const char* args, char* reply);
   bool decodeFloodGroupPlainText(const mesh::Packet* packet, const uint8_t* secret, uint8_t key_len,
                                  uint32_t& timestamp, char* sender, size_t sender_len) const;
+  bool decodeFloodGroupPlainTextSpan(const mesh::Packet* packet, const uint8_t* secret,
+                                     uint8_t key_len, uint8_t* buffer, size_t capacity,
+                                     mesh::FloodGroupPlainText::View& view) const;
   void loadClockSyncPrefs();
   bool saveClockSyncPrefs();
   void resetClockSyncAttempt();
@@ -936,8 +1058,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   void formatClockSyncTable(char* reply, size_t reply_len) const;
   void formatClockSyncSampleDetail(int index, char* reply, size_t reply_len) const;
   bool hasScheduledRadioWorkDue() const;
-  uint32_t limitSleepToMillisTimer(unsigned long timestamp, uint32_t sleep_secs) const;
-  uint32_t limitSleepToScheduledRadioWork(uint32_t sleep_secs) const;
+  uint32_t limitSleepToMillisTimer(unsigned long timestamp, uint32_t sleep_ms) const;
+  uint32_t limitSleepToScheduledRadioWork(uint32_t sleep_ms) const;
   bool hasStartedScheduledTempRadio() const;
   int findFreeScheduledRadioSlot() const;
   int countScheduledRadioSettings(bool temporary) const;
@@ -967,7 +1089,10 @@ protected:
 
   bool allowPacketForward(const mesh::Packet* packet) override;
   bool allowPacketTransmit(const mesh::Packet* packet) const override;
+#if MESH_DEBUG || MESH_ENABLE_PACKET_FILE_LOGGING \
+    || (MESH_PACKET_LOGGING && !MESH_PACKET_LOGGING_COMPACT)
   const char* getLogDateTime() override;
+#endif
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
 
   void logRx(mesh::Packet* pkt, int len, float score) override;
@@ -1013,6 +1138,7 @@ protected:
   int getAGCResetInterval() const override {
     return ((int)_prefs.agc_reset_interval) * 4000;   // milliseconds
   }
+  bool useAdaptiveAGC() const override { return _prefs.powersaving_enabled != 0; }
 #ifdef WITH_MQTT_BRIDGE
   uint32_t getRadioWatchdogMillis() const override {
     return ((uint32_t)_cli.getObserverPrefs()->radio_watchdog_minutes) * 60000UL;
@@ -1053,8 +1179,19 @@ protected:
   bool sendClientReply(ClientInfo* client, mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 
 public:
+#ifdef WITH_UDP_BRIDGE
+  bool setUDPBridgeNetworkState(bool enabled) override;
+  bool isUDPBridgeNetworkEnabled() const override;
+  bool isUDPBridgeConfigured() const { return udp_bridge_settings.prefs().enabled != 0; }
+  bool isUDPBridgeRunning() const { return udp_bridge && udp_bridge->isRunning(); }
+#endif
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
-  ~MyMesh() { delete[] flood_packet_filters; }
+  ~MyMesh() {
+#ifdef WITH_UDP_BRIDGE
+    delete udp_bridge;
+#endif
+    delete[] flood_packet_filters;
+  }
   MyMesh(const MyMesh&) = delete;
   MyMesh& operator=(const MyMesh&) = delete;
 
@@ -1096,6 +1233,14 @@ public:
   bool sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size);
 
   // CommonCLICallbacks
+  bool supportsFleetControl() const override { return true; }
+#if MESH_ENABLE_FLEET_CONTROL
+  bool getFleetLocation(int32_t& latitude_e6, int32_t& longitude_e6) const override;
+  void beginFleetCommand() override { fleet_command_ = true; }
+  void endFleetCommand() override { fleet_command_ = false; }
+  bool hasFleetReplyMutation() const override { return fleet_schedule_pending_; }
+  void finishFleetReplyMutation(bool delivered) override;
+#endif
   mesh::Radio* getProfileRadio() override { return _radio; }
   void applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins, uint16_t preamble = 0) override;
   bool scheduleNormalRadio() override;
@@ -1127,10 +1272,19 @@ public:
   void updateAdvertTimer() override;
   void updateFloodAdvertTimer() override;
 
-  void setLoggingOn(bool enable) override { _logging = enable; }
+  void setLoggingOn(bool enable) override {
+#if MESH_ENABLE_PACKET_FILE_LOGGING
+    _logging = enable;
+#else
+    (void)enable;
+    _logging = false;
+#endif
+  }
 
   void eraseLogFile() override {
+#if MESH_ENABLE_PACKET_FILE_LOGGING
     _fs->remove(PACKET_LOG_FILE);
+#endif
   }
 
   void dumpLogFile() override;
@@ -1208,6 +1362,12 @@ public:
   bool handleHostCliSerialReply(const char* command, char* reply);
 #endif
   void loop();
+#if defined(OTA_BOOTLOADER_MIGRATION)
+  bool prepareForOtaReboot() override {
+    // Let the normal ACL save finish, including its failure backoff.
+    return dirty_contacts_expiry == 0;
+  }
+#endif
   bool canRecoverUsbLogging() const {
     return dirty_contacts_expiry == 0 && !hasOutbound() && !isAnyTempRadioActive()
         && !hasPendingOtaApply() && !saved_radio_apply_pending
@@ -1221,10 +1381,12 @@ public:
 #endif
 
   uint32_t getPowerSaveSleepSeconds(uint32_t max_secs) const;
+  uint32_t getPowerSaveSleepMilliseconds(uint32_t max_ms) const;
 
 #if defined(WITH_BRIDGE)
 
   void configureBridgeFilter(AbstractBridge* active_bridge) {
+    active_bridge->setIngressProfiles(_radio->profiles());
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
     active_bridge->setPacketFilter([](void* context, const mesh::Packet* packet) {
       return static_cast<MyMesh*>(context)->allowTransportPacket(packet, 2);  // RULE_MODE_BRIDGE
@@ -1236,16 +1398,27 @@ public:
 
 #ifdef WITH_RS232_BRIDGE
   RS232Bridge* createRS232Bridge() {
+    RS232Bridge* created;
 #ifdef WITH_RS232_BRIDGE_ALT
     if (_prefs.bridge_uart == WITH_RS232_BRIDGE_ALT_UART) {
-      return new (std::nothrow) RS232Bridge(&_prefs, WITH_RS232_BRIDGE_ALT,
+      created = new (std::nothrow) RS232Bridge(&_prefs, WITH_RS232_BRIDGE_ALT,
                              WITH_RS232_BRIDGE_ALT_RX,
                              WITH_RS232_BRIDGE_ALT_TX, _mgr, getRTCClock());
-    }
+    } else
 #endif
-    return new (std::nothrow) RS232Bridge(&_prefs, WITH_RS232_BRIDGE,
+    {
+      created = new (std::nothrow) RS232Bridge(&_prefs, WITH_RS232_BRIDGE,
                            WITH_RS232_BRIDGE_RX, WITH_RS232_BRIDGE_TX,
                            _mgr, getRTCClock());
+    }
+    if (created) {
+      // A new physical owner gets a new control session. Soft UART standby
+      // retains this object/session; a manual off/restart does not.
+      uint64_t session = 0;
+      getRNG()->random(reinterpret_cast<uint8_t*>(&session), sizeof(session));
+      created->setHeartbeatSession(session ? session : 1);
+    }
+    return created;
   }
 
   bool beginRS232Bridge() {
@@ -1287,7 +1460,9 @@ public:
   }
 
   bool endRS232Bridge() {
+#if ENV_INCLUDE_GPS == 1
     const uint8_t released_uart = active_rs232_bridge_uart;
+#endif
     bool stopped = true;
     // A fail-closed preflight can reject this object before begin() touches
     // its UART. Adafruit nRF Uart::end() is not safe as a generic cleanup for
@@ -1322,6 +1497,65 @@ public:
     return bridge && bridge->isRunning();
   }
 
+  void serviceRs232BridgePower() {
+    if (!bridge) return;
+    // Poll only once, before evaluating liveness. The policy must still run
+    // when UART is stopped, or two sleeping peers can never rendezvous.
+    bridge->setHeartbeatEnabled(_prefs.rs232_heartbeat == 1);
+    if (bridge->isRunning()) bridge->loop();
+    if (!rs232BridgeEnabled()) return;
+    const uint32_t now = millis();
+    const RS232Bridge::PowerAction action = bridge->servicePowerPolicy(
+        (_prefs.rs232_autosleep == 1 || _prefs.rs232_autosleep == 2)
+            && _prefs.powersaving_enabled != 0
+            && _prefs.rs232_heartbeat == 1,
+        static_cast<uint32_t>(_prefs.rs232_idle_seconds) * 1000UL, now,
+        _prefs.rs232_autosleep == 2);
+    if (action == RS232Bridge::PowerAction::None) return;
+    bool success;
+    if (action == RS232Bridge::PowerAction::Suspend) {
+      // An end may stop UART but fail to release GPS ownership. The driver
+      // stays in cleanup/retry until both physical owners confirm success.
+      success = endRS232Bridge();
+    } else {
+      // A failed earlier start may have yielded GPS before UART begin failed.
+      // Release any partial ownership before trying to claim it again.
+      success = (active_rs232_bridge_uart == 0 || endRS232Bridge())
+          && beginRS232Bridge();
+    }
+    bridge->completePowerAction(action, success, millis());
+  }
+
+  void formatRs232Status(char* reply) override {
+    char heartbeat[84];
+    if (bridge) bridge->formatHeartbeatStatus(heartbeat, sizeof(heartbeat), millis());
+    else StrHelper::strncpy(heartbeat, "phase=off peer=unknown", sizeof(heartbeat));
+    snprintf(reply, 160, "saved=%s running=%s heartbeat=%s autosleep=%s idle=%us %s",
+        rs232BridgeEnabled() ? "on" : "off",
+        isRs232BridgeRunning() ? "on" : "off",
+        _prefs.rs232_heartbeat == 1 ? "on" : "off",
+        _prefs.rs232_autosleep == 2 ? "force" : _prefs.rs232_autosleep == 1 ? "on" : "off",
+        static_cast<unsigned>(_prefs.rs232_idle_seconds), heartbeat);
+  }
+
+  // Diagnostics address the UART transport even when MQTT and ESP-NOW also run.
+  void formatRs232Transport(char* reply, size_t capacity) override {
+    if (bridge) bridge->formatStatus(reply, capacity);
+    else snprintf(reply, capacity, "Error: RS232 diagnostics unavailable");
+  }
+  void formatRs232Stats(const char* page, char* reply, size_t capacity) override {
+    if (bridge) bridge->formatStats(page, reply, capacity);
+    else snprintf(reply, capacity, "Error: RS232 diagnostics unavailable");
+  }
+  bool sendRs232Test(uint32_t nonce) override {
+    return bridge && bridge->sendTest(nonce);
+  }
+  bool resetRs232Stats() override {
+    if (!bridge) return false;
+    bridge->resetStats();
+    return true;
+  }
+
   bool setRs232BridgeState(bool enable) override {
     if (!enable) {
       const bool stopped = endRS232Bridge();
@@ -1334,7 +1568,10 @@ public:
     if (isRs232BridgeRunning()) return true;
     // Retry any tracked GPS release before constructing a new UART owner.
     if (active_rs232_bridge_uart != 0 && !endRS232Bridge()) return false;
-    if (!bridge) bridge = createRS232Bridge();
+    // Explicit enable is a fresh owner, including when soft standby retained
+    // the previous one. It must not inherit a dormant heartbeat deadline.
+    delete bridge;
+    bridge = createRS232Bridge();
     return bridge && beginRS232Bridge();
   }
 
@@ -1349,6 +1586,9 @@ public:
 #endif
 
   bool isBridgeRunning() const override {
+#ifdef WITH_UDP_BRIDGE
+    if (isUDPBridgeRunning()) return true;
+#endif
 #if defined(WITH_MQTT_BRIDGE)
     return (mqtt_bridge && mqtt_bridge->isRunning())
 #ifdef WITH_ESPNOW_BRIDGE
@@ -1364,12 +1604,21 @@ public:
 #endif
   }
 
+#if defined(WITH_ESPNOW_BRIDGE)
+  // The wireless backend queries this public transport API in standalone
+  // Full repeaters as well as MQTT/UART combinations. UDP can be running
+  // independently, so the generic isBridgeRunning() result is insufficient.
+  bool isEspNowBridgeRunning() override {
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
+    return espnow_bridge.isRunning();
+#else
+    return bridge.isRunning();
+#endif
+  }
+#endif
+
 #if defined(WITH_ESPNOW_BRIDGE) \
     && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
-  bool isEspNowBridgeRunning() override {
-    return espnow_bridge.isRunning();
-  }
-
 #ifdef WITH_MQTT_BRIDGE
   bool setMqttBridgeState(bool enable) override {
     if (!enable) {
@@ -1513,10 +1762,7 @@ public:
     }
 #endif
 #if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
-    if (enable && !bridge) {
-      bridge = createRS232Bridge();
-      if (!bridge) return false;
-    }
+    if (enable) return setRs232BridgeState(true);
     if (!enable) {
       const bool stopped = endRS232Bridge();
       if (stopped) {
@@ -1832,6 +2078,7 @@ public:
 
   // To check if there is pending work
   bool hasPendingWork() const;
+  mesh::powerdiag::Mask pendingWorkReason() const;
 
   bool setRxBoostedGain(bool enable) override;
   void recalibrateNoiseFloor() override { _radio->recalibrateNoiseFloor(); }

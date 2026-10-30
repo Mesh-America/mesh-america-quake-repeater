@@ -9,8 +9,16 @@
 
 class CustomSX1276Wrapper : public RadioLibWrapper {
 public:
+  ~CustomSX1276Wrapper() { unregisterInterruptAction(); }
   CustomSX1276Wrapper(CustomSX1276& radio, mesh::MainBoard& board) : RadioLibWrapper(radio, board) { }
   bool supportsCarrierWave() const override { return supportsRadioDeepInit(); }
+  bool supportsMorseRx() const override { return MESH_ENABLE_MORSE_RX && supportsRadioDeepInit(); }
+#if MESH_ENABLE_MESHTEXT_WIRE
+  bool supportsMeshtext() const override { return true; }
+#endif
+#if MESH_ENABLE_ETHERNET_WIRE
+  bool supportsEthernetTunnel() const override { return true; }
+#endif
 
   void powerOff() {
     if (isCarrierWaveActive()) setCarrierWave(0, 0);
@@ -18,6 +26,24 @@ public:
   }
 
 protected:
+#if MESH_ENABLE_MESHTEXT_WIRE || MESH_ENABLE_ETHERNET_WIRE
+  bool applyProtocol(mesh::RadioProfileProtocol protocol) override {
+    uint8_t sync = 0x12;
+    if (protocol == mesh::RadioProfileProtocol::Meshtext) {
+      if (!supportsMeshtext()) return false;
+      sync = 0x2b;
+#if MESH_ENABLE_ETHERNET_WIRE
+    } else if (protocol == mesh::RadioProfileProtocol::Ethernet) {
+      if (!supportsEthernetTunnel()) return false;
+      sync = 0x16;
+#endif
+    } else if (protocol != mesh::RadioProfileProtocol::MeshCore) return false;
+    return static_cast<CustomSX1276*>(_radio)->setProfileProtocol(sync) == RADIOLIB_ERR_NONE;
+  }
+#endif
+  int16_t startMorseReceiver() override {
+    return static_cast<CustomSX1276*>(_radio)->receiveDirect();
+  }
   bool applyParams(float freq, float bw, uint8_t sf, uint8_t cr) override {
     return ((CustomSX1276 *)_radio)->setFrequency(freq) == RADIOLIB_ERR_NONE
         && ((CustomSX1276 *)_radio)->setSpreadingFactor(sf) == RADIOLIB_ERR_NONE
@@ -45,6 +71,38 @@ public:
   uint8_t getSpreadingFactor() const override { return ((CustomSX1276 *)_radio)->spreadingFactor; }
 
 protected:
+  float morseReceiverBandwidthKHz() const override { return 2.6f; }
+  float readMorseRssi() override { return static_cast<CustomSX1276*>(_radio)->getMorseRssi(); }
+  int16_t prepareMorseReceiver(float frequency_mhz) override {
+    if (!supportsRadioDeepInit()) return RADIOLIB_ERR_UNSUPPORTED;
+    if (!_board->prepareRadioFrequency(frequency_mhz)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    _morse_rx_fsk_mode = true;
+    if (!prepareRadioHardReset()) return RADIOLIB_ERR_CHIP_NOT_FOUND;
+    const int16_t status = static_cast<CustomSX1276*>(_radio)->beginMorseReceive(frequency_mhz);
+    const bool finished = _board->finishRadioHardReset();
+    return status == RADIOLIB_ERR_NONE && !finished ? RADIOLIB_ERR_UNKNOWN : status;
+  }
+  bool validateMorseFrequency(float frequency_mhz) const override {
+    return isfinite(frequency_mhz) && frequency_mhz >= 137.0f && frequency_mhz <= 1020.0f;
+  }
+
+  int16_t prepareMorseCarrier(float frequency_mhz) override {
+    if (!_board->prepareRadioFrequency(frequency_mhz)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    auto* radio = static_cast<CustomSX1276*>(_radio);
+    // Zero deviation produces an unmodulated carrier regardless of DIO2.
+    // RX bandwidth is immaterial for this TX-only operation. FSK is set up
+    // once per message, never once per dot/dash.
+    int16_t status = radio->beginFSK(frequency_mhz, 4.8, 0.0, 125.0, 2, 16, false);
+    if (status != RADIOLIB_ERR_NONE) return status;
+    status = radio->setMorsePaRamp();
+    if (status != RADIOLIB_ERR_NONE) return status;
+#ifdef SX127X_CURRENT_LIMIT
+    status = radio->setCurrentLimit(SX127X_CURRENT_LIMIT);
+    if (status != RADIOLIB_ERR_NONE) return status;
+#endif
+    return applyCachedTxPower(_dbm_valid ? _cur_dbm : LORA_TX_POWER);
+  }
+
   int16_t enterCarrierWave() override {
     auto* radio = static_cast<CustomSX1276*>(_radio);
     // Direct TX needs FSK. Zero deviation prevents a floating DIO2 data input
@@ -64,12 +122,21 @@ protected:
   bool restoreCarrierWaveModem() override {
     // Restores LoRa, runtime profile/preamble, IRQ mapping and PA calibration.
     // Shared cleanup retains the stop/retry guard if any restoration fails.
-    return restoreAfterDeepInit();
+    const bool restored = restoreAfterDeepInit();
+    if (restored) _morse_rx_fsk_mode = false;
+    return restored;
   }
 
   int16_t performChannelScan() override {
     return ((CustomSX1276 *)_radio)->tryScanChannel(cadScanTimeoutMillis(), *_board);
   }
+#if MESH_ENABLE_TX_BEACONS
+  int16_t performChannelScanWithTimeout(unsigned long timeout_ms) override {
+    // Beacon CAD has its own modulation-derived deadline. Preserve SX127x's
+    // DIO0 completion rule instead of the generic UNKNOWN-result poll.
+    return static_cast<CustomSX1276*>(_radio)->tryScanChannel(timeout_ms, *_board);
+  }
+#endif
 
   bool radioDeepInit() override {
     if (!prepareRadioHardReset()) return false;

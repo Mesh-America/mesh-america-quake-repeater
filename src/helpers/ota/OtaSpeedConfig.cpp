@@ -2,6 +2,10 @@
 #include "OtaSpeedConfig.h"
 #include <helpers/CLICommandUtils.h>
 #include <helpers/PersistentStoreFormat.h>
+#if defined(NRF52_PLATFORM)
+#include <helpers/CheckedSettingsFile.h>
+#include <helpers/FilePresence.h>
+#endif
 #include <stdio.h>
 #include <string.h>
 #if defined(ESP32_PLATFORM)
@@ -26,7 +30,9 @@ enum class ImageReadResult : uint8_t { Missing, Valid, Invalid, Unreadable };
 // A failed open is not enough to prove a path is absent: some filesystems
 // report an I/O error as a failed exists() call.  Keep those images protected.
 bool pathPresence(const char* path, bool& present) {
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+#if defined(NRF52_PLATFORM)
+  return filePresence(settings_fs, path, present);
+#elif defined(STM32_PLATFORM)
   struct lfs_info info;
   settings_fs->_lockFS();
   const int result = lfs_stat(settings_fs->_getFS(), path, &info);
@@ -61,9 +67,13 @@ ImageReadResult readImage(const char* path, uint8_t* image) {
   if (!settings_fs || !pathPresence(path, present)) return ImageReadResult::Unreadable;
   if (!present) return ImageReadResult::Missing;
 #if defined(NRF52_PLATFORM)
-  File file(*settings_fs);
-  if (!file.open(path, FILE_O_READ)) return ImageReadResult::Unreadable;
-#elif defined(STM32_PLATFORM)
+  const storage::FixedSettingsRead read = storage::readFixedSettingsFileResult(
+      settings_fs, path, image, ImageSize);
+  if (read != storage::FixedSettingsRead::Complete)
+    return read == storage::FixedSettingsRead::WrongSize
+        ? ImageReadResult::Invalid : ImageReadResult::Unreadable;
+#else
+#if defined(STM32_PLATFORM)
   File file = settings_fs->open(path, FILE_O_READ);
 #else
   File file = settings_fs->open(path, "r");
@@ -74,6 +84,7 @@ ImageReadResult readImage(const char* path, uint8_t* image) {
   file.close();
   if (!right_size) return ImageReadResult::Invalid;
   if (!complete) return ImageReadResult::Unreadable;
+#endif
   float value;
   memcpy(&value, image + 4, sizeof(value));
   return !memcmp(image, "OS\1\0", 4) && validSpeed(value)

@@ -412,6 +412,28 @@ void ge_scalarmult_base(ge_p3 *h, const unsigned char *a) {
     /* each e[i] is between -8 and 8 */
     ge_p3_0(h);
 
+#if defined(ED25519_SMALL_BASE) && ED25519_SMALL_BASE
+    /* Keep only the existing 1B..8B row (960 bytes) in flash. Evaluate the
+     * same signed radix-16 digits from most to least significant instead of
+     * keeping 32 shifted rows (30 KiB). The selection still scans all eight
+     * entries with cmov; no loop count/address depends on a secret digit.
+     * Unlike the RAM-built compact option, this uses the ordinary scratch
+     * objects above and does not add a multiples[] table to the stack.
+     */
+    for (i = 63; i >= 0; --i) {
+        ge_p3_dbl(&r, h);
+        ge_p1p1_to_p2(&s, &r);
+        ge_p2_dbl(&r, &s);
+        ge_p1p1_to_p2(&s, &r);
+        ge_p2_dbl(&r, &s);
+        ge_p1p1_to_p2(&s, &r);
+        ge_p2_dbl(&r, &s);
+        ge_p1p1_to_p3(h, &r);
+        select(&t, 0, e[i]);
+        ge_madd(&r, h, &t);
+        ge_p1p1_to_p3(h, &r);
+    }
+#else
     for (i = 1; i < 64; i += 2) {
         select(&t, i / 2, e[i]);
         ge_madd(&r, h, &t);
@@ -432,6 +454,7 @@ void ge_scalarmult_base(ge_p3 *h, const unsigned char *a) {
         ge_madd(&r, h, &t);
         ge_p1p1_to_p3(h, &r);
     }
+#endif
 }
 #else
 /*

@@ -98,6 +98,60 @@ class OtaSpeedTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             subprocess.run([str(binary)], check=True)
 
+    def test_nrf52_metadata_open_and_short_reads_preserve_committed_speed(self):
+        mock = (ROOT / "test/fixtures/radio_profiles/mocks/helpers/IdentityStore.h").read_text()
+        mock = mock.replace("bool fail_write = false;", "bool stat_error=false;\n  bool fail_write = false;")
+        mock = mock.replace("bool mkdir(const char*)", "void _lockFS() {}\n  void _unlockFS() {}\n"
+                            "  MemoryFS* _getFS() { return this; }\n"
+                            "  bool mkdir(const char*)")
+        mock += ("\nstruct lfs_info {};\nconstexpr int LFS_ERR_NOENT=-2;\n"
+                 "inline int lfs_stat(MemoryFS* fs, const char* path, lfs_info*) {\n"
+                 "  if (fs->stat_error) return -5;\n"
+                 "  return fs->files.count(path) ? 0 : LFS_ERR_NOENT;\n}\n")
+        faults = r'''
+  const auto committed = fs.files;
+  for (unsigned fault = 0; fault < 3; ++fault) {
+    fs.stat_error = fault == 0;
+    fs.fail_read_open = fault == 1;
+    fs.fail_read_after = fault == 2 ? 4 : -1;
+    beginSpeedConfig(&fs);
+    assert(speedFactor() == 1.0f); // Unreadable is not a corrupt image to replace.
+    command("set ota.speed 2", "ERR");
+    assert(fs.files == committed);
+    fs.stat_error = fs.fail_read_open = false;
+    fs.fail_read_after = -1;
+    beginSpeedConfig(&fs);
+    assert(speedFactor() == 1.125f);
+  }
+  fs.files["/ota_speed"].pop_back(); // A complete, wrong-sized image is invalid.
+  beginSpeedConfig(&fs);
+  assert(speedFactor() == 1.0f);
+  command("set ota.speed 2", "OK ota.speed=2x (saved)");
+  beginSpeedConfig(&fs);
+  assert(speedFactor() == 2.0f);
+'''
+        source = HARNESS.replace("  assert(speedFactor() == 1.125f);\n}",
+                                 "  assert(speedFactor() == 1.125f);\n" + faults + "}")
+        compiler = shutil.which("g++") or shutil.which("clang++")
+        self.assertIsNotNone(compiler)
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / "helpers").mkdir()
+            (work / "helpers/IdentityStore.h").write_text(mock)
+            cpp = work / "speed.cpp"
+            cpp.write_text(source)
+            binary = work / "speed"
+            result = subprocess.run([
+                compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-Wno-sign-compare",
+                "-DENABLE_OTA=1", "-DNRF52_PLATFORM=1", "-I", directory,
+                "-I", str(ROOT / "test/fixtures/radio_profiles/mocks"),
+                "-I", str(ROOT / "test/mocks"), "-I", str(ROOT / "src"),
+                str(ROOT / "src/helpers/ota/OtaSpeedConfig.cpp"), str(cpp),
+                "-o", str(binary),
+            ], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            subprocess.run([str(binary)], check=True)
+
     def test_shared_role_wiring_and_idle_context_access(self):
         common = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
         companion = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()

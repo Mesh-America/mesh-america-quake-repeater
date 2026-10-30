@@ -30,10 +30,13 @@ class TouchDebugCliTest(unittest.TestCase):
         setter = extract_braced(mesh, 'if (strncmp(command, "set display.touch", 17) == 0')
         source = r'''
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <initializer_list>
+static uint32_t mock_now = 0x80001000u;
+static uint32_t millis() { return mock_now; }
 struct UIScreen {};
 struct Display {};
 struct AbstractUITask {
@@ -41,7 +44,7 @@ BASE_HOOKS
 };
 struct UITask : AbstractUITask {
   Display* _display=nullptr;
-  unsigned long _next_refresh=999;
+  uint32_t _next_refresh=999;
   int wakes=0;
   char checkDisplayOn(char c) { assert(c==0); ++wakes; return 0; }
 FIELDS
@@ -76,7 +79,7 @@ int main() {
   assert(ui.supportsTouchDebug());
   assert(command("get display.touch")=="display.touch off (off after reboot)");
   assert(command("set display.touch on")=="OK - display.touch on (off after reboot)");
-  assert(ui.isTouchDebugEnabled() && ui.wakes==1 && ui._next_refresh==0);
+  assert(ui.isTouchDebugEnabled() && ui.wakes==1 && ui._next_refresh==millis());
   assert(command("get display.touch")=="display.touch on (off after reboot)");
   // Invalid inputs must not mutate state or accidentally accept a suffix.
   for(const char* input : {"set display.touch", "set display.touch ",
@@ -90,7 +93,7 @@ int main() {
   ui._touch_debug_area=4; ui._touch_debug_screen=&screen;
   ui._next_refresh=999;
   assert(command("set display.touch\t off")=="OK - display.touch off (off after reboot)");
-  assert(!ui.isTouchDebugEnabled() && ui.wakes==1 && ui._next_refresh==0);
+  assert(!ui.isTouchDebugEnabled() && ui.wakes==1 && ui._next_refresh==millis());
   assert(ui._touch_debug_x==-1 && ui._touch_debug_y==-1 && ui._touch_debug_area==-1);
   assert(ui._touch_debug_screen==nullptr);
   assert(command("set display.touch on").find("OK")==0);
@@ -129,6 +132,7 @@ int main() {
             with self.subTest(touch=touch), tempfile.TemporaryDirectory() as temp:
                 binary = Path(temp) / "touch_debug_cli"
                 compiled = subprocess.run(["c++", "-std=c++11", "-O1",
+                    "-include", str(ROOT / "src/helpers/CLICommandUtils.h"),
                     "-fsanitize=address,undefined", "-fno-pie", "-no-pie",
                     *(["-DHAS_TOUCH=1"] if touch else []),
                     "-x", "c++", "-", "-o", str(binary)],
@@ -156,7 +160,13 @@ int main() {
         self.assertIn("handleLocalControlCommand(command, reply, reply_capacity)", handler)
         terminal = extract_braced(mesh, "void MyMesh::handleTerminalCommand(")
         self.assertIn("handleLocalControlCommand(command, local_reply, sizeof(local_reply))", terminal)
-        self.assertIn('get display.touch\\r\\n', terminal)
+        help_body = extract_braced(terminal, 'else if (strcmp(command, "help") == 0)')
+        self.assertIn('#include "CompanionHelp.inc"', help_body)
+        self.assertIn('mesh::companion::writePackedCompanionHelp(output);', help_body)
+        help_fragments = (ROOT / 'examples/companion_radio/CompanionHelp.inc').read_text()
+        self.assertIn('get/set display.touch <on|off> (this boot)\\r\\n', help_fragments)
+        packed_help = (ROOT / 'examples/companion_radio/CompanionHelpPacked.cpp').read_text()
+        self.assertIn('#include "CompanionHelp.inc"', packed_help)
         # No persistent preference schema or write is involved.
         setter = extract_braced(local, 'if (strncmp(command, "set display.touch", 17) == 0')
         self.assertNotIn("savePrefs", setter)

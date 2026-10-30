@@ -4,6 +4,7 @@
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import unittest
 
 
@@ -37,6 +38,44 @@ def function_body(source: str, signature: str) -> str:
 
 
 class Nrf52ExtraFsContractTest(unittest.TestCase):
+    def test_verified_factory_erase_clears_contact_recovery_state(self):
+        store = STORE.read_text(encoding="utf-8")
+        body = function_body(store, "bool DataStore::formatFileSystem()")
+        self.assertEqual(body.count("_contact_recovery = 0;"), 3)
+        self.assertIn("if (success) _contact_recovery = 0;", body)
+        rp = body[body.index("const bool success = LittleFS.format();"):]
+        self.assertIn("if (success) {\n    _contact_recovery = 0;", rp)
+        esp = body[body.index("if (fs_success && nvs_err == ESP_OK)"):]
+        self.assertTrue(esp.startswith("if (fs_success && nvs_err == ESP_OK) {\n    _contact_recovery = 0;"))
+
+    def test_uncertain_journal_publication_preserves_storage_authority(self):
+        store = STORE.read_text(encoding="utf-8")
+        # Compile the complete production methods, including their platform branches.
+        def method(signature):
+            start = store.index(signature)
+            body = function_body(store, signature)
+            return store[start:store.index("{", start) + 1] + body + "}"
+
+        implementation = "\n".join(method(signature) for signature in (
+            "static void makeContactPagePath(", "bool DataStore::migrateToSecondaryFS()",
+            "bool DataStore::saveChannels("))
+        with tempfile.TemporaryDirectory(prefix="mesh-secondary-publication-") as directory:
+            directory = Path(directory)
+            (directory / "migration_under_test.h").write_text(implementation, encoding="ascii")
+            binary = directory / "migration"
+            compiled = subprocess.run([
+                "c++", "-std=c++17", "-O1", "-g", "-Wall", "-Wextra",
+                "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
+                "-DNRF52_PLATFORM=1", "-I", str(ROOT / "test/fixtures/contact_cache/mocks"),
+                "-I", str(ROOT / "test/fixtures/contact_cache"), "-I", str(ROOT / "src"),
+                "-I", str(directory), str(ROOT / "test/fixtures/contact_cache/test_secondary_migration.cpp"),
+                "-o", str(binary),
+            ], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("PASS: 10 secondary migration publication scenarios", result.stdout)
+
     def test_hil_stat_failure_is_consumed_before_source_discovery(self):
         store = STORE.read_text(encoding="utf-8")
         load_contacts = function_body(store, "void DataStore::loadContacts(")
@@ -220,8 +259,8 @@ class Nrf52ExtraFsContractTest(unittest.TestCase):
         next_at = handler.index("cmd_frame[0] == CMD_SET_ADVERT_NAME", get_at)
         get_contacts = handler[get_at:next_at]
         incomplete_at = get_contacts.index("hasIncompleteContactLoad()")
-        lock_at = get_contacts.index("_serial->lockReplyRoute()")
-        self.assertLess(incomplete_at, lock_at)
+        route_at = get_contacts.index("_iter_reply_route = _serial->captureReplyRoute()")
+        self.assertLess(incomplete_at, route_at)
         self.assertIn("ERR_CODE_FILE_IO_ERROR", get_contacts)
 
         base = (ROOT / "src" / "helpers" / "BaseChatMesh.cpp").read_text(
@@ -552,7 +591,7 @@ class Nrf52ExtraFsContractTest(unittest.TestCase):
         self.assertLess(committed_at, retire_at)
         self.assertLess(retire_at, journal_remove_at)
         copy_failure_end = migration.index(
-            "journal_state = MigrationJournalState::Committed", committed_at
+            "if (journal_state == MigrationJournalState::Committed)", committed_at
         )
         self.assertIn(
             "_fsExtra = nullptr;", migration[copy_at:copy_failure_end]
@@ -719,10 +758,22 @@ class Nrf52ExtraFsContractTest(unittest.TestCase):
         save_channels = function_body(
             store, "bool DataStore::saveChannels(DataStoreHost* host)"
         )
-        self.assertIn("bool& incomplete = _contact_load_incomplete;", load_channels)
+        # Unknown shared-filesystem authority still blocks channel loading,
+        # but channel-only failures must not poison the contact health latch.
+        self.assertIn("bool& incomplete = _channel_load_incomplete;", load_channels)
+        self.assertLess(
+            load_channels.index("if (_contact_load_incomplete) return;"),
+            load_channels.index("bool& incomplete = _channel_load_incomplete;"),
+        )
         self.assertLess(
             load_channels.index("if (incomplete) return;"),
-            load_channels.index('openRead(contacts_fs, "/channels2")'),
+            load_channels.index("openRead(contacts_fs,"),
+        )
+        self.assertNotIn("_contact_load_incomplete", function_body(
+            load_channels, "if (!success)"))
+        self.assertLess(
+            save_channels.index("if (_channel_load_incomplete) return false;"),
+            save_channels.index("mesh::AtomicFileWriter file("),
         )
         self.assertLess(
             save_channels.index("if (_contact_load_incomplete) return false;"),
@@ -982,9 +1033,18 @@ class Nrf52ExtraFsContractTest(unittest.TestCase):
         terminal = function_body(mesh, "void MyMesh::handleTerminalCommand(")
         self.assertIn('strcmp(command, "repair extrafs")', terminal)
         self.assertIn("repairInternalExtraFS(terminalOutput());", terminal)
+        self.assertIn('#include "CompanionHelp.inc"', terminal)
+        self.assertIn("mesh::companion::writePackedCompanionHelp(output);", terminal)
+        help_fragments = (MESH.parent / "CompanionHelp.inc").read_text(encoding="ascii")
         self.assertIn(
-            "repair extrafs (erases/rebuilds internal ExtraFS)", terminal
+            "repair extrafs (erases/rebuilds internal ExtraFS)", help_fragments
         )
+        self.assertRegex(help_fragments,
+            r"#if defined\(NRF52_PLATFORM\) && defined\(EXTRAFS\) && !defined\(QSPIFLASH\)"
+            r"\s+MESH_COMPANION_HELP_BEGIN\s+"
+            r'"  repair extrafs \(erases/rebuilds internal ExtraFS\)\\r\\n"')
+        packed_help = (MESH.parent / "CompanionHelpPacked.cpp").read_text(encoding="ascii")
+        self.assertIn('#include "CompanionHelp.inc"', packed_help)
 
     def test_rescue_rebuild_reports_success_only_after_every_save_succeeds(self):
         mesh = MESH.read_text(encoding="utf-8")
@@ -1044,35 +1104,37 @@ class Nrf52ExtraFsContractTest(unittest.TestCase):
 
     def test_channel_update_rolls_back_when_atomic_save_fails(self):
         mesh = MESH.read_text(encoding="utf-8")
-        handler = function_body(mesh, "void MyMesh::handleCmdFrame(")
-        channel_at = handler.index(
-            "cmd_frame[0] == CMD_SET_CHANNEL && len >= 2 + 32 + 16"
-        )
-        next_command_at = handler.index(
-            "cmd_frame[0] == CMD_SIGN_START", channel_at
-        )
-        channel_update = handler[channel_at:next_command_at]
+        # Both wire encodings must snapshot the raw persisted representation.
+        # getChannel() resolves aliases into effective wire keys/TX routing;
+        # using it for rollback would corrupt a prefixed channel after failure.
+        # Exact-byte rollback is also executed by the native channel-alias and
+        # Meshtext command fixtures, not merely checked as source ordering.
+        for key_bytes in (16, 32):
+            with self.subTest(key_bytes=key_bytes):
+                channel_update = function_body(mesh,
+                    f"if (cmd_frame[0] == CMD_SET_CHANNEL && len >= 2 + 32 + {key_bytes})")
+                snapshot_at = channel_update.index(
+                    "getChannelForSave(channel_idx, previous)"
+                )
+                self.assertNotIn("getChannel(channel_idx, previous)", channel_update)
+                mutate_at = channel_update.index(
+                    "setChannel(channel_idx, channel)"
+                )
+                save_at = channel_update.index("saveChannels()")
+                rollback_at = channel_update.index(
+                    "setChannel(channel_idx, previous)", save_at
+                )
+                error_at = channel_update.index(
+                    "writeErrFrame(ERR_CODE_FILE_IO_ERROR)", rollback_at
+                )
+                ok_at = channel_update.index("writeOKFrame()")
 
-        snapshot_at = channel_update.index(
-            "getChannel(channel_idx, previous)"
-        )
-        mutate_at = channel_update.index(
-            "setChannel(channel_idx, channel)"
-        )
-        save_at = channel_update.index("saveChannels()")
-        rollback_at = channel_update.index(
-            "setChannel(channel_idx, previous)", save_at
-        )
-        error_at = channel_update.index(
-            "writeErrFrame(ERR_CODE_FILE_IO_ERROR)", rollback_at
-        )
-        ok_at = channel_update.index("writeOKFrame()")
-
-        self.assertLess(snapshot_at, mutate_at)
-        self.assertLess(mutate_at, save_at)
-        self.assertLess(save_at, ok_at)
-        self.assertLess(save_at, rollback_at)
-        self.assertLess(rollback_at, error_at)
+                self.assertLess(snapshot_at, mutate_at)
+                self.assertLess(mutate_at, save_at)
+                self.assertLess(save_at, ok_at)
+                self.assertLess(save_at, rollback_at)
+                self.assertLess(rollback_at, error_at)
+                self.assertEqual(channel_update.count("writeOKFrame()"), 1)
 
     def test_absent_advert_delete_avoids_bucket_rewrite_without_legacy_cache(self):
         store = STORE.read_text(encoding="utf-8")

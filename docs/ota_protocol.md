@@ -35,6 +35,7 @@ the authoritative reference for byte-level details.
 | Merkle tree + proofs | `MerkleTree.{h,cpp}` |
 | EndF self-identity | `FirmwareInfo.{h,cpp}` |
 | Wire message codec | `OtaProtocol.{h,cpp}` |
+| Negotiated direct KISS framing / build policy | `OtaDirectWire.h`, `OtaDirectConfig.h` |
 | Session engine (serve+fetch+discovery) | `OtaManager.{h,cpp}` |
 | Multi-mota / folder relay | `OtaSource.h`, `MotaSourceSerial.{h,cpp}`, `MotaSeederProto.h` |
 | Staging stores | `OtaStore.h`, `OtaStoreFlashNrf52.*`, `OtaStoreFlashEsp32.*` |
@@ -74,7 +75,7 @@ the authoritative reference for byte-level details.
 | `MFLAG_BOOTLOADER` | `0x04` | flags bit2; valid only in the exact v3 bootloader profile |
 | `CODEC_FULL` / `_SEQUENTIAL` / `_INPLACE` | `0` / `1` / `2` | Section 5 |
 | `PAYLOAD_TYPE_OTA` | `0x0C` | MeshCore packet type (`src/Packet.h`) |
-| `MAX_PACKET_PAYLOAD` | `184` | usable bytes per packet (`src/MeshCore.h`) |
+| `MAX_PACKET_PAYLOAD` | `184` | ordinary routed packet payload (`src/MeshCore.h`); direct KISS exception: Section 8.5.1 |
 | Default application block size | `2048` | `block_size_log2 = 0x0B`; deployed 1 KiB application packages remain accepted |
 | Bootloader-package block size | `1024` | fixed `block_size_log2 = 0x0A` for format 3 |
 | OTA discovery TX priority | `250` | background (`OTA_TX_PRIORITY`, `src/Mesh.h`) |
@@ -188,7 +189,13 @@ FULL-capable non-companion hardware/role that has a matching MQTT environment.
 It compiles USB packet logging and direct WiFi MQTT together. A
 `*-full-logging-ota-*` fallback is emitted only when there is no MQTT sibling;
 ordinary non-OTA roles compile runtime USB logging into their canonical image,
-so separate standard-logging artifacts are not emitted. Non-MQTT FULL twins
+so separate standard-logging artifacts are not emitted. Canonical RAK3401/RAK4631
+repeater, room and sensor OTA pairs, and Tower SD repeater/room pairs, retain
+runtime USB packet logging in both sensor variants too. Verbose debug is off
+by default; packaged `logging.usb.packets` and `logging.usb.control` capability
+checks prevent a stale no-logger image from satisfying a resumed build.
+Specialized storage/transport aliases and other constrained OTA targets keep
+their existing logging policy. Non-MQTT FULL twins
 are also skipped for covered ESP32 roles. MQTT observers and ESP-NOW bridges are emitted only with
 expanded FULL partitions. Menu option 8, or `build-full-esp32-firmwares`,
 builds the unified profiles plus necessary fallbacks. Menu option 9, or
@@ -417,6 +424,8 @@ package and keeps target `0` as a MID-only wildcard. Stores keep `leaves[]` in R
 auto-GC, preserving resumable progress. The debug/operator equivalent is `ota dev resume <MID8>`; after a
 reboot the MID is mandatory, while a no-argument form may only reuse a still-active session MID. It never
 uses the `nullptr` automatic-adoption path, so a malformed MID or no active MID fails closed.
+The CLI refuses resume while an application or bootloader update is armed, before reopening storage
+can reset the approved handoff state.
 Raw ESP32/nRF52 staging scans every valid header before adoption: address order is not creation order.
 Explicit resume selects a unique matching MID/target; automatic resume refuses multiple valid headers
 without erasing them. A leaf-marker read error is never treated as a missing block: reconnectable storage
@@ -675,10 +684,66 @@ OTA_LEAVES:        manifest_id[4]  frag_idx(1)  frag_total(1)  bytes[]      # up
 A served mota supports up to 1024 leaves in the default 4 KiB proof scratch (about 2 MiB of payload at the
 new 2 KiB default, or 1 MiB for a deployed 1 KiB container); larger self-images pass a bigger scratch buffer.
 
+#### 8.5.1 Negotiated zero-hop KISS/raw-radio transport
+
+`OtaDirectWire.h` defines an opt-in direct transport which bypasses the normal
+184-byte `Packet` payload without changing `Packet` layout or enlarging its pool:
+
+```text
+RF frame = F2 00 || ota_msg_type || existing OTA message body
+           2 B    <----------- at most 253 B ----------->
+```
+
+`F2` selects reserved MeshCore version 4, `PAYLOAD_TYPE_OTA`, and direct routing;
+old MeshCore parsers reject that version. The second byte MUST be zero: no path,
+transport codes, relay envelope, or Ethernet header is permitted. Maximum RF
+length is **255 bytes**; v2 DATA retains its 9-byte OTA header and 4-byte stream ID,
+leaving **240 data bytes**. Thus raw 1 KiB/2 KiB blocks need five/nine DATA frames.
+Only transfer opcodes `0x04..0x0B` are legal; discovery `ADV/QUERY/HAVE` MUST retain
+ordinary framing. V2 descriptor bits, compression permission and stream identity
+are unchanged. The outer framing, not a new opcode or request-mask bit, selects
+240-byte geometry.
+
+A receiver MUST first validate a manifest obtained through ordinary OTA framing.
+It MAY probe direct mode only when `ota config hops` is zero, that manifest was
+observed at zero relay hops, v2 is usable, and the original temporary-radio
+physical session/profile generation remains valid. Direct responses MUST match
+that fetch's manifest, transport geometry and physical session. If direct support
+has not yet been confirmed, the first adaptive deadline without direct DATA MUST
+invalidate that probe and retry ordinary **171-byte v2** framing on the original
+session. After confirmation, a wholly empty later flight gets one admitted
+same-mode sparse retry before that downgrade. Local queue rejection MUST NOT
+consume the retry, and valid direct DATA resets its empty-flight evidence. The
+existing 160-byte legacy fallback remains available afterward. Reassembly for uncommitted
+blocks is reset when geometry changes; already proof-verified committed blocks
+remain staged. Missing-fragment masks continue to drive recovery.
+
+Endpoints MUST consume or reject this reserved envelope before normal `Packet`
+allocation, raw logs and mesh bridges. They MUST NOT relay it or reinterpret it
+as routed OTA; malformed, nonzero-path and unsolicited traffic cannot create an
+OTA context. A shared bounded raw-radio TX owner retains the selected profile
+generation and the OTA cancellation epoch until actual TX completion. It MUST
+honor carrier sensing, duty/airtime accounting and adaptive pacing, and discard
+pending work after cancellation, profile replacement or temporary-session expiry.
+Direct response trains permit the proof immediately after the final completed
+DATA frame; adaptive sub-1.0 quiet gaps still apply. KISS queue acceptance is not
+RF completion, and actual `F8 TX_DONE` is not receiver delivery acknowledgement.
+
+Manifest signatures, Merkle proofs, encoded-stream checks, staged bytes and
+explicit install authorization are unchanged. This is a transport optimization,
+not a new trust or installation path. `MESH_ENABLE_OTA_KISS_DIRECT` defaults on
+for `ENABLE_OTA` builds using the shared raw-radio scheduler, except primary
+ESP-NOW builds; `-DMESH_ENABLE_OTA_KISS_DIRECT=0` explicitly disables it. Enabling
+the build feature alone does not bypass the runtime negotiation/session gates.
+The separate host seeder's safe probe/serve examples and lab TX lock are in
+[`tools/lora_ota/README.md`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/tools/lora_ota/README.md).
+
 ### 8.6 Temporary-radio and transfer boundary
 
 OTA packets may cross normal mesh relay hops, but each participating node processes or relays them only while
-its `tempradio` window is actually running. A receiver selects missing blocks in serial order into a bounded
+a matching `tempradio` or `tempradio2` window is actually running. Direct transfers remain bound to their
+original profile and generation; ending or replacing that window does not silently move them to the other
+radio. A receiver selects missing blocks in serial order into a bounded
 request flight. Every session starts with one block. A clean completed flight increases the next request by
 one block; a flight requiring fragment/proof recovery halves the next width (`4 -> 2`, `3 -> 2`, `2 -> 1`).
 The default compiled cap is two blocks; the RAK3401 LoRa-OTA target caps at four, so it probes
@@ -799,8 +864,21 @@ class MotaSource {
 };
 ```
 
-To serve an external mota the node reads its manifest-minus-leaves + `leaves[]` into RAM (<=4 KiB for <=1024
-blocks) and streams payload blocks from the source on demand; proofs are generated from the read leaves.
+Legacy source paths retain the manifest-minus-leaves and four bytes per source
+block, bounded by `OTA_PROOFGEN_SCRATCH`, then stream payload blocks on demand.
+Non-PSRAM ESP32 Full instead retains roots of 32-leaf groups and rereads the
+selected group. Its complete workspace is bounded to 1,536 bytes while retaining
+4,096 blocks and byte-identical proofs. Partial groups use the same odd-node
+promotion as the full tree. Receive pipelines, capture, serving and wire formats
+remain unchanged; larger custom leaf limits retain the legacy path.
+
+With `OTA_BOUNDED_SOURCE_PROOFS=1`, optional `read_quantum()` and
+`read_metadata()` methods bound each metadata step. `SerialMotaSource` uses the
+current negotiated single-response capacity and rejects a chunk that no longer
+fits after a capacity change. Proof preparation yields between chunks, and
+queued jobs retain their buffers across radio backpressure. See the
+[V3 Full qualification](test-results/heltec_v3_full_memory_2026-10-19.md) for
+allocation bounds and regression coverage.
 
 ### 10.2 The `mota-seeder` transport (`MotaSeederProto.h`)
 
@@ -887,8 +965,10 @@ deployment runner temporarily uses `0.3` on managed relays.
 **What to plug into `--serial`.** Use the USB serial console of an OTA-enabled MeshCore node built with
 `OTA_FOLDER_SERIAL`. The node must have a working LoRa radio plus an
 `ota folder on` command; that command confirms it can host and advertise the folder. A **KISS modem will not
-work**: KISS firmware exposes a TNC/KISS frame interface, not the MeshCore CLI and `mota-seeder`
-request/response transport. An ESP32 WiFi companion or FULL ESP32 role with active WiFi is the alternative
+work with `motatool serve --serial`**: KISS firmware exposes a TNC/KISS frame interface, not the MeshCore CLI
+and `mota-seeder` request/response transport. The separate
+[`mota_kiss_direct.py` source](https://github.com/mikecarper/MeshCore/blob/keymindCascade/tools/lora_ota/mota_kiss_direct.py) implements that full KISS interface.
+An ESP32 WiFi companion or FULL ESP32 role with active WiFi is the alternative
 source connection: use its dedicated seeder port with `motatool serve --tcp <host>:5001`.
 An nRF52 Full Companion can instead pair with a phone or Linux host, subscribe
 to its mOTA request characteristic, and use protocol-v14

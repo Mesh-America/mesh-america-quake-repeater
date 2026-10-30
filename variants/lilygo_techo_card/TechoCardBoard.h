@@ -19,7 +19,10 @@ class TechoCardBoard : public NRF52BoardDCDC {
 public:
   TechoCardBoard() : NRF52Board("TECHO_OTA") {}
   void begin();
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
+  void applyLedPolicy() override;
   void onBeforeTransmit(void) override;
   void onAfterTransmit(void) override;
 

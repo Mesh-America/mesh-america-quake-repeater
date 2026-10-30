@@ -4,6 +4,9 @@
 #include <stdint.h>
 
 #include "sensors/EnvironmentI2CConfig.h"
+#if defined(STATION_G3_ESP32)
+#include <StationG3RadioSlot.h>
+#endif
 
 // Simulator targets do not include RadioLib, but board pin macros can still
 // use its sentinel value. Keep the fallback local to this header.
@@ -14,10 +17,22 @@
 
 // This header is intentionally included only after target.h. The target's
 // build-time pin definitions are the authoritative list of GPIOs claimed by
-// the firmware in that particular image.
+// the firmware, except boot-selectable G3 slots which reserve both pin sets.
 namespace UserGpioPinPolicy {
 
 inline bool isFirmwareReserved(uint8_t pin) {
+#if defined(OTA_RAK15002_SD_STORE)
+  // The exact RAK15002 recipe claims these WisBlock nets even when no card
+  // is fitted: user GPIO must not defeat card detection or a later SD/NOR/
+  // Ethernet handoff. WB_IO6 is Arduino pin 10, not GPIO number 6.
+  if (pin == PIN_SPI_SCK || pin == WB_IO6 || pin == 26
+      || pin == PIN_SPI_MISO || pin == PIN_SPI_MOSI) return true;
+#endif
+#if defined(STATION_G3_ESP32)
+  // A module may be present in the inactive slot too. Never offer its pins
+  // for user GPIO, even when the current boot selected the other slot.
+  if (station_g3::isRadioPin(pin)) return true;
+#endif
   // RadioLib 7 represents its disconnected-pin sentinel as unsigned
   // 0xFFFFFFFF. Use a signed type wide enough for that value as well as the
   // board definitions that use -1, then reject both forms with the 0..63
@@ -524,6 +539,29 @@ inline bool isFirmwareReserved(uint8_t pin) {
 #endif
 #ifdef SDCARD_CS
     SDCARD_CS,
+#endif
+#if defined(NRF52_PLATFORM) && defined(OTA_QSPI_STORE)
+    // The raw NOR backend owns these configured pads even while its bus is
+    // released or no matching chip was found. User GPIO/timers must not
+    // defeat a later OTA storage claim or drive an installed flash's CS.
+#ifdef OTA_QSPI_SCK_ARDUINO_PIN
+    OTA_QSPI_SCK_ARDUINO_PIN,
+#endif
+#ifdef OTA_QSPI_CS_ARDUINO_PIN
+    OTA_QSPI_CS_ARDUINO_PIN,
+#endif
+#ifdef OTA_QSPI_IO0_ARDUINO_PIN
+    OTA_QSPI_IO0_ARDUINO_PIN,
+#endif
+#ifdef OTA_QSPI_IO1_ARDUINO_PIN
+    OTA_QSPI_IO1_ARDUINO_PIN,
+#endif
+#if defined(OTA_QSPI_IO2_ARDUINO_PIN) && !defined(OTA_QSPI_IO2_NOT_CONNECTED)
+    OTA_QSPI_IO2_ARDUINO_PIN,
+#endif
+#if defined(OTA_QSPI_IO3_ARDUINO_PIN) && !defined(OTA_QSPI_IO3_NOT_CONNECTED)
+    OTA_QSPI_IO3_ARDUINO_PIN,
+#endif
 #endif
 #ifdef SENSOR_POWER_CTRL_PIN
     SENSOR_POWER_CTRL_PIN,

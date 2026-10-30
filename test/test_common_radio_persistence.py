@@ -20,11 +20,21 @@ HARNESS = r'''
 #include <helpers/AtomicFileWriter.h>
 #include <helpers/PrefsSaveRouting.h>
 #include <helpers/GpsPowerPolicy.h>
+#include <helpers/radiolib/RXPowerSaving.h>
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/CpuClockPolicy.h>
+#endif
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 #define MIN_LORA_TX_POWER -9
 #define MAX_LORA_TX_POWER 22
 #include <helpers/radiolib/RadioPowerLimits.h>
 struct NodePrefs { @FIELDS@ };
+struct RadioPrefsAdapter {
+  NodePrefs* _parent;
+  bool dirty = false;
+  void markDirty() { dirty = true; }
+  @RXPS_READ@
+};
 void markDirectRetryPrefsValid(NodePrefs*) {}
 bool isValidLoRaBandwidth(float bw) { return bw==62.5f || bw==125; }
 namespace mesh {
@@ -44,6 +54,14 @@ struct Callbacks {
   void savePrefs(PrefsSaveRouting::Scope scope);
 };
 struct CommonCLI {
+#if defined(ESP32_PLATFORM)
+  struct CpuBoard {
+    bool supportsCpuFrequencyMHz(uint16_t mhz) const {
+      return mhz == 80 || mhz == 160 || mhz == 240;
+    }
+  } cpu_board;
+  CpuBoard* _board = &cpu_board;
+#endif
   MemoryFS fs;
   NodePrefs prefs{};
   NodePrefs* _prefs=&prefs;
@@ -81,6 +99,28 @@ struct Capture { std::vector<uint8_t> bytes;
  size_t write(const uint8_t* p,size_t n) { bytes.insert(bytes.end(),p,p+n);return n; }
 };
 int main() {
+  NodePrefs stored{};
+  stored.freq = 911.150f;
+  stored.powersaving_enabled = 1;
+  stored.rx_powersaving_enabled = 1;
+  stored.rx_ps_rx_us = 1234;
+  stored.rx_ps_sleep_us = 5678;
+  stored.rx_ps_level = 6;
+  stored.rx_ps_preamble = 32;
+  RadioPrefsAdapter adapter{&stored};
+  auto snapshot = adapter.readRxPowerSavingConfig();
+  assert(snapshot.enabled == 1 && snapshot.rx_us == 1234);
+  assert(snapshot.sleep_us == 5678 && snapshot.level == 6 && snapshot.preamble == 32);
+  snapshot.enabled = 0;
+  snapshot.rx_us = 2345;
+  snapshot.sleep_us = 6789;
+  snapshot.level = 7;
+  snapshot.preamble = 16;
+  assert(stored.rx_ps_sleep_us == 5678 && !adapter.dirty);
+  assert(!adapter.dirty && stored.rx_powersaving_enabled == 1);
+  assert(stored.rx_ps_rx_us == 1234 && stored.rx_ps_sleep_us == 5678);
+  assert(stored.rx_ps_level == 6 && stored.rx_ps_preamble == 32);
+  assert(stored.freq == 911.150f && stored.powersaving_enabled == 1);
   CommonCLI cli;
   assert(cli.saveCommonPrefs());
   auto original=cli.fs.files["/com_prefs"];
@@ -140,6 +180,75 @@ int main() {
 
 
 class CommonRadioPersistenceTest(unittest.TestCase):
+    def test_snapshot_constructors_and_both_real_adapters_support_cpp11(self):
+        source = r'''
+#include <helpers/radiolib/RXPowerSaving.h>
+#include <cassert>
+#include <cstddef>
+#include <initializer_list>
+#include <type_traits>
+constexpr RxPowerSavingConfig defaults;
+static_assert(defaults.enabled == 0, "Disabled default");
+static_assert(defaults.rx_us == RX_POWERSAVING_DEFAULT_RX_US, "Default RX period");
+static_assert(defaults.sleep_us == RX_POWERSAVING_DEFAULT_SLEEP_US, "Default sleep period");
+static_assert(defaults.level == RX_POWERSAVING_BALANCED_LEVEL, "Default level");
+static_assert(defaults.preamble == RX_POWERSAVING_PROFILE_PREAMBLE, "Default preamble");
+constexpr RxPowerSavingConfig explicit_config(1, 1234, 5678, 7, 32);
+static_assert(explicit_config.enabled == 1 && explicit_config.rx_us == 1234
+    && explicit_config.sleep_us == 5678 && explicit_config.level == 7
+    && explicit_config.preamble == 32, "Value constructor");
+static_assert(std::is_standard_layout<RxPowerSavingConfig>::value, "Snapshot layout");
+static_assert(std::is_trivially_copyable<RxPowerSavingConfig>::value, "Value snapshot");
+struct Fields {
+  uint8_t rx_powersaving_enabled = 0;
+  uint32_t rx_ps_rx_us = 0, rx_ps_sleep_us = 0;
+  uint8_t rx_ps_level = 0, rx_ps_preamble = 0;
+};
+struct CommonAdapter { Fields* _parent; @COMMON_READ@ };
+struct CompanionAdapter { Fields* _parent; @COMPANION_READ@ };
+int main() {
+  for (uint8_t enabled : {0, 1}) {
+    Fields fields;
+    fields.rx_powersaving_enabled = enabled;
+    fields.rx_ps_rx_us = 30000000;
+    fields.rx_ps_sleep_us = 2345;
+    fields.rx_ps_level = 10;
+    fields.rx_ps_preamble = 128;
+    CommonAdapter common{&fields};
+    CompanionAdapter companion{&fields};
+    auto a = common.readRxPowerSavingConfig();
+    auto b = companion.readRxPowerSavingConfig();
+    for (const auto& snapshot : {a, b}) {
+      assert(snapshot.enabled == enabled && snapshot.rx_us == 30000000
+          && snapshot.sleep_us == 2345 && snapshot.level == 10 && snapshot.preamble == 128);
+    }
+    a.sleep_us = b.rx_us = 0;
+    assert(fields.rx_ps_rx_us == 30000000 && fields.rx_ps_sleep_us == 2345);
+  }
+}
+'''
+        for marker, path in (
+            ('COMMON_READ', 'src/helpers/CommonCLI.h'),
+            ('COMPANION_READ', 'examples/companion_radio/NodePrefs.h'),
+        ):
+            header = (ROOT / path).read_text(encoding='ascii')
+            adapter = extract_braced(header, 'RxPowerSavingConfig readRxPowerSavingConfig(')
+            source = source.replace('@' + marker + '@', adapter.replace(' override', ''))
+        sanitizers = [] if os.name == 'nt' else [
+            '-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-pie', '-no-pie']
+        with tempfile.TemporaryDirectory(prefix='rxps-snapshot-cpp11-') as directory:
+            work = Path(directory)
+            cpp, binary = work / 'snapshot.cpp', work / 'snapshot'
+            cpp.write_text(source, encoding='ascii')
+            for standard in ('c++11', 'c++17'):
+                with self.subTest(standard=standard):
+                    built = subprocess.run([os.environ.get('CXX', 'g++'), '-std=' + standard,
+                        '-Wall', '-Wextra', '-Werror', *sanitizers, '-I' + str(ROOT / 'src'),
+                        str(cpp), '-o', str(binary)], capture_output=True, text=True, timeout=60)
+                    self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                    ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+                    self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+
     def test_production_transactions(self):
         source = (ROOT / 'src/helpers/CommonCLI.cpp').read_text(encoding='utf-8')
         header = (ROOT / 'src/helpers/CommonCLI.h').read_text(encoding='utf-8')
@@ -155,8 +264,10 @@ class CommonRadioPersistenceTest(unittest.TestCase):
             'bool CommonCLI::savePrimaryRadioParams('))
         serializer = 'template<typename Writer>\n' + extract_braced(source, 'static bool writeCommonPrefsImage(')
         tail = extract_braced(source, 'if (file.available() >= (int)sizeof(_prefs->bridge_format))')
-        code = HARNESS.replace('@FIELDS@',fields).replace('@METHODS@',methods)
+        code = HARNESS.replace('@FIELDS@',fields).replace('@METHODS@',("\n#include <stddef.h>\ntemplate<typename Writer>\n" + extract_braced(source, "static void writeCommonRetryPrefs(") + "\n" + methods))
         code = code.replace('@SERIALIZER@',serializer).replace('@TAIL@',tail)
+        adapter = extract_braced(header, 'RxPowerSavingConfig readRxPowerSavingConfig(').replace(' override', '')
+        code = code.replace('@RXPS_READ@', adapter)
         sanitizer_flags = [] if os.name == 'nt' else [
             '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
             '-fno-pie', '-no-pie']
@@ -172,6 +283,7 @@ class CommonRadioPersistenceTest(unittest.TestCase):
                     built = subprocess.run(['g++','-std=c++17','-DENABLE_OTA=1','-D'+platform+'=1',
                         *sanitizer_flags,
                         '-I'+str(work),'-I'+str(ROOT/'test/fixtures/radio_profiles/mocks'),
+                        '-I'+str(ROOT/'test/mocks'),
                         '-I'+str(ROOT/'src'),'-I'+str(ROOT/'src/helpers'),
                         str(work/'test.cpp'),'-o',str(exe)],
                         capture_output=True,text=True,timeout=60)

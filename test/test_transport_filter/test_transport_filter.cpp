@@ -204,6 +204,48 @@ TEST_F(TransportFilter, InvalidModesAndActionsDoNotReplaceSavedRule) {
   EXPECT_FALSE(blocked(p, RULE_MODE_RADIO));
 }
 
+TEST_F(TransportFilter, TwoPacketFleetRulePreservesActionAfterLongParameters) {
+  const std::string prefix = "set flood.rule.1 type=grp_txt channel=" + std::string(64, '1')
+      + " prefix=AABBCC,DDEEFF,112233 hops=6+ priority=255 suspend=tempradio"
+        " mode=radio hashbytes=3 in=any";
+  const std::string action = " action=drop";
+  ASSERT_LT(prefix.size() + action.size(), 230U);
+  const std::string setter = prefix + std::string(230 - prefix.size() - action.size(), ' ') + action;
+  ASSERT_EQ(230U, setter.size());
+  ASSERT_GT(setter.size() - strlen("set flood.rule.1 "), 192U);
+  command(setter.c_str()); ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
+  const auto saved = fs.files["/flood_filter"];
+
+  mesh::Packet p;
+  p.header = (PAYLOAD_TYPE_GRP_TXT << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD;
+  p.setPathHashSizeAndCount(3, 6);
+  memset(p.path, 0, p.getPathByteLen());
+  const uint8_t path[] = {0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x11,0x22,0x33};
+  memcpy(p.path, path, sizeof(path));
+  uint8_t key[PUB_KEY_SIZE];memset(key, 0x11, sizeof(key));
+  mesh::Utils::sha256(p.payload, 1, key, sizeof(key));
+  const uint8_t text[] = "fleet: sample";
+  p.payload_len = 1 + mesh::Utils::encryptThenMAC(key, p.payload + 1, text, sizeof(text));
+  EXPECT_TRUE(blocked(p, RULE_MODE_RADIO));
+
+  std::string stop = setter;stop.replace(stop.size() - 4, 4, "stop");
+  command(stop.c_str()); ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
+  EXPECT_FALSE(blocked(p, RULE_MODE_RADIO));
+  EXPECT_NE(saved, fs.files["/flood_filter"]);
+
+  const auto unchanged = fs.files["/flood_filter"];
+  command(("set flood.rule.1 any " + std::string(256, ' ') + "drop").c_str());
+  EXPECT_EQ(0, strncmp(reply, "Err - rule parameters too long", 29));
+  EXPECT_EQ(unchanged, fs.files["/flood_filter"]);
+}
+
+TEST_F(TransportFilter, OverlongRateTokenCannotDiscardItsInvalidSuffix) {
+  install("radio");const auto saved = fs.files["/flood_filter"];
+  command(("set flood.rule.3 any q=" + std::string(23, '0') + "x stop").c_str());
+  EXPECT_EQ(0, strncmp(reply, "Err - rate value too long", 24)) << reply;
+  EXPECT_EQ(saved, fs.files["/flood_filter"]);
+}
+
 TEST_F(TransportFilter, CombinedModeSharesRateAndResetsAfterMinute) {
   command("set flood.rule.3 type=any mode=bridge,cross rate=1/min");
   ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
@@ -426,6 +468,37 @@ TEST_F(TransportFilter, ShorthandAddReusesLongRuleAndDeletePersists) {
     EXPECT_FALSE(rules.handleCommand(text, reply));
 }
 
+TEST_F(TransportFilter, UnnumberedRulesKeepDistinctConfigurations) {
+  command("del fr all");
+  command("set fr any pb=1 d");
+  ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
+  command("set fr any pb=2 d");
+  ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
+  command("get fr.1"); EXPECT_STREQ("set fr.1 any pb=1 d", reply);
+  command("get fr.2"); EXPECT_STREQ("set fr.2 any pb=2 d", reply);
+  rules.begin(&fs, nullptr);
+  command("get fr.1"); EXPECT_STREQ("set fr.1 any pb=1 d", reply);
+  command("get fr.2"); EXPECT_STREQ("set fr.2 any pb=2 d", reply);
+}
+
+TEST_F(TransportFilter, UnnumberedDuplicateReusesRuleWithLiveRateWindow) {
+  command("del fr all");
+  command("set fr any pb=2 q=1");
+  ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
+  auto p = packet();p.setPathHashSizeAndCount(2, 0);
+  const auto mask = rules.evaluate(&p, false, true, nullptr, RULE_MODE_RADIO);
+  ASSERT_NE(0U, mask);
+  EXPECT_FALSE(rules.shouldBlock(&p, mask, 100));
+  rules.commitRates(&p, mask, 100);
+  EXPECT_TRUE(rules.shouldBlock(&p, mask, 100));
+  const auto saved = fs.files["/flood_filter"];
+  command("set fr any pb=2 q=1");
+  ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
+  EXPECT_EQ(saved, fs.files["/flood_filter"]);
+  command("get fr.1"); EXPECT_STREQ("set fr.1 any pb=2 q=1", reply);
+  command("get fr.2"); EXPECT_EQ(0, strncmp(reply, "Err", 3));
+}
+
 TEST_F(TransportFilter, OversizedCompactReplyNeverReturnsPartialSetter) {
   // A valid short input can fit in 192 command bytes but exceed a 160-byte reply.
   const std::string channel = "#" + std::string(30, 'b'), name(30, 'a');
@@ -457,6 +530,35 @@ TEST_F(TransportFilter, PrivateKeyReferencesCopyLocallyWithoutDisclosingKey) {
   const auto empty = fs.files["/flood_filter"];
   command(paste.c_str()); EXPECT_EQ(0, strncmp(reply, "Err - unknown", 13)) << reply;
   EXPECT_EQ(empty, fs.files["/flood_filter"]);
+}
+
+TEST_F(TransportFilter, WholeFleetMaximumRulePreservesItsFinalDropAction) {
+  const std::string setter = "set flood.rule.1 5 c=" + std::string(64, '1') + " d";
+  ASSERT_EQ(87U, setter.size());
+  command(setter.c_str());
+  ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
+
+  mesh::Packet p;
+  p.header = (PAYLOAD_TYPE_GRP_TXT << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD;
+  p.setPathHashSizeAndCount(1, 0);
+  uint8_t key[PUB_KEY_SIZE];
+  memset(key, 0x11, sizeof(key));
+  mesh::Utils::sha256(p.payload, 1, key, sizeof(key));
+  const uint8_t text[] = "fleet: sample";
+  p.payload_len = 1 + mesh::Utils::encryptThenMAC(key, p.payload + 1, text, sizeof(text));
+  EXPECT_TRUE(blocked(p, RULE_MODE_RADIO));
+
+  command("get fr.1");
+  const std::string formatted = reply;
+  ASSERT_GE(formatted.size(), 2U);
+  EXPECT_EQ(" d", formatted.substr(formatted.size() - 2));
+
+  // A stop action at the same final byte has different forwarding behavior.
+  std::string stop = setter;
+  stop.back() = 's';
+  command(stop.c_str());
+  ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
+  EXPECT_FALSE(blocked(p, RULE_MODE_RADIO));
 }
 
 TEST(TransportModes, KeyFingerprintCollisionsCannotSelectAnArbitrarySecret) {

@@ -23,6 +23,7 @@ struct WebConfigServer {
   bool isRunning() const { return false; }
   bool isStopping() const { return false; }
   void updateWiFiOwnership(bool owner) { owns = owner; }
+  void requestNetworkAccess() {}
   bool startAutoMode(char* reply) { strcpy(reply, "starting"); return true; }
   bool startSetupMode(char* reply) { strcpy(reply, "setup"); return true; }
 };
@@ -39,6 +40,7 @@ struct MyMesh {
   const char* getRole() const { return "test"; }
   bool startWebConfig(bool force_ap, char* reply);
   bool startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup);
+  bool webConfigOwnsWiFi() const;
   void suspendUnconfiguredSetupBridges();
   void refresh() {
 @REFRESH@

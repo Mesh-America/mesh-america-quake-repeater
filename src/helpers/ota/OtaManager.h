@@ -6,11 +6,15 @@
 #include "OtaMemoryPolicy.h"
 #include "OtaTiming.h"
 #include "OtaProtocol.h"
+#include "OtaDirectWire.h"
 #include "OtaByteIO.h"
 #include "OtaStore.h"
 #include "MotaContainer.h"
 #include "OtaSource.h"
 #include "MerkleTree.h"
+#if OTA_BOUNDED_SOURCE_PROOFS
+#include "SourceMerkleProof.h"
+#endif
 
 // Transport-agnostic OTA session engine (docs/ota_protocol.md Section 5/Section 8). It SERVES a complete `.mota`
 // (answering GET_MANIFEST / REQ) and/or FETCHES one into an OtaStore (verifying every block against
@@ -35,11 +39,21 @@ typedef bool (*OtaSend)(void* ctx, const uint8_t* msg, uint16_t len, bool flood)
 struct OtaReplyRoute {
   uint32_t generation = 0;
   uint8_t profile = 0xFF;  // no radio affinity (portable callers)
+  bool direct = false;    // negotiated zero-hop raw/KISS wire, not routed Packet data
   bool operator==(const OtaReplyRoute& other) const {
-    return profile == other.profile && generation == other.generation;
+    return profile == other.profile && generation == other.generation && direct == other.direct;
   }
 };
+static_assert(sizeof(OtaReplyRoute) == 8, "Direct OTA must use existing route padding");
 typedef bool (*OtaReplyRouteValid)(void* ctx, const OtaReplyRoute& route);
+
+inline constexpr uint32_t ota_advance_direct_epoch(uint32_t previous) {
+  return previous == UINT32_MAX ? 1u : previous + 1u;
+}
+
+// Device admission is separate from portable block transport. Signed-only
+// automatic fetches must authenticate the manifest before touching staging.
+typedef bool (*OtaManifestAdmit)(void* ctx, const MotaManifest& manifest);
 
 // Read `len` payload bytes at offset `off` from the serve source (flash-backed self-serve); false on
 // error. nullptr means the payload is a contiguous RAM buffer (the staged `.mota`).
@@ -63,13 +77,19 @@ typedef bool (*ServeDeflateReadFn)(void* ctx, uint16_t block, uint8_t* dst,
 
 #ifndef OTA_PROOFGEN_SCRATCH
   #if defined(ESP32_PLATFORM)
-    #define OTA_PROOFGEN_SCRATCH 16384  // heap-backed; can seed <=4096 blocks (8 MiB at 2 KiB/block)
+    #define OTA_PROOFGEN_SCRATCH 16384  // maximum source leaves; <=4096 blocks (8 MiB at 2 KiB/block)
   #elif defined(OTA_SD_STORE)
     #define OTA_PROOFGEN_SCRATCH 8192  // SD archive can seed <=2048 blocks (about 4 MiB at 2 KiB/block)
   #else
-    #define OTA_PROOFGEN_SCRATCH 4096  // server proof-gen working buffer (supports up to 1024 blocks)
+    #define OTA_PROOFGEN_SCRATCH 4096  // maximum source leaves (supports up to 1024 blocks)
   #endif
 #endif
+
+#ifndef OTA_SOURCE_BUFFER_IDLE_MS
+#define OTA_SOURCE_BUFFER_IDLE_MS 30000u // retain an unpinned source cache briefly between requests
+#endif
+static_assert(OTA_SOURCE_BUFFER_IDLE_MS > 0u && OTA_SOURCE_BUFFER_IDLE_MS < 0x80000000u,
+              "OTA source-buffer idle interval must support wrap-safe elapsed time");
 
 #ifndef OTA_MAX_BLOCK
 #define OTA_MAX_BLOCK 2048          // largest logical block (Merkle leaf / independent DEFLATE unit)
@@ -98,6 +118,16 @@ static constexpr uint16_t ota_max_block_capability() { return (uint16_t)OTA_MAX_
 #ifndef OTA_MANIFEST_MAX_RETRY
 #define OTA_MANIFEST_MAX_RETRY 20   // give up (FAILED) after this many GET_MANIFEST retries - frees the slot
 #endif
+#ifndef OTA_AUTOFETCH_FAILURE_BACKOFF_MS
+#define OTA_AUTOFETCH_FAILURE_BACKOFF_MS 60000u
+#endif
+#ifndef OTA_AUTOFETCH_FAILURE_MAX_BACKOFF_MS
+#define OTA_AUTOFETCH_FAILURE_MAX_BACKOFF_MS 900000u
+#endif
+static_assert(OTA_AUTOFETCH_FAILURE_BACKOFF_MS > 0u &&
+              OTA_AUTOFETCH_FAILURE_BACKOFF_MS <= OTA_AUTOFETCH_FAILURE_MAX_BACKOFF_MS &&
+              OTA_AUTOFETCH_FAILURE_MAX_BACKOFF_MS < 0x80000000u,
+              "OTA automatic failure cooldown must support wrap-safe elapsed time");
 #ifndef OTA_MANIFEST_SERVE_QUEUE
 #define OTA_MANIFEST_SERVE_QUEUE 4  // bounded manifest response descriptors (fragments are emitted one at a time)
 #endif
@@ -240,7 +270,7 @@ static constexpr uint16_t ota_max_block_capability() { return (uint16_t)OTA_MAX_
 
 class OtaManager {
 public:
-  OtaManager() = default;
+  OtaManager();
   ~OtaManager();
   OtaManager(const OtaManager&) = delete;
   OtaManager& operator=(const OtaManager&) = delete;
@@ -272,7 +302,8 @@ public:
     FETCH_ERROR_STORAGE,
     FETCH_ERROR_INTEGRITY,
     FETCH_ERROR_MANIFEST_TIMEOUT,
-    FETCH_ERROR_LEAVES_TIMEOUT
+    FETCH_ERROR_LEAVES_TIMEOUT,
+    FETCH_ERROR_RADIO_SESSION
   };
 
   // Sentinel for "no block" in the reassembly / peer-REQ / recently-served slots (a real block index is
@@ -291,20 +322,24 @@ public:
     void*         read_ctx = nullptr;
     ServeDeflateReadFn read_deflated = nullptr; // optional host/source-generated raw-DEFLATE block
     void*         deflate_ctx = nullptr;
-    uint8_t*      scratch = nullptr;       // proof-gen working buffer (>= block_count*4)
+    uint8_t*      scratch = nullptr;       // optional encoded DATA output, not Merkle proof storage
     uint32_t      scratch_sz = 0;
   };
   // A lightweight catalog entry: what we advertise per mota + how to load its ServeView on demand.
   struct ServeEntry {
-    uint8_t     mid[4];
-    uint32_t    target_id, fw_version;
-    uint8_t     codec_id, flags;
-    uint32_t    have_count;                // blocks we currently hold (== block_count when complete)
-    bool        is_self;                   // true => entry is view0 (our own fw / RAM mota)
+    // Named fields only: this is not a wire/persistent layout. Group aligned
+    // values ahead of byte flags instead of paying three padding gaps per row.
     MotaSource* src;                       // load from this external source ...
-    uint8_t     src_idx;                   // ... at this index
     MotaDesc    desc;                      // cached region offsets for the source entry
+    uint32_t    target_id, fw_version;
+    uint32_t    have_count;                // blocks we currently hold (== block_count when complete)
+    uint8_t     mid[4];
+    uint8_t     codec_id, flags;
+    bool        is_self;                   // true => entry is view0 (our own fw / RAM mota)
+    uint8_t     src_idx;                   // ... at this index
   };
+  static_assert(sizeof(ServeEntry) <= sizeof(MotaDesc) + sizeof(MotaSource*) + 20u,
+                "OTA source catalog must not add per-entry alignment padding");
   // Context for the source-payload reader trampoline.
   struct SrcReadCtx { MotaSource* src; uint8_t idx; uint32_t payload_off; };
 
@@ -339,6 +374,12 @@ public:
     return _view0.valid && _view0.m.manifest_start == manifest;
   }
   uint8_t servedCount() const { return _n_serve; }   // total mOTAs we offer (own fw + folder)
+  bool sourceCatalogComplete() const { return _sources_complete; }
+  bool takeSourceReadyAnnouncement() {
+    const bool ready = _source_announce_pending;
+    _source_announce_pending = false;
+    return ready;
+  }
   // Per-source enumeration accounting. `offered` is what the attached host/source reported; `advertised`
   // is what fit in this build's serve registry after validation/deduplication/capacity limits.
   bool sourceStats(const MotaSource* src, uint16_t& offered, uint16_t& advertised) const;
@@ -365,6 +406,13 @@ public:
   // Defaults on for moving-forward 171-byte transfers. This switch exists for qualification and emergency
   // rollback; disabling it produces byte-for-byte legacy OTA_REQ/OTA_DATA behavior.
   void set_wire_v2_enabled(bool on) { _wire_v2_enabled = on; }
+  // Explicit transport capability, never inferred from block size or a sender.
+  // A fetch probes only after a validated zero-hop manifest at max_hops=0.
+  void set_direct_transport_enabled(bool on);
+  bool directFetchActive() const { return _direct_session; }
+  bool directFetchConfirmed() const { return _direct_session && _direct_confirmed; }
+  OtaReplyRoute directFetchRoute() const { return _fetch_route; }
+  uint32_t directTransportEpoch() const { return _direct_transport_epoch; }
 
   // Resume a fetch from a container already persisted in the store (after a reboot). want_mid=nullptr is
   // automatic adoption and rechecks current autofetch/target/version policy; a non-null MID is an explicit
@@ -466,6 +514,9 @@ public:
   // Auto-fetch policy (manual `ota pull` always works regardless): 0=off (discover only), 1=any
   // compatible own-target advert, 2=only signed adverts. Conservative default = off.
   static const uint8_t AUTOFETCH_OFF = 0, AUTOFETCH_ANY = 1, AUTOFETCH_SIGNED = 2;
+  void set_manifest_admission(OtaManifestAdmit admit, void* ctx) {
+    _admit_manifest = admit; _admit_manifest_ctx = ctx;
+  }
   void set_autofetch(uint8_t p) { _autofetch = p; reDiscover(); }
   uint8_t autofetch() const { return _autofetch; }
   // One-way release migration for a legacy identity. Automatic OTA follows the
@@ -500,7 +551,10 @@ public:
   // Max OTA flood reach in HOPS (runtime-tunable, persisted): a node accepts OTA from up to N hops away and
   // relays packets still under N hops; 0 = direct only (accept path_count 0, never relay). Bounds duty-cycle
   // when crossing repeaters. Default OTA_HOP_LIMIT_DEFAULT. Set via `ota config hops`.
-  void set_max_hops(uint8_t h) { _max_hops = h; }
+  void set_max_hops(uint8_t h) {
+    _max_hops = h;
+    if (h != 0 && _direct_session) downgradeDirectTransport();
+  }
   uint8_t max_hops() const { return _max_hops; }
   bool fetched_is_signed() const { return (_fflags & MFLAG_SIGNED) != 0; }  // flags of the fetched manifest
   bool fetched_is_bootloader() const { return (_fflags & MFLAG_BOOTLOADER) != 0; }
@@ -526,6 +580,7 @@ public:
 
   // Drop the current fetch session back to IDLE so a fresh `ota pull` / advert starts a new one.
   void reset_session() {
+    invalidateDirectTransport();
     _fstate = IDLE; _have = 0; _fbc = 0; _ftotal = 0; _fflags = 0;
     _paused_from = IDLE;
     _req_count = 0; _mf_retries = 0;
@@ -539,6 +594,7 @@ public:
     _resume_verify_idx = 0; _resume_invalidated = false;
     _resume_merkle.reset();
     _wire_empty_stalls = 0;
+    _direct_session = false; _direct_confirmed = false; _fetch_route = {};
   }
 
   FetchState fetchState() const { return _fstate; }
@@ -557,15 +613,18 @@ public:
   struct CatRow {
     uint8_t  mid[4];
     uint32_t target_id, fw_version;
-    uint8_t  codec, flags;
-    uint8_t  seeders[OTA_CAT_SEEDERS][4];  // distinct sources advertising this mid (deduped; capped)
-    uint16_t seeder_have[OTA_CAT_SEEDERS];  // progress reported by each tracked source
-    uint32_t seeder_last_ms[OTA_CAT_SEEDERS]; // age of each tracked source's latest HAVE
-    uint8_t  n_seeders;                    // count of the above (capped at OTA_CAT_SEEDERS) - "N+ nodes have it"
-    uint32_t have_max;                     // best block-count any source reported (== total when a full copy exists)
     uint32_t last_ms;
     uint32_t retry_after_ms;                // per-image archive retry deadline (0 = eligible)
+    uint32_t seeder_last_ms[OTA_CAT_SEEDERS]; // age of each tracked source's latest HAVE
+    uint8_t  seeders[OTA_CAT_SEEDERS][4];  // distinct sources advertising this mid (deduped; capped)
+    uint16_t seeder_have[OTA_CAT_SEEDERS];  // progress reported by each tracked source
+    uint16_t have_max;                    // HAVE carries a uint16 block count
+    uint8_t  codec;
+    uint8_t  flags : 3;                   // MFLAG_KNOWN, validated before caching
+    uint8_t  n_seeders : 3;               // bounded by OTA_CAT_SEEDERS = 4
   };
+  static_assert(sizeof(CatRow) * OTA_MAX_CATALOG <= 16384u,
+                "Maximum OTA catalog exceeds its qualified 16 KiB heap budget");
   uint8_t catalogCount() const { return _n_cat; }
   const CatRow* catalogRow(uint8_t i) const { return i < _n_cat ? &catalogData()[i] : nullptr; }
   uint8_t sourceCount() const { return _n_src; }   // distinct OTA sources (beacon senders) heard
@@ -579,6 +638,7 @@ private:
   const CatRow* catalogData() const { return _catalog_heap ? _catalog_heap : _catalog_inline; }
   uint16_t catalogCapacity() const { return _catalog_heap ? OTA_MAX_CATALOG : OTA_INLINE_CATALOG; }
   bool expandCatalog();
+  void releaseSmallCatalog();
 
   bool emit(const uint8_t* b, uint16_t n, bool flood, const OtaReplyRoute* route = nullptr) {
     const OtaReplyRoute* previous = _reply_route;
@@ -593,7 +653,7 @@ private:
   void handleHave(const uint8_t* m, uint16_t n);    // peer: catalog rows (+ startFetch if a row matches)
   bool handleGetManifest(const uint8_t* m, uint16_t n);
   void handleManifest(const uint8_t* m, uint16_t n);
-  void handleGetLeaves(const uint8_t* m, uint16_t n);    // serve: send the requested leaf fragments
+  bool handleGetLeaves(const uint8_t* m, uint16_t n);    // serve: send the requested leaf fragments
   void handleLeaves(const uint8_t* m, uint16_t n);       // fetcher (validate): reassemble the target leaves
   bool beginLeafDiff();                                  // enter WANT_LEAVES if a seed diff is viable
   void diffStep();                                       // diff one batch of seed blocks per loop tick
@@ -606,6 +666,7 @@ private:
   bool wantRow(const uint8_t* mid, uint32_t target, uint32_t fw_version,
                uint8_t codec, uint8_t flags) const;  // fetch this row?
   bool fetchActive() const;
+  bool resumeStagedFor(const uint8_t* want_mid, bool automatic);
   void clearFetchIntent();
   void failFetch(FetchError error);
   void completeFetch();
@@ -633,7 +694,7 @@ private:
                      bool extended_length = false);
   void noteServedRequestPacing(const uint8_t* mid, uint16_t block,
                                uint16_t want, uint16_t full_mask);
-  bool queueManifestJob(const uint8_t* mid, uint16_t want_mask);
+  bool queueManifestJob(const uint8_t* mid, uint16_t want_mask, bool leaves = false);
   uint32_t manifestEgressGapMs() const;
   uint32_t proofEgressGapMs() const;
   bool serviceManifestEgress(OtaReplyRouteValid route_valid, void* route_ctx);
@@ -667,6 +728,15 @@ private:
   uint16_t wireRequestMask(uint32_t block, uint16_t need, uint16_t received,
                            uint16_t encoded_len) const;
   void downgradeWireToLegacy();                           // old source answered/ignored the v2 request profile
+  void downgradeDirectTransport();                       // preserve committed blocks; discard unverified geometry
+  void invalidateDirectTransport();                      // retire already-admitted direct raw frames
+  uint16_t fetchFragmentData() const {
+    return _direct_session ? OTA_DIRECT_FRAG_DATA :
+        (_wire_v2_session ? OTA_FRAG_DATA_V2 : OTA_FRAG_DATA);
+  }
+  const OtaReplyRoute* fetchReplyRoute() const {
+    return _fetch_route.profile < 2 ? &_fetch_route : nullptr;
+  }
   bool anyWireDataReceived() const;
   uint32_t blockLen(uint32_t i) const;
 
@@ -686,18 +756,27 @@ private:
   uint16_t    _src_advertised[OTA_MAX_SOURCE_OBJ] = {0};
   uint8_t     _n_src_obj = 0;
   uint8_t     _src_manifest[OTA_SRC_MANIFEST_MAX];   // manifest-minus-leaves of the loaded source mota
-#if defined(ESP32_PLATFORM)
-  // Folder-source leaves and proof scratch are cold-path working storage. Keep
-  // them off classic ESP32 .bss and allocate them on first use.
-  uint8_t*    _src_leaves = nullptr;
-  uint8_t*    _scratch = nullptr;
+  // Cold source leaves are sized to the selected image, within the unchanged
+  // capacity limit. Device-encoder output needs at most one logical block;
+  // host-encoded output uses _serve_block. Cold buffers stay pinned until
+  // queued egress drains, then return to the heap at idle.
+#if OTA_BOUNDED_SOURCE_PROOFS
+  using BoundedSourceProof = SourceMerkleProof<OTA_PROOFGEN_SCRATCH / 4, OTA_LEAVES_FRAG>;
+  static_assert(OTA_PROOFGEN_SCRATCH >= 4 && OTA_PROOFGEN_SCRATCH <= 16384 &&
+                sizeof(BoundedSourceProof) <= 1536,
+                "Update the bounded source workspace RAM budget in check_firmware_ram.py");
+  BoundedSourceProof* _source_proofs = nullptr;
+  uint32_t _src_leaves_off = 0;
 #else
-  uint8_t     _src_leaves[OTA_PROOFGEN_SCRATCH];     // leaves[] of the loaded source mota (<=1024 blocks)
-  uint8_t     _scratch[OTA_PROOFGEN_SCRATCH];        // proof-gen / fetch root-check working buffer
+  uint8_t*    _src_leaves = nullptr;
+  uint32_t    _src_leaves_capacity = 0;
 #endif
+  uint8_t*    _scratch = nullptr;
+  uint32_t    _source_buffer_used_at = 0;
 
-  // Server-side response descriptors are tiny. The active logical block has its own buffer so proof generation
-  // or a simultaneous fetch cannot overwrite DATA retained behind radio-queue backpressure.
+  // Server-side response descriptors are tiny. Active DATA stays cached behind
+  // radio-queue backpressure. Proofs do not touch that cache; inbound decoding
+  // may reuse it but invalidates it before the next outbound fragment.
   struct ServeJob {
     OtaReplyRoute route;
     uint8_t mid[4] = {0};
@@ -726,6 +805,7 @@ private:
     uint16_t pending_mask;
     uint16_t emitted_mask;
     uint32_t ready_at;
+    bool leaves;
   };
   ManifestServeJob _manifest_jobs[OTA_MANIFEST_SERVE_QUEUE];
   uint8_t    _n_manifest_jobs = 0;
@@ -734,7 +814,8 @@ private:
   uint8_t    _serve_block[OTA_MAX_BLOCK];
   uint16_t   _serve_block_len = 0;
   bool       _serve_block_loaded = false;
-  const uint8_t* _serve_wire_block = nullptr;       // raw _serve_block or DEFLATE bytes in ServeView::scratch
+  // Raw/host-encoded _serve_block, or device-encoder output in ServeView::scratch.
+  const uint8_t* _serve_wire_block = nullptr;
   uint16_t   _serve_wire_len = 0;
   bool       _serve_wire_deflated = false;
   uint8_t    _serve_wire_id[4] = {0};              // SHA-256:4 of this exact encoded representation
@@ -769,14 +850,25 @@ private:
   bool       _archive_fetch = false;                    // capture-only pull: accept any target/codec
   bool       _archive_interest = false;                 // query full catalogs for the persistent archive
   uint8_t    _seeder_id[4] = {0,0,0,0};        // our node id (pubkey[0:4]) for advert seeder counting
+  OtaManifestAdmit _admit_manifest = nullptr;
+  void*      _admit_manifest_ctx = nullptr;
+  uint32_t   _auto_failure_at = 0;
+  uint32_t   _auto_failure_delay = 0;
   uint8_t    _autofetch = AUTOFETCH_OFF;       // auto-fetch policy (persisted in NodePrefs)
   uint32_t   _running_fw_version = 0;           // trusted EndF version used only for automatic admission
   bool       _enforce_auto_version = false;     // OtaContext enables this even when EndF/version is unknown
   uint16_t   _checkpoint_blocks = OTA_CHECKPOINT_BLOCKS;  // resume checkpoint cadence (persisted)
   uint16_t   _advert_mins = OTA_ADVERT_INTERVAL_MINS;    // beacon re-advertise cadence, minutes; 0=off (persisted)
+  bool       _sources_complete = true;
+  bool       _source_announce_pending = false;
   uint8_t    _max_hops = OTA_HOP_LIMIT_DEFAULT;          // OTA flood reach in hops; 0=direct only (persisted)
   uint8_t    _fflags = 0;                       // flags of the manifest currently being fetched
   bool       _wire_v2_enabled = true;            // advertise v2 in OTA_REQ while retaining transparent fallback
+  bool       _direct_transport_enabled = false;
+  bool       _direct_session = false;
+  bool       _direct_confirmed = false;
+  OtaReplyRoute _fetch_route;
+  uint32_t _direct_transport_epoch;
   bool       _wire_v2_session = true;            // false after an old source responds or the first request stalls
   bool       _wire_v2_confirmed = false;          // at least one structurally valid v2 DATA packet was observed
   bool       _wire_allow_deflate = false;        // session may request compressed blocks only with a decoder
@@ -790,6 +882,7 @@ private:
     uint16_t mask = 0;                         // received FRAG_DATA-slice bitmap
     uint16_t need = 0;                         // full bitmap for this block
     bool awaiting_proof = false;
+    bool proof_failed = false;                 // preserve DATA until the normal recovery deadline
     uint32_t proof_request_at = 0;              // proactive-proof grace deadline; 0 after fallback is sent
     uint16_t encoded_len = 0;                   // v2 wire length; zero until the first DATA fragment establishes it
     bool wire_v2 = false;
@@ -827,29 +920,37 @@ private:
   bool       _diffing = false;                 // leaves are in; diffing the seed a batch per tick
   uint32_t   _diff_idx = 0;                    // next block index to diff against the seed
 
-  uint8_t* ensureSourceLeaves();
+#if OTA_BOUNDED_SOURCE_PROOFS
+  BoundedSourceProof* ensureSourceProofs();
+#else
+  uint8_t* ensureSourceLeaves(uint32_t bytes);
+#endif
   uint8_t* ensureScratch();
+  void releaseColdBuffers();
+  void releaseIdleColdBuffers();
 
   // discovery: heard sources (beacon senders) + the catalog assembled from their OTA_HAVE replies
   struct Source {
     uint8_t seeder[4];
     uint8_t digest[4];
-    uint8_t n_motas;
     uint32_t last_ms;
+    uint32_t have_mask;
+    uint32_t query_at;
+    uint32_t query_retry_at;
+    uint8_t n_motas;
     bool have_catalog;
     uint8_t have_total;
-    uint32_t have_mask;
     bool query_pending;
     bool query_owned;
     uint8_t query_retries;
-    uint32_t query_at;
-    uint32_t query_retry_at;
   };
+  static_assert(sizeof(Source) == 32u, "OTA source discovery rows must retain compact natural alignment");
   Source     _sources[OTA_MAX_SOURCES];
   uint8_t    _n_src = 0;
   CatRow     _catalog_inline[OTA_INLINE_CATALOG];
   CatRow*    _catalog_heap = nullptr;
   uint8_t    _n_cat = 0;
+  bool       _catalog_browse_requested = false;
   uint32_t   _now_ms = 0;                       // coarse clock (fed by set_clock; for ages/LRU/jitter)
 };
 

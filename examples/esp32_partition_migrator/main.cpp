@@ -1,8 +1,10 @@
 #include <Arduino.h>
+#if !defined(MESHCORE_MIGRATION_USB) || !MESHCORE_MIGRATION_USB
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include "../../arch/esp32/AsyncElegantOTA/src/AsyncElegantOTA.h"
+#endif
 #include <Preferences.h>
 #include <SPIFFS.h>
 #include <esp_ota_ops.h>
@@ -16,7 +18,11 @@
 #endif
 
 #include <helpers/ESP32PartitionMigrationPolicy.h>
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+#include <helpers/ESP32PartitionMigrationUsbRecovery.h>
+#else
 #include <helpers/esp32/WiFiRadioPolicy.h>
+#endif
 
 #if defined(MOTA_MIGRATION_TARGET_ID)
 String partitionExpanderStatus();
@@ -27,7 +33,9 @@ namespace migration = mesh::esp32_partition_migration;
 namespace {
 
 constexpr char kApSsid[] = "MeshCore-Migrate";
-constexpr char kApPassword[] = "meshcore-migrate";
+// Published in the docs, so it protects nothing. Used only when the node's own
+// admin password cannot serve as the WPA2 passphrase.
+constexpr char kFallbackApPassword[] = "meshcore-migrate";
 #ifndef MESHCORE_MIGRATION_DELAY_MS
 #define MESHCORE_MIGRATION_DELAY_MS 4500
 #endif
@@ -74,6 +82,10 @@ constexpr ConfigFile kConfigFiles[] = {
 };
 constexpr size_t kConfigFileCount = sizeof(kConfigFiles) / sizeof(kConfigFiles[0]);
 static_assert(kConfigFileCount <= 32, "config presence mask is 32 bits");
+#if defined(MESHCORE_MIGRATION_STRICT_4MB) && MESHCORE_MIGRATION_STRICT_4MB
+static_assert(kConfigFileCount + 1 <= migration::PreservationBudget::kMaximumFiles,
+              "strict filesystem inventory must cover every staged config file");
+#endif
 struct ConfigStage {
   uint32_t magic;
   uint32_t present;
@@ -92,7 +104,16 @@ constexpr char kLegacyBridgeImageMarker[] = "MeshCore Wi-Fi partition migration"
 static_assert(sizeof(kMigrationNvsNamespace) - 1 <= 15,
               "ESP32 NVS namespace names are limited to 15 characters");
 
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+mesh::esp32_partition_usb::Recovery usb_recovery;
+bool usb_settled = false;
+bool usb_restored = false;
+uint32_t usb_status_at = 0;
+char usb_command[32] = {};
+size_t usb_command_bytes = 0;
+#else
 AsyncWebServer server(80);
+#endif
 bool migration_started = false;
 bool migration_complete = false;
 bool expanded_layout_ready = false;
@@ -322,6 +343,11 @@ bool stageLegacyIdentity() {
   }
   const bool saved = migration_nvs.putBytes(kMigrationIdentityKey, copy_buffer,
                                              kIdentityFileBytes) == kIdentityFileBytes
+#if defined(MESHCORE_MIGRATION_STRICT_4MB) && MESHCORE_MIGRATION_STRICT_4MB
+      && migration_nvs.getBytes(kMigrationIdentityKey, partition_table_verified,
+                                kIdentityFileBytes) == kIdentityFileBytes
+      && memcmp(copy_buffer, partition_table_verified, kIdentityFileBytes) == 0
+#endif
       && migration_nvs.putBool(kMigrationIdentityPendingKey, true);
   migration_nvs.end();
   if (!saved) strcpy(status_text, "Could not save private key for migration");
@@ -578,6 +604,90 @@ bool restoreStagedConfig() {
   nvs.end();
   return restored;
 }
+
+#if defined(MESHCORE_MIGRATION_STRICT_4MB) && MESHCORE_MIGRATION_STRICT_4MB
+bool inventoryStrictDirectory(const char* path, unsigned depth,
+                              migration::PreservationBudget& budget,
+                              uint64_t& seen) {
+  if (depth > 1) {
+    strcpy(status_text, "Refused: unsupported saved-data directory nesting");
+    return false;
+  }
+  File directory = SPIFFS.open(path, "r");
+  if (!directory || !directory.isDirectory()) {
+    strcpy(status_text, "Refused: could not enumerate saved filesystem");
+    return false;
+  }
+  bool valid = true;
+  for (File entry = directory.openNextFile(); valid && entry;
+       entry = directory.openNextFile()) {
+    const char* name = entry.path();
+    if (!name || name[0] != '/' || strnlen(name, 96) >= 96) {
+      strcpy(status_text, "Refused: invalid saved-data path");
+      valid = false;
+    } else if (entry.isDirectory()) {
+      // The preservation set has one known directory. Even an unknown empty
+      // directory is refused instead of guessing whether its content matters.
+      if (strcmp(name, "/identity") != 0 || depth != 0) {
+        snprintf(status_text, sizeof(status_text), "Refused: unsupported saved directory %.80s", name);
+        valid = false;
+      } else {
+        valid = inventoryStrictDirectory(name, depth + 1, budget, seen);
+      }
+    } else {
+      size_t index = 0;
+      if (strcmp(name, "/identity/_main.id") != 0) {
+        for (index = 0; index < kConfigFileCount; ++index)
+          if (strcmp(name, kConfigFiles[index].path) == 0) break;
+        if (index == kConfigFileCount) {
+          snprintf(status_text, sizeof(status_text), "Refused: unpreserved saved file %.80s", name);
+          valid = false;
+        }
+        ++index; // bit zero belongs only to the identity
+      }
+      if (valid) {
+        const uint64_t bit = uint64_t(1) << index;
+        const size_t bytes = entry.size();
+        if ((seen & bit) != 0 || (index == 0 && bytes != kIdentityFileBytes)) {
+          strcpy(status_text, "Refused: ambiguous or unsupported private identity record");
+          valid = false;
+        } else if (bytes > UINT32_MAX || !budget.addFile(static_cast<uint32_t>(bytes))) {
+          snprintf(status_text, sizeof(status_text), "Refused: %.80s exceeds safe 64 KiB preservation budget", name);
+          valid = false;
+        } else {
+          seen |= bit;
+        }
+      }
+    }
+    entry.close();
+  }
+  directory.close();
+  return valid;
+}
+
+bool preflightStrictPreservation(const migration::TargetPlan& plan) {
+  if (plan.flash_bytes != migration::kSmallRequiredFlashBytes ||
+      plan.layout.spiffs_size != 0x10000 || !SPIFFS.begin(false)) {
+    strcpy(status_text, "Refused: strict source filesystem is unavailable");
+    return false;
+  }
+  migration::PreservationBudget budget(plan.layout.spiffs_size);
+  uint64_t seen = 0;
+  bool valid = inventoryStrictDirectory("/", 0, budget, seen);
+  if (valid && (seen & 1U) == 0) {
+    strcpy(status_text, "Refused: private identity is absent from saved-data inventory");
+    valid = false;
+  }
+  for (size_t i = 0; valid && i < kConfigFileCount; ++i) {
+    if (SPIFFS.exists(kConfigFiles[i].path) != ((seen & (uint64_t(1) << (i + 1))) != 0)) {
+      strcpy(status_text, "Refused: incomplete saved-data inventory");
+      valid = false;
+    }
+  }
+  SPIFFS.end();
+  return valid;
+}
+#endif
 
 #if defined(MESHCORE_MIGRATION_RESUME_OTA) || defined(MOTA_MIGRATION_TARGET_ID)
 uint32_t readLe32(const uint8_t* bytes) {
@@ -890,6 +1000,19 @@ void runMigration() {
     Serial.println(status_text);
     return;
   }
+#if defined(MESHCORE_MIGRATION_STRICT_4MB) && MESHCORE_MIGRATION_STRICT_4MB
+  if (!migration::isReviewed4MBSource(flash_bytes, geometry)) {
+    strcpy(status_text, "Refused: source is not a reviewed 4 MiB partition layout");
+    Serial.println(status_text);
+    return;
+  }
+  // Admission happens before identity/config staging, app copying, OTA-select
+  // writes and the non-atomic partition-table erase/write window.
+  if (!preflightStrictPreservation(*plan)) {
+    Serial.println(status_text);
+    return;
+  }
+#endif
 
   const esp_partition_t* running = esp_ota_get_running_partition();
   // Partition handles are opaque; their addresses, rather than their pointer
@@ -997,11 +1120,10 @@ void runMigration() {
   Serial.println("Migration: boot slot selected for restart");
 
   Serial.println("Migration: publishing expanded partition table");
-  // This bridge is built without native USB CDC, so a connected USB host cannot
-  // post a flash-backed event while the partition-sector operation disables the
-  // flash cache. Stop UART0 as well: the S3's serial event path is otherwise
-  // still able to interrupt the raw flash operation. The bridge has no native
-  // USB CDC; the final normal repeater build restores its standard USB behavior.
+  // Both Wi-Fi and dedicated USB bridge images disable application USB CDC.
+  // Stop UART0 during this deliberately dangerous raw sector operation too.
+  // Normal ESP-IDF start/end cache hooks remain installed throughout.  The USB
+  // bridge returns to the ROM only after its next boot verifies all restoration.
   Serial.flush();
   Serial.end();
   const bool table_published = publishExpandedPartitionTable(*plan);
@@ -1021,13 +1143,18 @@ void runMigration() {
         ? "Migration complete; restarting LoRa bridge"
         : "Migration complete; resuming old LoRa receiver");
 #else
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+    strcpy(status_text, "Migration complete; restarting USB restore bridge");
+#else
     strcpy(status_text, "Migration complete; restarting Wi-Fi uploader");
+#endif
 #endif
     reboot_at = millis() + kMigrationRestartDelayMs;
   }
   Serial.println(status_text);
 }
 
+#if !defined(MESHCORE_MIGRATION_USB) || !MESHCORE_MIGRATION_USB
 void sendHome(AsyncWebServerRequest* request) {
   const char* mode = status_text;
   String page;
@@ -1068,11 +1195,46 @@ void sendHome(AsyncWebServerRequest* request) {
   request->send(200, "text/html", page);
 }
 
+bool ap_password_is_admin = false;
+
+// Anyone who joins the bridge AP can upload firmware while the private key is
+// staged. The operator started this migration from the node's authenticated
+// terminal, so its admin password is a secret they already hold. Stock and
+// keymindCascade /com_prefs (and older /node_prefs) images all keep its
+// 16-byte field at offset 56; stock 1.10/1.11 images end before byte 290.
+bool loadAdminApPassword(char (&password)[16]) {
+  constexpr size_t kPasswordOffset = 56;
+  memset(password, 0, sizeof(password));
+  // Never format: before migration this is the legacy filesystem.
+  if (!SPIFFS.begin(false)) return false;
+  const char* path = SPIFFS.exists("/com_prefs") ? "/com_prefs"
+      : (SPIFFS.exists("/node_prefs") ? "/node_prefs" : nullptr);
+  File prefs = path ? SPIFFS.open(path, "r") : File();
+  // Byte 15 stays zero, matching the firmware's own terminator.
+  bool valid = prefs && prefs.size() >= kPasswordOffset + sizeof(password)
+      && prefs.seek(kPasswordOffset)
+      && prefs.read(reinterpret_cast<uint8_t*>(password), sizeof(password) - 1)
+             == sizeof(password) - 1;
+  if (prefs) prefs.close();
+  SPIFFS.end();
+  // WPA2 needs 8-63 printable ASCII characters. Anything else falls back
+  // rather than leaving the bridge unreachable.
+  size_t length = 0;
+  while (valid && password[length] != 0) {
+    valid = password[length] >= 0x20 && password[length] <= 0x7E;
+    ++length;
+  }
+  return valid && length >= 8;
+}
+
 void startServer() {
   // A legacy ESP-NOW repeater can leave the AP protocol mask in proprietary
   // LR mode.  SoftAP then reports success but ordinary phones and laptops
   // cannot discover it.  Reuse the normal WebConfig recipe: AP+STA mode,
   // an explicit interoperable protocol mask, and the project AP channel.
+  char admin_password[16];
+  ap_password_is_admin = loadAdminApPassword(admin_password);
+  const char* ap_password = ap_password_is_admin ? admin_password : kFallbackApPassword;
   WiFi.mode(WIFI_AP_STA);
   WiFi.setAutoReconnect(false);
   WiFi.disconnect(false, true);
@@ -1081,7 +1243,7 @@ void startServer() {
   const IPAddress address(192, 168, 4, 1);
   const IPAddress netmask(255, 255, 255, 0);
   if (!WiFi.softAPConfig(address, address, netmask)
-      || !WiFi.softAP(kApSsid, kApPassword, mesh::wifi::accessPointChannel())
+      || !WiFi.softAP(kApSsid, ap_password, mesh::wifi::accessPointChannel())
       || mesh::wifi::applyAccessPointProtocolMask() != ESP_OK
       || esp_wifi_set_protocol(WIFI_IF_STA, mesh::wifi::kProtocolMask) != ESP_OK
       || esp_wifi_set_max_tx_power(78) != ESP_OK) {
@@ -1096,6 +1258,9 @@ void startServer() {
                 WiFi.softAPSSID().c_str(), WiFi.softAPIP().toString().c_str(),
                 (unsigned)ap_config.ap.channel, (unsigned)ap_config.ap.ssid_hidden,
                 max_tx_power / 4.0, (int)config_result, (int)power_result);
+  if (!ap_password_is_admin)
+    Serial.println("Warning: no saved admin password of 8-15 printable characters; "
+                   "anyone with the published fallback password can upload firmware");
   server.on("/", HTTP_GET, sendHome);
   server.on("/reboot", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (!migration_complete) {
@@ -1108,12 +1273,74 @@ void startServer() {
   if (!expanded_layout_ready || identity_ready) AsyncElegantOTA.begin(&server);
   server.begin();
 }
+#else
+bool verifiedUsbHandoff() {
+  Preferences nvs;
+  if (!nvs.begin(kMigrationNvsNamespace, true)) return false;
+  const bool verified = nvs.getBool(kMigrationConfigRestoredKey, false)
+      && !nvs.getBool(kMigrationConfigPendingKey, false)
+      && !nvs.getBool(kMigrationIdentityPendingKey, false);
+  nvs.end();
+  return verified;
+}
+
+void sendUsbState() {
+  // Public state only: never serialize identity/configuration or staged blobs.
+  Serial.printf("MESHCORE_USB_MIGRATION_STATE {\"format\":\"%s\","
+                "\"device_mac\":\"%s\",\"settled\":%s,\"restored\":%s}\n",
+                mesh::esp32_partition_usb::kFormat, usb_recovery.deviceMac(),
+                usb_settled ? "true" : "false", usb_restored ? "true" : "false");
+}
+
+void settleUsbMigration(bool restored) {
+  usb_settled = true;
+  usb_restored = restored;
+  sendUsbState();
+  // Classic ESP32 intentionally remains in this quiet UART state until the
+  // host sees the matching MAC + settled signal and asserts DTR/RTS.  Native
+  // devices instead reappear as ROM USB automatically, including on refusal.
+  usb_recovery.returnToRom();
+  usb_status_at = millis();
+}
+
+void serviceUsbState() {
+  while (Serial.available()) {
+    const char c = static_cast<char>(Serial.read());
+    if (c == '\n' || c == '\r') {
+      usb_command[usb_command_bytes] = 0;
+      if (strcmp(usb_command, "migration status") == 0) sendUsbState();
+      usb_command_bytes = 0;
+    } else if (usb_command_bytes + 1 < sizeof(usb_command)) {
+      usb_command[usb_command_bytes++] = c;
+    } else {
+      usb_command_bytes = 0;  // bounded, non-authoritative diagnostic parser
+    }
+  }
+  if (usb_settled && static_cast<uint32_t>(millis() - usb_status_at) >= 1000) {
+    sendUsbState();
+    usb_status_at = millis();
+  }
+}
+#endif
 
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
   delay(250);
+
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+  // Referenced at runtime so the packager can require this exact binary marker.
+  Serial.println(mesh::esp32_partition_usb::kImageMarker);
+  Serial.println(meshEsp32MigrationNvsGuardMarker());
+  const char* recovery_error = usb_recovery.prepare();
+  if (recovery_error) {
+    strncpy(status_text, recovery_error, sizeof(status_text) - 1);
+    Serial.println(status_text);
+    settleUsbMigration(false);
+    return;
+  }
+#endif
 
   PartitionRefs refs;
   migration::PartitionGeometry geometry = {};
@@ -1141,20 +1368,45 @@ void setup() {
     strcpy(status_text, "Refused: unsupported legacy source layout");
   }
 
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+  if (expanded_layout_ready) {
+    // Restoration has completed and no further filesystem/NVS write remains.
+    // A layout alone is not permission to flash the final application.
+    const bool restored = identity_ready && verifiedUsbHandoff();
+    if (identity_ready && !restored)
+      strcpy(status_text, "Refused: verified USB configuration handoff is absent");
+    Serial.println(status_text);
+    settleUsbMigration(restored);
+  } else if (migration_at == 0) {
+    Serial.println(status_text);
+    settleUsbMigration(false);
+  } else {
+    Serial.println(status_text);
+    sendUsbState();
+  }
+#else
   startServer();
   Serial.printf("%s. Join %s (password: %s), then open http://192.168.4.1/\n",
-                status_text, kApSsid, kApPassword);
+                status_text, kApSsid,
+                ap_password_is_admin ? "this node's admin password" : kFallbackApPassword);
+#endif
 }
 
 void loop() {
   if (!migration_started && migration_at != 0
       && static_cast<int32_t>(millis() - migration_at) >= 0) {
     runMigration();
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+    if (!migration_complete) settleUsbMigration(false);
+#endif
   }
   if ((reboot_at != 0 && static_cast<int32_t>(millis() - reboot_at) >= 0)
       || reboot_requested) {
     delay(100);
     ESP.restart();
   }
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+  serviceUsbState();
+#endif
   delay(10);
 }

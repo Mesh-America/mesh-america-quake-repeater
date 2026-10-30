@@ -25,25 +25,30 @@ static void seedValues(CompanionNodePrefs& prefs, uint32_t& random) {
     }
   };
   @SEED_FIELDS@
+  prefs.tz_offset = float(int(random % 27) - 12);
+  prefs.tz_offset_legacy = static_cast<int8_t>(prefs.tz_offset);
 }
 
 static void equalValues(const CompanionNodePrefs& a,
                         const CompanionNodePrefs& b) {
   @COMPARE_FIELDS@
+  assert(a.tz_offset == b.tz_offset);
 }
 
 static size_t adapterOffset(const CompanionNodePrefs& prefs) {
   // The value helper does not copy the adapters or their inter-field padding.
   // Use the complete object's byte representation for bounded observation.
   const uintptr_t first = reinterpret_cast<uintptr_t>(&prefs);
-  const uintptr_t last = reinterpret_cast<uintptr_t>(&prefs.usb_debug_enabled);
+  const uintptr_t last = reinterpret_cast<uintptr_t>(&prefs.tx_ssh);
   assert(last >= first && last - first < sizeof(prefs));
-  return static_cast<size_t>(last - first) + sizeof(prefs.usb_debug_enabled);
+  return static_cast<size_t>(last - first) + sizeof(prefs.tx_ssh);
 }
 
 static std::vector<uint8_t> adapterBytes(const CompanionNodePrefs& prefs) {
   const auto* bytes = reinterpret_cast<const uint8_t*>(&prefs);
-  return {bytes + adapterOffset(prefs), bytes + sizeof(prefs)};
+  // The separately copied runtime timezone follows both adapters.
+  return {bytes + adapterOffset(prefs),
+      reinterpret_cast<const uint8_t*>(&prefs.tz_offset)};
 }
 
 static void expectTag(CompanionNodePrefs& prefs, const char* expected) {
@@ -92,7 +97,13 @@ int main() {
     saved.bluetooth_enabled = static_cast<uint8_t>(trial);
     DataStore image_store;
     assert(image_store.savePrefs(saved, 47.125, -122.25));
-    const auto image = image_store.fs.files["/new_prefs"];
+    auto image = image_store.fs.files["/new_prefs"];
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+    assert(image[79] == saved.leds_quiet);
+#endif
+    // The frozen reference remains authoritative only for the historical
+    // prefix. Checked new-footer behavior has dedicated persistence tests.
+    image.resize(image.size()-mesh::companion::traffic::FooterSize);
     // Test every possible old/torn image length, including every officially
     // supported append boundary and unknown lengths beyond the current tail.
     for (size_t length = 0; length <= image.size() + 5; ++length) {
@@ -124,6 +135,8 @@ int main() {
             "/new_prefs", actual, lat, lon);
         assert(got == expected);
         assert(READ_CALLS == expected_reads);
+        // Footer presence follows the already validated declared size; every
+        // historical field read and EOF probe still matches the old reader.
         assert(AVAILABLE_CALLS == expected_available);
         if (length == 84 && quota == 84) {
           // The original mandatory prefix has 21 reads, ending at ble_pin.
@@ -132,18 +145,25 @@ int main() {
               4, 32, 4, 8, 8, 4, 1, 1, 1, 1, 4, 1, 1, 1, 1,
               4, 1, 1, 1, 1, 4};
           assert(expected && READ_CALLS == mandatory);
-          unsigned optional_fields = 45;
+          unsigned optional_fields = 46;
 #ifdef TBEAM_1W
           optional_fields += 3;
 #endif
 #if defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
           optional_fields += 2;
 #endif
+#if defined(RAK_4631)
+          optional_fields += 1; // Checked peripheral footer has its own EOF probe.
+#endif
           // Every absent optional field observes EOF, then the completed
           // image receives the existing final trailing-byte check.
           assert(AVAILABLE_CALLS == optional_fields + 1);
         }
+        if(got)legacy.tx_media=legacy.tx_ssh=mesh::RADIO_TX_AUTO;
         equalValues(actual, legacy);
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+        if (got) assert(actual.leds_quiet == disk[79]);
+#endif
         assert(!memcmp(&lat, &legacy_lat, sizeof(lat)));
         assert(!memcmp(&lon, &legacy_lon, sizeof(lon)));
         assert(actual_store.fs.files["/new_prefs"] == disk);
@@ -173,6 +193,37 @@ class CompanionPrefsValuesTests(unittest.TestCase):
         # is the authority for all old/torn images and read failure traces.
         legacy = (ROOT / 'test/fixtures/companion_prefs_storage/legacy_loader.inc').read_text()
         self.assertNotIn('copyPersistedValuesFrom', legacy)
+        # The headless Mini assigns the existing reserved byte at 79 to LED
+        # policy. Keep the independent scalar read and every failure boundary;
+        # only this target stores its value instead of discarding it as padding.
+        reserved_byte = '    readField(pad, 1);'
+        self.assertEqual(legacy.count(reserved_byte), 1)
+        legacy = legacy.replace(reserved_byte,
+            '#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)\n'
+            '    readField(&loaded_prefs.leds_quiet, 1);\n'
+            '#else\n' + reserved_byte + '\n#endif')
+        # Keep the frozen scalar prefix independent of the new GNU table.
+        # The RAK-only checked tail was published later; add it explicitly
+        # to this test-local reference without rewriting the frozen fixture.
+        legacy = legacy.replace('    loaded_prefs.lost_reply = 0;',
+            '    loaded_prefs.lost_reply = 0;\n'
+            '#if defined(RAK_4631)\n    loaded_prefs.peripherals_shared = 0;\n#endif')
+        size_check = '    if (prefs_size < MIN_PREFS_SIZE || !known_size) {'
+        self.assertEqual(legacy.count(size_check), 1)
+        legacy = legacy.replace(size_check,
+            '#if defined(RAK_4631)\n'
+            '    known_size = known_size || prefs_size == 244;\n'
+            '#endif\n' + size_check)
+        trailing_check = '    // Any bytes left over form only part of a historically appended field.'
+        self.assertEqual(legacy.count(trailing_check), 1)
+        legacy = legacy.replace(trailing_check,
+            '#if defined(RAK_4631)\n'
+            '    if (file.available() != 0) {\n'
+            '      uint8_t footer[8] = {};\n'
+            '      success = success && readField(footer, sizeof(footer))\n'
+            '          && mesh::peripherals::decodeFooter(footer, sizeof(footer),\n'
+            '              loaded_prefs.peripherals_shared);\n'
+            '    }\n#endif\n\n' + trailing_check)
         methods = esp_recovery_helpers(source) + '\n'.join((loader, legacy,
             method(source, 'bool DataStore::savePrefs(')))
         code = HARNESS.split('int main(')[0].replace('@METHODS@', methods)
@@ -185,17 +236,24 @@ class CompanionPrefsValuesTests(unittest.TestCase):
             r'^\s*(?:float|char|u?int(?:8|16|32)_t)\s+([A-Za-z_][A-Za-z_0-9]*)',
             prefix, re.M)
         self.assertEqual(declarations[0], 'airtime_factor')
-        self.assertEqual(declarations[-1], 'usb_debug_enabled')
+        self.assertEqual(declarations[-2:], ['tx_media', 'tx_ssh'])
         optional = {
             'fan_mode': 'TBEAM_1W', 'fan_lo': 'TBEAM_1W', 'fan_hi': 'TBEAM_1W',
             'wifi_ssid': 'defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)',
             'wifi_pwd': 'defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)',
+            'peripherals_shared': 'RAK_4631',
+            'leds_quiet': 'WIO_E5_MINI_HEADLESS_COMPANION_UI',
+            'cpu_freq_mhz': 'ESP32_PLATFORM',
         }
 
         def fields(template):
             rows = []
             for name in declarations:
                 row = template.format(name=name)
+                # Historical byte/EOF comparisons use Auto; explicit CPU
+                # footer round trips have their own actual-codec fault suite.
+                if name == 'cpu_freq_mhz' and template.startswith('fill('):
+                    row = 'prefs.cpu_freq_mhz = 0;'
                 if name in optional:
                     condition = optional[name]
                     if not condition.startswith('defined('):
@@ -244,7 +302,8 @@ inline char* utoa(unsigned int value,char* output,int base){
             (work / 'helpers/IdentityStore.h').write_text(fs)
             cpp = work / 'test.cpp'
             cpp.write_text(code + tests)
-            for platform in ('STM32_PLATFORM', 'NRF52_PLATFORM', 'ESP32_PLATFORM', 'RP2040_PLATFORM',
+            for platform in ('STM32_PLATFORM', 'STM32_PLATFORM,WIO_E5_MINI_HEADLESS_COMPANION_UI',
+                             'NRF52_PLATFORM', 'NRF52_PLATFORM,RAK_4631', 'ESP32_PLATFORM', 'RP2040_PLATFORM',
                              'ESP32_PLATFORM,TBEAM_1W', 'RP2040_PLATFORM,ENABLE_WIFI_INTERFACE'):
                 with self.subTest(platform=platform):
                     binary = work / 'test'
@@ -259,7 +318,8 @@ inline char* utoa(unsigned int value,char* output,int base){
                         '-I', str(ROOT / 'src/helpers'), '-I', str(ROOT), str(cpp),
                         *[str(ROOT / 'src/helpers' / name) for name in (
                             'ConfigSerializer.cpp', 'DynamicConfigSerializer.cpp',
-                            'CommonRadioPrefs.cpp', 'TxtDataHelpers.cpp')],
+                            'CommonRadioPrefs.cpp', 'radiolib/RXPowerSaving.cpp',
+                            'radiolib/RXPowerSavingCLI.cpp', 'TxtDataHelpers.cpp')],
                         '-o', str(binary)], capture_output=True, text=True)
                     self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
                     self.assertNotIn('offsetof', built.stderr)

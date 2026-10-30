@@ -1,8 +1,13 @@
+#include <helpers/RegulatorSettings.h>
+#include <helpers/LedSettings.h>
 #include "SensorMesh.h"
 #include <math.h>
 #include <helpers/IdentityGeneration.h>
 #include <helpers/ui/StartupScreen.h>
 #include <helpers/ui/DisplayPowerSettings.h>
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+#include <helpers/ui/OLEDControllerSettings.h>
+#endif
 #if defined(NRF52_PLATFORM)
   #include <helpers/nrf52/InternalPrimaryFsBoot.h>
   #include <helpers/nrf52/RamFallbackFileSystem.h>
@@ -10,9 +15,50 @@
 #include <helpers/UsbLogging.h>
 #include <helpers/UsbLoggingWatchdog.h>
 #include <helpers/UsbLoggingClientActivity.h>
+#include <helpers/MorseLoopPolicy.h>
+#include <helpers/PowerManagementUtils.h>
+#if defined(NRF52_PLATFORM) && MESH_ENABLE_SENSOR_TRACKER
+#include <utility/SoftwareTimer.h>
+static SoftwareTimer tracker_wake_timer;
+static void trackerWakeCallback(TimerHandle_t) { }
+
+// SYSTEMON event sleep has no built-in deadline. Arm a real timer before
+// leaving the loop; allocation/queue failure keeps polling instead of hanging.
+static bool armTrackerSleepWake(uint32_t seconds) {
+  if (seconds == 0 || seconds > 30) return false;
+  if (!tracker_wake_timer.getHandle()) {
+    tracker_wake_timer.begin(1000, trackerWakeCallback, nullptr, false);
+  }
+  const TimerHandle_t handle = tracker_wake_timer.getHandle();
+  if (!handle) return false;
+  const TickType_t requested_ticks = pdMS_TO_TICKS(seconds * 1000UL);
+  if (requested_ticks == 0) return false;
+
+  // Reposting an unchanged timer command wakes the higher-priority timer task
+  // and leaves a scheduler event immediately before every CPU sleep attempt.
+  // An existing earlier wake is sufficient; do not keep postponing it.
+  bool wake_ready = false;
+  taskENTER_CRITICAL();
+  if (xTimerIsTimerActive(handle) != pdFALSE) {
+    // The compound snapshot must not race the one-shot becoming dormant:
+    // xTimerGetExpiryTime() is defined only while the timer is active.
+    const TickType_t expiry = xTimerGetExpiryTime(handle);
+    const TickType_t now = xTaskGetTickCount();
+    const TickType_t remaining = static_cast<TickType_t>(expiry - now);
+    wake_ready = remaining != 0 && remaining <= requested_ticks;
+  }
+  taskEXIT_CRITICAL();
+  if (wake_ready) return true;
+
+  // Dormant/expired timers need a fresh command even when the period matches.
+  // A failed queue send cannot promise an earlier deadline; keep polling.
+  return xTimerChangePeriod(handle, requested_ticks, 0) == pdPASS;
+}
+#endif
 
 #if defined(ESP32_PLATFORM)
   #include <helpers/ESP32TrueRandom.h>
+  #include <helpers/esp32/ProfileIdleSleep.h>
 #endif
 
 #ifdef DISPLAY_CLASS
@@ -122,8 +168,20 @@ void setup() {
 #else
   #error "need to define filesystem"
 #endif
+  FILESYSTEM* regulator_prefs_fs = fs;
+#if defined(NRF52_PLATFORM)
+  if (volatile_primary_fs) regulator_prefs_fs = nullptr;
+#endif
+  mesh::leds::beginSettings(board, regulator_prefs_fs);
+  if (!mesh::power::beginRegulatorSettings(board, radio_driver, regulator_prefs_fs)) {
+    MESH_DEBUG_PRINTLN("Regulator selection could not be applied");
+  }
+  mesh::RadioProfileCLI::configureBootTuning(regulator_prefs_fs, radio_driver);
 #ifdef DISPLAY_CLASS
   mesh::ui::loadDisplayPowerSettings(fs, false);
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+  mesh::ui::loadOLEDControllerSettings(regulator_prefs_fs);
+#endif
   mesh::ui::StartupScreen startup_screen;
   display_ready = display.begin();
   if (display_ready) {
@@ -212,6 +270,9 @@ void setup() {
 
   sensors.begin();
 
+#if defined(NRF52_PLATFORM)
+  the_mesh.setTrackerStorageAvailable(!volatile_primary_fs);
+#endif
   the_mesh.begin(fs);
 
 #if defined(NRF52_PLATFORM)
@@ -255,6 +316,9 @@ static bool usbLoggingRecoverySafe(void*) {
 }
 
 void loop() {
+#if defined(NRF52_PLATFORM)
+  board.prepareSleepCycle();
+#endif
   mesh::serviceUsbLoggingPort();
 #if defined(NRF52_PLATFORM)
   board.feedWatchdog(the_mesh.getNodePrefs()->system_watchdog_enabled != 0);
@@ -305,10 +369,12 @@ void loop() {
     command[0] = 0;  // reset command buffer
   }
 
+  mesh::power::serviceRegulatorSettings();
   board.loop();   // let the board feed its watchdog, run periodic housekeeping
 
   the_mesh.loop();
-  sensors.loop();
+  const bool morse_timing = mesh::morseTimingActive(&radio_driver);
+  if (!morse_timing) sensors.loop();
 #ifdef DISPLAY_CLASS
   if (display_ready) ui_task.loop();
 #endif
@@ -320,33 +386,97 @@ void loop() {
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.loop();
 #endif
+#if defined(NRF52_PLATFORM)
+  if ((the_mesh.getNodePrefs()->powersaving_enabled || the_mesh.isTrackerModeEnabled())
+      && the_mesh.isDualRadioActive() && !morse_timing) board.prepareProfileIdleCycle();
+#endif
 
-  bool can_power_save = the_mesh.getNodePrefs()->powersaving_enabled
-      && !board.isUsbDataConnected()
-      && !mesh::isUsbLoggingWatchdogArmed();
+#if defined(ESP32_PLATFORM)
+  board.servicePowerTestControls();
+  mesh::esp32::serviceCpuFrequencyPolicy(board, the_mesh.getNodePrefs()->cpu_freq_mhz,
+      the_mesh.getNodePrefs()->powersaving_enabled != 0, millis(), false, the_mesh.isDualRadioActive());
+#endif
+  const auto sleep_guard = [](bool allowed, mesh::powerdiag::Reason reason) {
+    if (!allowed && mesh::powerdiag::enabled())
+      mesh::powerdiag::decision(mesh::powerdiag::mask(reason), millis());
+    return allowed;
+  };
+  bool can_power_save = sleep_guard(the_mesh.getNodePrefs()->powersaving_enabled
+                        || the_mesh.isTrackerModeEnabled(), mesh::powerdiag::Reason::PolicyOff)
+      && sleep_guard(!morse_timing, mesh::powerdiag::Reason::Morse)
+      && sleep_guard(!board.isUsbDataConnected(), mesh::powerdiag::Reason::UsbSession)
+      && sleep_guard(!mesh::isUsbLoggingWatchdogArmed(), mesh::powerdiag::Reason::UsbRecovery);
 #if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
     && MOMENTARY_BUTTON_WAKE_FROM_SLEEP \
     && defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)
-  can_power_save = can_power_save && !user_btn.needsPolling();
+  can_power_save = can_power_save && sleep_guard(!user_btn.needsPolling(), mesh::powerdiag::Reason::Button);
 #endif
   if (can_power_save) {
-    uint32_t sleep_secs = the_mesh.getPowerSaveSleepSeconds(30);
+#if defined(ESP32_PLATFORM)
+    const uint32_t sleep_budget_started_us = static_cast<uint32_t>(esp_timer_get_time());
+#endif
+    uint32_t sleep_ms = the_mesh.getPowerSaveSleepMilliseconds(30000);
+    uint32_t noise_floor_delay_ms = 0;
+    const bool noise_floor_wait = the_mesh.getNextNoiseFloorWakeDelay(noise_floor_delay_ms);
+    if (noise_floor_wait && noise_floor_delay_ms < sleep_ms) sleep_ms = noise_floor_delay_ms;
+    if (noise_floor_wait && noise_floor_delay_ms == 0) {
+      if (mesh::powerdiag::enabled())
+        mesh::powerdiag::decision(mesh::powerdiag::mask(mesh::powerdiag::Reason::Calibration), millis());
+      sleep_ms = 0;
+    }
 #ifdef HAS_EXTERNAL_WATCHDOG
-    if (sleep_secs > 0) external_watchdog.feed();
+    if (sleep_ms > 0) external_watchdog.feed();
 #endif
 #if defined(NRF52_PLATFORM)
-    if (sleep_secs > 0) board.sleep(0);
+    if (sleep_ms > 0 && the_mesh.canIdleDualRadio()) {
+#if MESH_ENABLE_SENSOR_TRACKER
+      if (!the_mesh.isTrackerModeEnabled() || armTrackerSleepWake(mesh::power::powerSaveSleepSeconds(sleep_ms))) {
+        // Timer setup can schedule another task or consume the scan guard.
+        if (the_mesh.canIdleDualRadio()) {
+          if (mesh::powerdiag::enabled()) mesh::powerdiag::decision(0, millis());
+          if (noise_floor_wait) board.sleepMilliseconds(sleep_ms);
+          else board.sleep(0);
+        }
+      }
+      else {
+        if (mesh::powerdiag::enabled())
+          mesh::powerdiag::boardVeto(mesh::powerdiag::Reason::NoWake, millis());
+        delay(1);
+      }
 #else
-    if (sleep_secs > 0
+      if (mesh::powerdiag::enabled()) mesh::powerdiag::decision(0, millis());
+      if (noise_floor_wait) board.sleepMilliseconds(sleep_ms);
+      else board.sleep(0);
+#endif
+    }
+#else
+    if (sleep_ms > 0
         && the_mesh.millisHasNowPassed(
             POWERSAVING_FIRST_SLEEP_SECS * 1000UL)) {
-      board.sleep(sleep_secs);
+      if (mesh::powerdiag::enabled()) mesh::powerdiag::decision(0, millis());
+#if defined(ESP32_PLATFORM)
+      if (the_mesh.isDualRadioActive()) {
+        if (!mesh::esp32::tryProfileIdleSleep(the_mesh, board, sleep_budget_started_us, sleep_ms)
+            && mesh::powerdiag::enabled())
+          mesh::powerdiag::decision(mesh::powerdiag::mask(mesh::powerdiag::Reason::DualRadio), millis());
+      } else
+#endif
+      board.sleepMilliseconds(sleep_ms);
+    } else if (sleep_ms > 0 && mesh::powerdiag::enabled()) {
+      mesh::powerdiag::decision(mesh::powerdiag::mask(mesh::powerdiag::Reason::Startup), millis());
     }
 #endif
   }
 #if defined(ESP32_PLATFORM)
-  if (!can_power_save && the_mesh.getNodePrefs()->powersaving_enabled) {
+  if (!morse_timing && !can_power_save && !the_mesh.isDualRadioActive()
+      && (the_mesh.getNodePrefs()->powersaving_enabled
+                         || the_mesh.isTrackerModeEnabled())) {
+    // Live radio2 needs the scanner's zero-delay polling cadence.
     delay(1); // Keep USB and the button wake interval serviced while idle.
   }
 #endif
+  if (the_mesh.getNodePrefs()->reboot_interval > 0 &&
+      the_mesh.millisHasNowPassed(the_mesh.getNodePrefs()->reboot_interval * 3600000UL)) {
+    board.reboot();
+  }
 }

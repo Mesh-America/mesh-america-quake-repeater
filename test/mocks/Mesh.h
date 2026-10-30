@@ -17,6 +17,7 @@ public:
   virtual RadioProfiles* profiles() { return nullptr; }
   virtual const RadioProfiles* profiles() const { return nullptr; }
   virtual bool validateProfile(const RadioProfileParams&) const { return false; }
+  virtual bool supportsEthernetTunnel() const { return false; }
   virtual uint8_t receiveProfile() const { return 0; }
   virtual uint32_t receiveProfileGeneration() const {
     const RadioProfiles* p = profiles();
@@ -38,6 +39,13 @@ public:
   virtual bool isSendComplete() { return true; }
   virtual void onSendFinished() {}
   virtual int16_t getNoiseFloor() { return -120; }
+};
+
+class RTCClock {
+public:
+  virtual ~RTCClock() = default;
+  virtual uint32_t getCurrentTime() = 0;
+  virtual void setCurrentTime(uint32_t time) = 0;
 };
 
 class MainBoard {

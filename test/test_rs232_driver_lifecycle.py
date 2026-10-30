@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = r'''
 #include <cassert>
 #include <cstdint>
+#include <helpers/bridges/RS232BridgeDiagnostics.h>
+namespace rsdiag = mesh::bridge::rs232diag;
 #define ESP32 1
 #define BRIDGE_DEBUG_PRINTLN(...) ((void)0)
 struct NodePrefs { uint32_t bridge_baud = 57600; };
@@ -37,41 +39,78 @@ struct RS232Bridge : BridgeBase {
   NodePrefs* _prefs;
   Stream* _serial;
   int16_t _rx_pin, _tx_pin;
+  uint16_t _rx_buffer_pos = 37;
+  bool _rx_packet_ready = true, _rx_pool_blocked = false;
+  bool _tx_is_probe = false, _tx_is_data = false, _debug_dirty = false;
+  bool _probe_timed_out = false;
+  rsdiag::Stats _stats;
+  uint16_t _tx_size = 19, _tx_pos = 3;
+  bool _tx_wire_pending = true, _tx_is_ping = true;
+  uint32_t _tx_ping_challenge = 4, _outstanding_challenge = 5;
+  uint64_t _pong_target = 6;
+  uint32_t _pong_challenge = 7;
+  bool _ping_due = false, _partial_suspend_grace = true;
   RS232Bridge(NodePrefs& prefs, HardwareSerial& serial)
       : _prefs(&prefs), _serial(&serial), _rx_pin(5), _tx_pin(6) {}
   void begin();
   void end();
+  void resetTransportState();
 };
+@RESET@
 @BEGIN@
 @END@
 int main() {
   NodePrefs prefs;
   HardwareSerial serial;
   RS232Bridge bridge(prefs, serial);
+  auto dirty_parser = [&]() {
+    bridge._rx_buffer_pos = 37; bridge._rx_packet_ready = true;
+    bridge._tx_size = 19; bridge._tx_pos = 3;
+    bridge._tx_wire_pending = bridge._tx_is_ping = true;
+    bridge._tx_ping_challenge = 4; bridge._outstanding_challenge = 5;
+    bridge._pong_target = 6; bridge._pong_challenge = 7;
+    bridge._ping_due = false; bridge._partial_suspend_grace = true;
+  };
+  auto assert_parser_reset = [&]() {
+    assert(bridge._rx_buffer_pos == 0 && !bridge._rx_packet_ready);
+    assert(bridge._tx_size == 0 && bridge._tx_pos == 0);
+    assert(!bridge._tx_wire_pending && !bridge._tx_is_ping);
+    assert(bridge._tx_ping_challenge == 0 && bridge._outstanding_challenge == 0);
+    assert(bridge._pong_target == 0 && bridge._pong_challenge == 0);
+    assert(bridge._ping_due && !bridge._partial_suspend_grace);
+  };
   assert(!bridge.isRunning());
   serial.pins_ok = false;
   bridge.begin();
   assert(!bridge.isRunning() && serial.pin_calls == 1 && serial.begin_calls == 0);
+  assert_parser_reset();
   serial.pins_ok = true; serial.begin_ok = false;
+  dirty_parser();
   bridge.begin();
   assert(!bridge.isRunning() && !serial.installed && serial.begin_calls == 1);
+  assert_parser_reset();
   serial.begin_ok = true;
+  dirty_parser();
   bridge.begin();
   assert(bridge.isRunning() && serial.installed && serial.begin_calls == 2);
+  assert_parser_reset();
   assert(serial.rx == 5 && serial.tx == 6 && serial.baud == 57600);
+  dirty_parser();
   bridge.end();
   assert(!bridge.isRunning() && !serial.installed && serial.end_calls == 1);
+  assert_parser_reset();
   // A failed restart must clear its former state, and a later retry can recover.
-  bridge.begin(); assert(bridge.isRunning());
+  dirty_parser(); bridge.begin(); assert(bridge.isRunning()); assert_parser_reset();
   serial.pins_ok = false;
-  bridge.begin(); assert(!bridge.isRunning());
-  bridge.end(); serial.pins_ok = true; prefs.bridge_baud = 19200;
-  bridge.begin(); assert(bridge.isRunning() && serial.baud == 19200);
+  dirty_parser(); bridge.begin(); assert(!bridge.isRunning()); assert_parser_reset();
+  dirty_parser(); bridge.end(); assert_parser_reset();
+  serial.pins_ok = true; prefs.bridge_baud = 19200;
+  dirty_parser(); bridge.begin(); assert(bridge.isRunning() && serial.baud == 19200); assert_parser_reset();
   for (unsigned cycle = 0; cycle < 100; ++cycle) {
-    bridge.end(); assert(!bridge.isRunning());
-    bridge.begin(); assert(bridge.isRunning());
+    dirty_parser(); bridge.end(); assert(!bridge.isRunning()); assert_parser_reset();
+    dirty_parser(); bridge.begin(); assert(bridge.isRunning()); assert_parser_reset();
   }
-  bridge.end(); assert(!bridge.isRunning());
+  dirty_parser(); bridge.end(); assert(!bridge.isRunning()); assert_parser_reset();
 }
 '''
 
@@ -86,13 +125,15 @@ class RS232DriverLifecycleTests(unittest.TestCase):
                                .replace("BridgeBase::", "").replace(" override", ""))
         code = code.replace("@BEGIN@", extract_braced(driver, "void RS232Bridge::begin()"))
         code = code.replace("@END@", extract_braced(driver, "void RS232Bridge::end()"))
+        code = code.replace("@RESET@", extract_braced(driver, "void RS232Bridge::resetTransportState()"))
         with tempfile.TemporaryDirectory(prefix="rs232-driver-lifecycle-") as directory:
             work = Path(directory)
             source, binary = work / "main.cpp", work / "test"
             source.write_text(code, encoding="ascii")
             built = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                 "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
-                str(source), "-o", str(binary)], capture_output=True, text=True, timeout=60)
+                "-I" + str(ROOT / "src"), str(source), "-o", str(binary)],
+                capture_output=True, text=True, timeout=60)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             checked = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
             self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)

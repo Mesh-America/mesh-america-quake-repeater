@@ -19,6 +19,7 @@ protected:
 public:
   RAK3401Board() : NRF52Board("RAK3401_OTA") {}
   void begin();
+  void shutdownPeripherals() override;
   bool recoverRadio();
   void enableRadioFrontend();
   bool supportsRadioHardReset() const override { return true; }
@@ -29,6 +30,8 @@ public:
   }
 
   #define BATTERY_SAMPLES 8
+
+  bool supportsBatteryCalibration() const override { return true; }
 
   uint16_t getBattMilliVolts() override {
     analogReadResolution(12);

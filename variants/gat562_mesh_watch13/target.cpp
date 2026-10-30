@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "target.h"
+#include <helpers/radiolib/TunableRadioHal.h>
 #include <helpers/ArduinoHelpers.h>
 
 GAT56MeshWatch13Board board;
@@ -15,7 +16,8 @@ GAT56MeshWatch13Board board;
 #endif
 
 
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
+static TunableRadioHal radio_hal(SPI);
+RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 
 WRAPPER_CLASS radio_driver(radio, board);
 

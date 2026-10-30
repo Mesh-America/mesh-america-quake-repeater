@@ -223,6 +223,7 @@ def persistence_harness():
         "static float defaultLoRaBandwidth(", "static void markDirectRetryPrefsValid(",
         "static void applyFloodRetryPreset(", "static void applyDirectRetryPreset(",
         "static void setDefaultDirectRetryPrefs(", "static bool directRetryPrefsValid("))
+    helpers = '#include <helpers/bridges/RS232PowerSettings.h>\n' + helpers
     methods = "\n".join(extract_braced(source, signature) for signature in (
         "static const char* commonPrefsSaveResultName(",
         "bool CommonCLI::recoverCommonPrefsFiles(",
@@ -237,7 +238,7 @@ def persistence_harness():
         "SERIALIZER": "template<typename Writer>\n" + extract_braced(
             source, "static bool writeCommonPrefsImage("),
         "STORE": extract_braced(source, "class CommonPrefsFileStore"),
-        "METHODS": methods,
+        "METHODS": ("\n#include <stddef.h>\ntemplate<typename Writer>\n" + extract_braced(source, "static void writeCommonRetryPrefs(") + "\n" + methods),
         "DYNAMIC": "", "SET_DEBUG": "", "SET_MASTER": "",
         "GET_DEBUG": "", "GET_MASTER": "",
     }

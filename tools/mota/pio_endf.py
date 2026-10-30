@@ -83,12 +83,14 @@ def _is_nrf52() -> bool:
 
 
 def _cppdef(name):                                # value of a -D<name>=<value> build flag, or None
+    value = None
     for d in env.get("CPPDEFINES", []):           # noqa: F821
-        if isinstance(d, (list, tuple)) and len(d) > 1 and d[0] == name:
-            return str(d[1])
-        if d == name:
-            return ""
-    return None
+        if isinstance(d, (list, tuple)) and d and d[0] == name:
+            value = str(d[1]) if len(d) > 1 else ""
+        elif d == name:
+            value = ""
+    # Ordered build overlays have the same last-define-wins semantics as GCC.
+    return value
 
 
 def _normalized_linker_path(value, project_dir):
@@ -150,6 +152,21 @@ def _board_maximum_size(build_env):
         return size if size > 0 else None
     except (AttributeError, TypeError, ValueError):
         return None
+
+
+def _validate_nrf52_legacy_sd_profile(app_start, linked_app_end, active_linker,
+                                      configured_linker, project_dir):
+    """Legacy adaptive SD still needs its exact retained-authorization map."""
+    if app_start != ml.NRF52_APP_BASE_S140_V6 or linked_app_end != ml.NRF52_APP_END:
+        raise RuntimeError("legacy RAK SD OTA requires the exact S140 v6 0xED000 profile")
+    expected = _normalized_linker_path(
+        os.path.join(str(project_dir), "boards", "nrf52840_s140_v6_sd_ota.ld"), project_dir)
+    if not os.path.isfile(expected):
+        raise RuntimeError("legacy RAK SD authorization linker is missing")
+    for label, value in (("active", active_linker), ("configured", configured_linker)):
+        if _normalized_linker_path(value, project_dir) != expected:
+            raise RuntimeError(f"legacy RAK SD OTA requires {expected}; "
+                               f"{label} linker is {value or 'none'}")
 
 
 def _source_filter_text():
@@ -234,12 +251,13 @@ def _append_endf(source, target, env):           # raw .bin path (ESP32 / RP2040
     path = str(target[0])
     with open(path, "rb") as f:
         data = f.read()
+    body = ml.parse_endf(data)[0] if ml.has_endf(data) else data
     ident = _firmware_ident()
-    out, h8 = ml.ensure_endf(data, ident)
-    if len(out) != len(data):
+    out, h8 = ml.ensure_endf(body, ident)
+    if out != data:
         with open(path, "wb") as f:
             f.write(out)
-        print(f"EndF: appended to {os.path.basename(path)} (body_len={len(data)} body_hash={h8.hex()} "
+        print(f"EndF: stamped {os.path.basename(path)} (body_len={len(body)} body_hash={h8.hex()} "
               f"target={ident.target_id:#010x} hw='{ident.hw_id}' fw={ident.fw_version:#010x})")
     else:
         print(f"EndF: already present in {os.path.basename(path)} (no change)")
@@ -254,8 +272,10 @@ def _append_endf_hex(source, target, env):        # Intel-HEX path (nRF52: app f
         print("EndF: empty .hex, skipping"); return
     app_start, app_end = segs[0]                  # first (lowest) segment = the application image
     raw_body = bytes(ih.tobinarray(start=app_start, size=app_end - app_start))
-    if ml.has_endf(raw_body):
-        print(f"EndF: already present in {os.path.basename(path)} (no change)"); return
+    # A valid trailer can still carry a previous build's identity/layout. Strip
+    # it in memory, but retain the original segment bounds for replacement.
+    # Never skip the current link/profile/size checks on an incremental build.
+    endf_free_body = ml.parse_endf(raw_body)[0] if ml.has_endf(raw_body) else raw_body
 
     app_region_size = _board_maximum_size(env)
     if app_region_size is None:
@@ -263,9 +283,19 @@ def _append_endf_hex(source, target, env):        # Intel-HEX path (nRF52: app f
     linked_app_end = app_start + app_region_size
     internal_extrafs = (_cppdef("EXTRAFS") is not None and _cppdef("QSPIFLASH") is None
                         and _builds_companion_radio())
-    sd_backed = _cppdef("OTA_SD_STORE") is not None
+    sd_enabled = _cppdef("OTA_SD_STORE") is not None
     qspi_backed = _cppdef("OTA_QSPI_STORE") is not None
     auto_store = _cppdef("OTA_RAK_AUTO_STORE") is not None
+    seeder_only = _cppdef("OTA_SEEDER_ONLY") is not None
+    optional_rak_sd = _cppdef("OTA_RAK15002_SD_STORE") is not None
+    if optional_rak_sd and (not sd_enabled or _cppdef("RAK_4631") is None or
+                            not (auto_store or (seeder_only and _builds_companion_radio()))):
+        raise RuntimeError("optional RAK15002 SD requires an exact RAK4631 adaptive receiver or source-only Companion")
+    # Optional SD does not change the frozen application flash layout: normal
+    # receivers retain AUTO+HYBRID, explicit legacy receivers use AUTO without
+    # hybrid RAM, and Full Companion retains ExtraFS.
+    # The runtime selects SD only after validating its separate loader ABI.
+    sd_backed = sd_enabled and not optional_rak_sd
     qspi_bootloader_update = _cppdef("OTA_QSPI_BOOTLOADER_UPDATE") is not None
     hybrid_ram = _cppdef("OTA_HYBRID_RAM_STORE") is not None
     internal_bootloader_update = _cppdef("OTA_INTERNAL_BOOTLOADER_UPDATE") is not None
@@ -277,9 +307,18 @@ def _append_endf_hex(source, target, env):        # Intel-HEX path (nRF52: app f
         env["PROJECT_DIR"])
     if sd_backed and qspi_backed:
         raise RuntimeError("nRF52 build cannot enable both SD and QSPI OTA stores")
-    if auto_store and (not qspi_backed or _cppdef("OTA_FLASH_STORE") is None or
-                       not hybrid_ram or not internal_bootloader_update):
-        raise RuntimeError("RAK adaptive OTA requires both stores and retained-RAM internal support")
+    if auto_store:
+        if not qspi_backed or _cppdef("OTA_FLASH_STORE") is None:
+            raise RuntimeError("RAK adaptive OTA requires both stores and retained-RAM internal support")
+        if os.environ.get("MESHCORE_NRF52_LEGACY_FLASH_OTA") == "1":
+            if (not optional_rak_sd or seeder_only or _builds_companion_radio() or
+                    hybrid_ram or internal_bootloader_update):
+                raise RuntimeError("legacy adaptive SD OTA requires a receiver without hybrid RAM or bootloader self-update")
+            _validate_nrf52_legacy_sd_profile(
+                app_start, linked_app_end, env.get("LDSCRIPT_PATH", ""),
+                board.get("build.ldscript", ""), env["PROJECT_DIR"])
+        elif not hybrid_ram or not internal_bootloader_update:
+            raise RuntimeError("RAK adaptive OTA requires both stores and retained-RAM internal support")
     if qspi_backed and _cppdef("QSPIFLASH") is not None:
         raise RuntimeError("raw QSPI OTA staging cannot share a chip with QSPIFLASH")
     if qspi_bootloader_update:
@@ -307,10 +346,9 @@ def _append_endf_hex(source, target, env):        # Intel-HEX path (nRF52: app f
                     (ml.NRF52_LAYOUT_FLAG_HYBRID_RAM if hybrid_ram else 0) |
                     (ml.NRF52_LAYOUT_FLAG_AUTO_STORE if auto_store else 0))
     layout = ml.Nrf52Layout(app_start, linked_app_end, stage_ceiling, layout_flags)
-    body = ml.ensure_nrf52_layout(raw_body, layout)
+    body = ml.ensure_nrf52_layout(endf_free_body, layout)
     ident = _firmware_ident()
     out, h8 = ml.ensure_endf(body, ident)
-    seeder_only = _cppdef("OTA_SEEDER_ONLY") is not None
     if seeder_only:
         # A source-only full Companion never stages or applies an update to
         # itself, so it does not need to fit in OTAFIX's in-place workspace.
@@ -326,12 +364,23 @@ def _append_endf_hex(source, target, env):        # Intel-HEX path (nRF52: app f
     if image_limit is not None and len(out) > image_limit:
         raise RuntimeError(f"nRF52 OTA image is {len(out)} bytes; {limit_name} limit is "
                            f"{image_limit} bytes")
-    suffix = out[len(raw_body):]                   # layout record + EndF identity trailer
-    for i, b in enumerate(suffix):
-        ih[app_end + i] = b                        # write it right after the app's last byte
+    new_app_end = app_start + len(out)
+    if len(segs) > 1 and new_app_end >= segs[1][0]:
+        # Even exact adjacency would merge the next segment into the app on
+        # the next read, hiding the trailer beneath unrelated trailing bytes.
+        raise RuntimeError("nRF52 layout/EndF would reach a separate HEX segment")
+    if out == raw_body:
+        print(f"EndF: already present in {os.path.basename(path)} (no change)"); return
+    # Replace, do not append after the old EndF. A restamp normally keeps the
+    # same length; an older EndF without a layout record grows by 24 bytes.
+    # Delete only the original application segment; UICR, other segments and
+    # Intel HEX start-address metadata remain owned by the existing image.
+    for address in range(app_start, app_end):
+        del ih[address]
+    ih.frombytes(out, offset=app_start)
     ih.write_hex_file(path)
     endf_address = app_start + len(body)
-    print(f"EndF: appended to {os.path.basename(path)} at 0x{endf_address:X} "
+    print(f"EndF: stamped {os.path.basename(path)} at 0x{endf_address:X} "
           f"(app=0x{app_start:X}.. body_len={len(body)} body_hash={h8.hex()} "
           f"stage=0x{stage_ceiling:X} "
           f"target={ident.target_id:#010x} hw='{ident.hw_id}' fw={ident.fw_version:#010x})")

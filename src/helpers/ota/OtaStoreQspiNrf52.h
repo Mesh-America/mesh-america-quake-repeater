@@ -6,11 +6,21 @@
 #error "OTA_QSPI_STORE raw staging cannot share a QSPI chip with QSPIFLASH"
 #endif
 
-#if defined(OTA_QSPI_SHARED_WISBLOCK_SPI) && defined(ETHERNET_ENABLED)
+#if defined(OTA_QSPI_SHARED_WISBLOCK_SPI) && defined(ETHERNET_ENABLED) && \
+    !defined(RAK4631_COMBINED_ETHERNET) && \
+    !(defined(OTA_RAK15002_SD_STORE) && defined(NRF52_PLATFORM) && \
+      defined(RAK_4631) && defined(OTA_RAK_AUTO_STORE))
 #error "WisBlock SPI OTA staging cannot share the bus/chip-select with Ethernet"
 #endif
 
-#if defined(OTA_QSPI_SHARED_WISBLOCK_SPI) && defined(OTA_SD_STORE)
+#if defined(RAK4631_COMBINED_ETHERNET) && \
+    (!defined(NRF52_PLATFORM) || !defined(RAK_4631) || !defined(OTA_RAK_AUTO_STORE) || \
+     !defined(OTA_QSPI_SHARED_WISBLOCK_SPI) || !defined(ETHERNET_ENABLED))
+#error "Combined RAK4631 Ethernet requires its adaptive OTA and shared-SPI ownership contract"
+#endif
+
+#if defined(OTA_QSPI_SHARED_WISBLOCK_SPI) && defined(OTA_SD_STORE) && \
+    !(defined(OTA_RAK15002_SD_STORE) && defined(RAK_4631) && defined(OTA_RAK_AUTO_STORE))
 #error "WisBlock SPI OTA staging cannot share the bus/chip-select with SD staging"
 #endif
 
@@ -32,6 +42,8 @@
   #endif
 #endif
 
+#include "../nrf52/QspiFlashWakePolicy.h"
+
 namespace mesh {
 namespace ota {
 
@@ -42,8 +54,10 @@ namespace ota {
 static const uint32_t MOTA_QSPI_DPD_ENTRY_GUARD_US = 50u;
 
 // Release-from-deep-power-down latency is as high as 45 us on supported NOR.
-static const uint32_t MOTA_QSPI_DPD_WAKE_GUARD_US = 50u;
-static const uint8_t MOTA_QSPI_RELEASE_FROM_DPD_OPCODE = 0xABu;
+static const uint32_t MOTA_QSPI_DPD_WAKE_GUARD_US =
+    mesh::nrf52::QSPI_DPD_WAKE_GUARD_US;
+static const uint8_t MOTA_QSPI_RELEASE_FROM_DPD_OPCODE =
+    mesh::nrf52::QSPI_RELEASE_FROM_DPD_OPCODE;
 
 // TASKS_ACTIVATE initiates traffic with the external memory. A NOR in deep
 // power-down ignores that traffic and the nRF QSPI peripheral can wait forever
@@ -51,8 +65,7 @@ static const uint8_t MOTA_QSPI_RELEASE_FROM_DPD_OPCODE = 0xABu;
 // owns the pins. Keep the bit order host-testable instead of open-coding it in
 // the hardware-only path.
 inline bool mota_qspi_release_from_dpd_bit(uint8_t bit_index) {
-  return bit_index < 8u &&
-         ((MOTA_QSPI_RELEASE_FROM_DPD_OPCODE >> (7u - bit_index)) & 1u) != 0;
+  return mesh::nrf52::qspiReleaseFromDeepPowerDownBit(bit_index);
 }
 
 // The nRF QSPI READY event only says that a program/erase command and its
@@ -116,7 +129,22 @@ class OtaStoreQspiNrf52 : public OtaStore {
   static const uint32_t PAGE = 4096;
   static const uint32_t PROGRAM = 256;
   static const uint32_t MAX_FLASH = 16UL * 1024 * 1024;
-  static const uint32_t MAX_PAGES = MAX_FLASH / PAGE;
+  // Exact-board recipes already reject a different physical capacity before
+  // any page access. Track only that accepted geometry, without reducing the
+  // 16 MiB capability of generic builds or either staging page buffer.
+#if defined(OTA_QSPI_EXPECTED_SIZE)
+  // Check the original constant before narrowing: 4 GiB + 2 MiB must not
+  // silently wrap into an apparently valid 2 MiB geometry.
+  static_assert((OTA_QSPI_EXPECTED_SIZE) >= (1ULL << 20) &&
+                (OTA_QSPI_EXPECTED_SIZE) <= MAX_FLASH &&
+                ((OTA_QSPI_EXPECTED_SIZE) & ((OTA_QSPI_EXPECTED_SIZE) - 1ULL)) == 0ULL,
+                "expected QSPI capacity must match accepted 1..16 MiB JEDEC geometry");
+  static const uint32_t TRACKED_FLASH = OTA_QSPI_EXPECTED_SIZE;
+#else
+  static const uint32_t TRACKED_FLASH = MAX_FLASH;
+#endif
+  static const uint32_t MAX_PAGES = TRACKED_FLASH / PAGE;
+  static const uint32_t KNOWN_PAGE_BYTES = (MAX_PAGES + 7u) / 8u;
   static const uint32_t INVALID_PAGE = 0xFFFFFFFFUL;
 
   uint32_t _total = 0;
@@ -140,7 +168,7 @@ class OtaStoreQspiNrf52 : public OtaStore {
   alignas(4) uint8_t _meta_page[PAGE];
   alignas(4) uint8_t _data_page[PAGE];
   alignas(4) uint8_t _bounce[PROGRAM];
-  uint8_t _known_pages[MAX_PAGES / 8];
+  uint8_t _known_pages[KNOWN_PAGE_BYTES ? KNOWN_PAGE_BYTES : 1u];
 
   void fail(const char *message);
   bool ensureFlash();

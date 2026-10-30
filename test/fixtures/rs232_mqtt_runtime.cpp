@@ -6,7 +6,11 @@
 #include <initializer_list>
 #include <new>
 #include <helpers/CLICommandUtils.h>
+#include <helpers/PowerSavingDiagnostics.h>
 #include <helpers/bridges/ESPNowBridgeFormat.h>
+#include <helpers/bridges/RS232PowerSettings.h>
+struct FakeRng { void random(uint8_t* out, size_t size) { memset(out, 0x42, size); } };
+struct FakeRadio { const void* profiles() const { return nullptr; } };
 #define BRIDGE_MAX_BAUD 115200
 #define PUB_KEY_SIZE 32
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
@@ -24,6 +28,9 @@ struct StrHelper {
 struct NodePrefs {
   uint8_t bridge_enabled = 0, espnow_bridge_enabled = 0, rs232_bridge_enabled = 0;
   uint16_t bridge_delay = 0;
+  uint8_t powersaving_enabled = 1, rs232_autosleep = 1;
+  uint8_t rs232_heartbeat = 1;
+  uint16_t rs232_idle_seconds = 300;
   uint8_t bridge_pkt_src = 0, bridge_uart = 0, bridge_channel = 0, bridge_format = 0;
   uint32_t bridge_baud = 0;
   float freq = 915, bw = 125;
@@ -59,6 +66,7 @@ public:
   void setPacketFilter(bool (*check)(void*, const mesh::Packet*), void* context) {
     filter = check; filter_context = context; ++filters;
   }
+  void setIngressProfiles(const void*) {}
 };
 class RS232Bridge : public AbstractBridge {
   NodePrefs* prefs;
@@ -66,6 +74,16 @@ class RS232Bridge : public AbstractBridge {
   int rx, tx;
   bool running = false;
 public:
+  using PowerAction = mesh::bridge::RS232PowerPolicy::Action;
+  mesh::bridge::RS232PowerPolicy power;
+  void setHeartbeatSession(uint64_t) {}
+  void setHeartbeatEnabled(bool) {}
+  PowerAction servicePowerPolicy(bool allowed, uint32_t idle, uint32_t now, bool force = false) {
+    return power.service(allowed && force, idle, now, running, false);
+  }
+  void completePowerAction(PowerAction action, bool success, uint32_t now) { power.complete(action, success, now); }
+  uint32_t powerWakeDelayMs(uint32_t now) const { return power.wakeDelay(now); }
+  void formatHeartbeatStatus(char* out, size_t size, uint32_t) const { snprintf(out, size, "state=active peer=unknown"); }
   inline static unsigned live = 0, fail_starts = 0, fail_allocations = 0;
   static void* operator new(size_t size, const std::nothrow_t&) noexcept {
     if (fail_allocations) { --fail_allocations; return nullptr; }
@@ -113,6 +131,7 @@ struct MQTTNodeInfo {
 class MQTTBridge : public AbstractBridge {
   bool running = false;
   bool stopping = false;
+  bool network_suspended = false;
 public:
   inline static unsigned live = 0, fail_starts = 0;
   unsigned begins = 0, ends = 0, loops = 0, sent = 0, received = 0;
@@ -127,12 +146,21 @@ public:
     assert(filters); ++begins;
     if (fail_starts) { --fail_starts; return; }
     running = true;
+    network_suspended = false;
   }
-  void end() override { ++ends; running = stopping = false; }
+  void end() override { ++ends; running = stopping = network_suspended = false; }
   void requestStop() { stopping = running; }
   bool isStopping() const { return stopping; }
   bool isRunning() const override { return running; }
-  void loop() override { ++loops; if (stopping) { ++ends; running = stopping = false; } }
+  bool isNetworkSuspended() const { return network_suspended; }
+  void setNetworkSuspended(bool paused) {
+    assert(running && !stopping);
+    network_suspended = paused;
+  }
+  void loop() override {
+    ++loops;
+    if (stopping) { ++ends; running = stopping = network_suspended = false; }
+  }
   void sendPacket(mesh::Packet* p) override { if (allow(p)) ++sent; }
   void onPacketReceived(mesh::Packet* p) { if (allow(p)) ++received; }
 };
@@ -169,6 +197,7 @@ struct Callbacks {
   virtual bool isRs232BridgeRunning() const = 0;
   virtual bool setRs232BridgeState(bool) = 0;
   virtual bool restartRs232Bridge() = 0;
+  virtual void formatRs232Status(char*) = 0;
   virtual bool isEspNowBridgeRunning() = 0;
   virtual bool setEspNowBridgeState(bool) = 0;
   virtual bool restartEspNowBridge() = 0;
@@ -191,8 +220,11 @@ public:
   FakeCLI _cli;
   FakeAlerter _alerter;
   mesh::LocalIdentity self_id;
-  void* _mgr = nullptr; void* _radio = nullptr; void* _ms = nullptr;
+  FakeRadio radio; FakeRadio* _radio = &radio;
+  void* _mgr = nullptr; void* _ms = nullptr;
   void* getRTCClock() { return nullptr; }
+  FakeRng rng;
+  FakeRng* getRNG() { return &rng; }
   mesh::LocalIdentity getSelfId() { return self_id; }
   const char* getFirmwareVer() { return "test"; }
   const char* getBuildDate() { return "test"; }
@@ -216,6 +248,8 @@ public:
     @SERVICE@
   }
   bool bridgesPreventSleep() const {
+    using mesh::powerdiag::mask;
+    using mesh::powerdiag::Reason;
     @PENDING@
     return false;
   }
@@ -270,6 +304,29 @@ int main() {
     expect_get(cli, "bridge.type", "> mqtt+rs232+espnow");
     expect_get(cli, "rs232.enabled", "> off");
     expect_get(cli, "rs232.running", "> off");
+    fresh.mqtt_bridge->setNetworkSuspended(true);
+    assert(fresh.isMqttBridgeRunning() && fresh._prefs.bridge_enabled);
+    assert(fresh.bridgesPreventSleep());  // ESP-NOW retains its radio owner.
+    assert(fresh.setEspNowBridgeState(false));
+    assert(!fresh.bridgesPreventSleep());  // Paused MQTT is still configured.
+    assert(fresh.setRs232BridgeState(true));
+    assert(fresh.bridgesPreventSleep());  // An active UART remains independent.
+    assert(fresh.setRs232BridgeState(false));
+    assert(!fresh.bridgesPreventSleep());
+    fresh.mqtt_bridge->setNetworkSuspended(false);
+    assert(fresh.bridgesPreventSleep());  // The recovery probe owns the radio.
+    char pause_reply[256] = {};
+    cli.set("espnow.enabled off", pause_reply);
+    assert(strcmp(pause_reply, "OK") == 0);
+    fresh.mqtt_bridge->setNetworkSuspended(true);
+    assert(fresh.requestMqttBridgeStop());
+    assert(fresh.isMqttBridgeStopping() && fresh.bridgesPreventSleep());
+    fresh.serviceBridges();
+    assert(!fresh.isMqttBridgeRunning() && !fresh.bridgesPreventSleep());
+    assert(fresh.setBridgeState(true));
+    assert(fresh.isMqttBridgeRunning() && fresh.bridgesPreventSleep());
+    cli.set("espnow.enabled on", pause_reply);
+    assert(strcmp(pause_reply, "OK") == 0 && fresh.isEspNowBridgeRunning());
   }
   MyMesh mesh; mesh.defaults(); mesh.boot(); CommonCLI cli(mesh);
   char reply[256] = {};
@@ -319,18 +376,18 @@ int main() {
   assert(cli.saves == disabled_saves && mesh.isMqttBridgeRunning() && mesh.isEspNowBridgeRunning());
   cli.fail_save = true;
   cli.set("rs232.enabled on", reply);
-  assert(strstr(reply, "setting unchanged") && !mesh.bridge && !mesh._prefs.rs232_bridge_enabled);
+  assert(strstr(reply, "unconfirmed") && strstr(reply, "reboot") && !mesh.bridge && !mesh._prefs.rs232_bridge_enabled);
   assert(cli.saves == disabled_saves && mesh.isMqttBridgeRunning() && mesh.isEspNowBridgeRunning());
   cli.fail_save = false;
   cli.set("rs232.enabled on", reply); assert(strcmp(reply, "OK") == 0);
   const unsigned saved_after_enable = cli.saves;
   cli.fail_save = true;
   cli.set("rs232.enabled off", reply);
-  assert(strstr(reply, "setting unchanged") && mesh.isRs232BridgeRunning() && mesh._prefs.rs232_bridge_enabled);
+  assert(strstr(reply, "unconfirmed") && strstr(reply, "reboot") && mesh.isRs232BridgeRunning() && mesh._prefs.rs232_bridge_enabled);
   cli.set("bridge.baud 19200", reply);
-  assert(strstr(reply, "baud unchanged") && mesh._prefs.bridge_baud == 57600 && Serial2.baud == 57600);
+  assert(strstr(reply, "unconfirmed") && strstr(reply, "reboot") && mesh._prefs.bridge_baud == 57600 && Serial2.baud == 57600);
   cli.set("bridge.uart 2", reply);
-  assert(strstr(reply, "UART unchanged") && mesh._prefs.bridge_uart == 2 && mesh.isRs232BridgeRunning());
+  assert(strstr(reply, "unconfirmed") && strstr(reply, "reboot") && mesh._prefs.bridge_uart == 2 && mesh.isRs232BridgeRunning());
   assert(cli.saves == saved_after_enable && mesh.mqtt_bridge->begins == wifi_starts);
   assert(mesh.espnow_bridge.begins == wireless_starts);
   cli.fail_save = false;
@@ -351,7 +408,7 @@ int main() {
   // A failed intent save must not signal an uncancellable worker stop.
   cli.fail_save = true;
   cli.set("mqtt.enabled off", reply);
-  assert(strstr(reply, "not saved; unchanged") && mesh._prefs.bridge_enabled);
+  assert(strstr(reply, "unconfirmed") && strstr(reply, "reboot") && mesh._prefs.bridge_enabled);
   assert(mesh.isMqttBridgeRunning() && !mesh.isMqttBridgeStopping());
   cli.fail_save = false;
   cli.set("mqtt.enabled off", reply);
@@ -373,7 +430,7 @@ int main() {
   expect_get(cli, "mqtt.stopping", "> off");
   cli.fail_save = true;
   cli.set("mqtt.enabled on", reply);
-  assert(strstr(reply, "not saved; unchanged") && !mesh._prefs.bridge_enabled);
+  assert(strstr(reply, "unconfirmed") && strstr(reply, "reboot") && !mesh._prefs.bridge_enabled);
   assert(!mesh.isMqttBridgeRunning());
   cli.fail_save = false;
   cli.set("espnow.enabled on", reply); assert(strcmp(reply, "OK") == 0);

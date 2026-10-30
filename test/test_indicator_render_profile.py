@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 import unittest
 
+from cpp_source import body
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build_legacy.sh"
@@ -182,7 +184,7 @@ int main() {
         self.assertIn("37, setup_ssid", page)
         self.assertIn("static constexpr int qr_size = 105;", page)
         self.assertIn("payload, qr_x, 55, qr_size", page)
-        self.assertIn("mesh::ui::buildWiFiSetupQrPayload", page)
+        self.assertIn("mesh::ui::buildCurrentWiFiSetupQrPayload", page)
         self.assertIn("display.setCompactText(true);", page)
         self.assertGreaterEqual(page.count("display.setCompactText(false);"), 2)
         self.assertNotIn("startFrame", page)
@@ -213,8 +215,7 @@ int main() {
         self.assertIn("noteCompanionWiFiDisplayState(state)", page)
 
         main = (ROOT / "examples/companion_radio/main.cpp").read_text()
-        helper = main[main.index("bool isCompanionWiFiConnected()"):
-                      main.index("bool toggleCompanionWiFi()")]
+        helper = body(main, "bool isCompanionWiFiConnected()")
         self.assertNotIn("!companion_wifi_active", helper)
         self.assertIn("esp_wifi_sta_get_ap_info", helper)
 

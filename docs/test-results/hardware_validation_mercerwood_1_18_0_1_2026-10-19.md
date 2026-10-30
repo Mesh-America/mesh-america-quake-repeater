@@ -1,0 +1,77 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/hardware_validation_mercerwood_1_18_0_1_2026-10-19/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
+# Mercerwood Full firmware testing, 2026-10-19
+
+Later Companion results are recorded in the [qualification follow-up](companion_qualification_followup_2026-10-19.md). The records below retain the earlier campaign snapshot.
+
+Source: `4e4f27a25a720c52ca0f5381b5e5834d75532cc6`
+Version: `v1.18.0.1-halo-keymind-cascade-dev-4e4f27a2`
+
+Builds: 13/13 targets, 15/15 profiles PASS. The two Reduced OTA profiles are compile-only; repeater hardware status uses Full OTA installation proof.
+Expected radios: 13. The earlier 10-second inventory observed 12 distinct USB identities. Tag was observed separately after its later recovery; no fresh fleet-wide count is claimed. USB enumeration does not establish physical presence or absence. Build success does not mean all 13 radios passed hardware testing.
+
+| Board | Build | Flash | USB | BLE | RF | Bootloader |
+| --- | --- | --- | --- | --- | --- | --- |
+| Heltec V4.3 | PASS | PASS | PASS | PASS | unknown | n/a |
+| RAK 3401 | PASS | PASS | runtime only PASS | n/a | n/a | C2 baseline PASS |
+| LilyGo T-Deck | PASS | PASS | PASS | PASS | PASS | n/a |
+| RAK WisMesh Tag | PASS | PASS | PASS | PASS | PASS | C2 baseline PASS |
+| Heltec MeshPocket | PASS | PASS | PASS | PASS | PASS | C2 baseline PASS |
+| SenseCAP Indicator | PASS | PASS | PASS | PASS | PASS | n/a |
+| RAK 4631 | PASS | PASS | PASS | PASS | PASS | C2 baseline PASS |
+| Heltec V3 | PASS | HEAD runtime PASS | PASS | PASS | PASS | n/a |
+| Seeed XIAO ESP32-S3 | PASS | PASS | PASS | PASS | unknown | n/a |
+| Seeed XIAO nRF52 | PASS | transfer PASS; runtime unqualified | unknown | unknown | unknown | C2 baseline PASS |
+| Heltec T096 | PASS | PASS | PASS | PASS | PASS | C2 baseline PASS |
+| Seeed T1000-E | PASS | PASS | PASS | FAIL | PASS | C2 baseline PASS |
+| Heltec MeshTower SD | PASS | PASS | runtime only PASS | n/a | n/a | C2 baseline PASS |
+
+Repeater rows cover Full OTA application/runtime verification only. Their runtime-only USB entries do not claim Companion 100/10, BLE or RF qualification.
+C2 bootloader entries describe source-qualified installation evidence, including the later Tag recovery, separately from application results. All 8 required profiles now have installation evidence; this is not an installed-flash CRC readback.
+
+- T1000-E BLE remains unresolved until a completed current-source test passes.
+- Heltec V4.3 had earlier USB/BLE passes, but later RF setup repeatedly rejected non-ASCII data before channels, leases or datagrams. Current transport behavior remains unresolved; RF qualification is pending.
+- Seeed XIAO ESP32-S3 had earlier USB/BLE passes, but later RF setup repeatedly rejected non-ASCII data before channels, leases or datagrams. Current transport behavior remains unresolved; RF qualification is pending.
+- XIAO nRF52 application transfer succeeded, but stable normal runtime and its USB/BLE/RF qualification remain unresolved.
+
+Tag recovery is a later, separate result. Its earlier non-enumeration remains in the JSON history. Before recovery, USB descriptor error -110 persisted across cable and port changes, while T1000-E enumerated on Tag's former connection. These observations did not establish a root cause.
+
+A physically correlated application-only Legacy BLE transfer was accepted without writing the bootloader or SoftDevice; that phase did not establish the original USB or FICR identity. A subsequent USB read matched the original serial and clean normal Full 4e runtime. Exact C2 bootloader and matching normal Full application USB DFU then both completed, with the public UF2 version `TEST_0x02040BFF` verified. Package manifest CRC `DE20EBCB` was validated before transfer; no live installed-manifest CRC measurement is claimed.
+
+Tag then passed 100 persistent USB query cycles, 10 reopen checks, owned-contact cleanup and warm reboot, and radio2 warning/suggestion trials. Its three 30-second BLE sessions matched the USB public identity and full version, retained clean core flags and ended disconnected. One zero-hop DEV datagram passed in each direction with the RAK hub; owned channels were cleared and radio leases restored.
+
+The V3's first 15-second discovery trial failed. Its separate 25-second scan trial is PASS; the earlier failure remains part of the record.
+
+T1000-E's initial batch BLE trial failed. The explicit later retry is FAIL. The initial failure remains part of the record.
+
+Seeed XIAO nRF52 completed the normal application transfer, but normal runtime was not verified within the required 75-second window. The failed recovery phase and original batch outcomes remain in the JSON trial history. Bootloader baseline evidence is reported separately.
+
+A later XIAO recovery attempt observed runtime CDC windows of 27-151 ms. One guarded serial open was attempted, but its completion was uncertain, no explicit DTR-low operation was reached, and exact DFU was not observed during the following 45 seconds. The startup diagnostic was not installed. After the user moved the USB plug, a 20-second inventory and separate 180-second sysfs watch did not observe the original XIAO identity; the new connection repeatedly reported USB descriptor/address error -71. The other 12 USB identities were present in a separate snapshot, and the Pi reported `throttled=0x0`. These observations do not identify a cable, power, firmware or bootloader root cause. A separate 25-second BLE scan found no XIAO DFU advertisement. Recovery requires a stable connection to the original device before another firmware transfer.
+
+[Source hardening](https://github.com/mikecarper/MeshCore/commit/40b6ef8fe28548f5e2a6e4227d55d0abfa3f3e01) prevents fresh XIAO identity generation from reading an unavailable radio and defers saved-radio settings retries until hardware is available. Eight focused host tests and the XIAO Full and legacy BLE builds passed. The new Full package retains all verified capabilities and is staged on the Pi, but has not been installed. These software checks do not resolve the USB enumeration cause or change the hardware qualification counts above.
+
+The measured V3 92-contact refresh median was 3.347882 s at 32.560 kbit/s, versus 6.191396 s at 17.606 kbit/s for the earlier firmware. These are protocol throughput measurements on one V3/Linux connection, not BLE PHY rates or phone/full-app refresh claims. [Measured results](https://mikecarper.github.io/MeshCore/test-results/companion_ble_refresh_2026-10-19/).
+
+The historical inventory observed 12 distinct USB identities during a 10-second read-only window, including the cycling XIAO nRF52. This does not mean 12 stable ports. It preceded the separate later Tag recovery and has not been replaced by a fresh fleet-wide inventory.
+
+This is a partial campaign report: 10/11 Companion USB qualifications, 9/11 BLE qualifications and 7 two-way RF links (8 boards including the RAK hub) passed. The full campaign is incomplete.
+
+USB qualification used 100 persistent query cycles and 10 reopen checks, owned-contact CRUD and warm reboot, plus RX-only radio2 overlap-warning and three-decimal frequency-suggestion trials. BLE passes required three 30-second sessions. RF passes required exact two-way zero-hop DEV datagrams and owned-channel/radio-lease cleanup; they do not qualify text delivery, range, cold boot, phone interoperability or every firmware feature.
+
+RF setup attempts with no completed delivery are retained separately; they do not count as failed deliveries.
+
+MeshPocket previously reported error flag 8. Receive silence is a hypothesis, not a confirmed radio fault. A controlled warm reboot with flushed command delivery returned clean core flags, and its later two-way RAK RF test passed. The earlier unconfirmed reboot attempt and incomplete RF setup remain part of the history.
+
+The T1000-E retry discovered the USB-bound advertisement, but pairing failed with a D-Bus error before any completed sessions. The NUS public key was not verified. Its initial batch discovery failure remains retained; BLE qualification is unresolved.
+
+The retained pairing reason was Page Timeout.
+
+V4.3 history retains 4 non-ASCII RF setup aborts and one separate failed USB setup diagnosis. An intervening guarded classification completed a clean normal HEAD handshake and closed its port; it did not qualify RF or run a transition drain.
+
+The final read-only gateway check verified the active service held the RAK 3401 primary CDC0 interface.
+
+The unit-test workflow passed for the measured firmware source `4e4f27a2`: [GitHub run](https://github.com/mikecarper/MeshCore/actions/runs/39328768327).
+
+[Machine-readable results](hardware_validation_mercerwood_1_18_0_1_2026-10-19.safe.json).

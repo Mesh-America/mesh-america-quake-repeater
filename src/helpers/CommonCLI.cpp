@@ -1,11 +1,45 @@
+#include <helpers/RegulatorSettings.h>
+#include <helpers/sensors/SolarXiaoPower.h>
+#include <helpers/LedSettings.h>
 #include <Arduino.h>
+#include "CarrierTools.h"
+#include "PacketFileLoggingConfig.h"
 #include "CommonCLI.h"
+#ifdef WRAPPER_CLASS
+#include "target.h"
+#endif
 #include "PrefsSaveReplyGuard.h"
 #include "UsbLoggingWatchdog.h"
+#include "PowerSavingDiagnostics.h"
 #include "HilStartupTrace.h"
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/CpuClockPolicy.h>
+#include <helpers/esp32/PowerTestControls.h>
+#endif
 #include <helpers/ui/DisplayPowerSettings.h>
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT && defined(DISPLAY_CLASS)
+#include <helpers/ui/OLEDControllerSettings.h>
+#endif
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) \
+    && HELTEC_TFT_RUNTIME_ROTATION == 1
+#include <helpers/ui/DisplayRotationSettings.h>
+#endif
 #include <helpers/BatteryChargeCLI.h>
+#include <helpers/BatteryCalibration.h>
+#if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX
+#include <helpers/MorseCLI.h>
+#endif
+#include <helpers/MorseLoopPolicy.h>
+#if defined(RAK_4631)
+#include <helpers/PeripheralModePrefs.h>
+#endif
 #include "CLICommandUtils.h"
+#ifdef WITH_RS232_BRIDGE
+#include "bridges/RS232PowerSettings.h"
+#endif
+#if defined(WITH_ESPNOW_BRIDGE)
+#include "bridges/ESPNowBridgeDiagnostics.h"
+#endif
 #include "GpsPowerPolicy.h"
 #include "FloodAdvertCLI.h"
 #include "StorageLayout.h"
@@ -43,6 +77,7 @@
 #define BRIDGE_MAX_BAUD 115200
 #endif
 #ifdef ESP_PLATFORM
+#include <helpers/esp32/ManagementPassword.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <esp_wifi.h>
@@ -65,36 +100,6 @@
 #endif
 
 #define RECENT_REPEATER_PREFIX_MAX_BYTES  3
-
-#if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
-static const uint32_t SDCARD_ACTION_COOLDOWN_MILLIS = 5UL * 60UL * 1000UL;
-
-static void formatSdCardElapsed(char* out, size_t out_len, bool recorded,
-                                uint32_t ran_at, uint32_t now) {
-  if (!recorded) {
-    snprintf(out, out_len, "never");
-    return;
-  }
-
-  const uint32_t elapsed_secs = (now - ran_at) / 1000UL;
-  if (elapsed_secs < 60UL) {
-    snprintf(out, out_len, "%lus ago", (unsigned long)elapsed_secs);
-  } else if (elapsed_secs < 60UL * 60UL) {
-    snprintf(out, out_len, "%lum %lus ago",
-             (unsigned long)(elapsed_secs / 60UL),
-             (unsigned long)(elapsed_secs % 60UL));
-  } else if (elapsed_secs < 24UL * 60UL * 60UL) {
-    snprintf(out, out_len, "%luh %lum ago",
-             (unsigned long)(elapsed_secs / 3600UL),
-             (unsigned long)((elapsed_secs / 60UL) % 60UL));
-  } else {
-    snprintf(out, out_len, "%lud %luh ago",
-             (unsigned long)(elapsed_secs / 86400UL),
-             (unsigned long)((elapsed_secs / 3600UL) % 24UL));
-  }
-}
-
-#endif
 
 #include <helpers/radiolib/RXPowerSaving.h>
 
@@ -155,8 +160,25 @@ static bool isGpioConfig(const char* config) {
 #endif
 
 void CommonCLI::loop() {
-  _radio_profiles.loop();
-  loopManagement();
+#if MESH_ENABLE_BATTERY_FORWARDING
+  loopBatteryForwarding();
+#endif
+#if MESH_ENABLE_MORSE_RX
+  if (_morse_reply.pending()) {
+    const ClientInfo* actor = _acl->getClient(_morse_reply.actor(), PUB_KEY_SIZE);
+    const auto& settings = mesh::morseSettings();
+    _morse_reply.service(_callbacks->getProfileRadio(), millis(),
+        actor && actor->isAdmin(), mesh::morseSettingsUsable(),
+        settings.frequency_khz, settings.wpm);
+  }
+#endif
+  if (!mesh::morseTimingActive(_callbacks->getProfileRadio())) {
+    _radio_profiles.loop();
+    loopManagement();
+#if MESH_ENABLE_TX_BEACONS
+    loopBeacons();
+#endif
+  }
 #if defined(ESP32_PLATFORM) || defined(USER_GPIO_CONTROL)
   _user_gpio.loop();
   UserGpio::Completion completion;
@@ -184,6 +206,14 @@ bool CommonCLI::hasActiveUserGpioTimer() const {
 static const size_t LEGACY_MQTT_GAP_6SLOT = 306 + 6 * 186;  // 1422
 static const size_t LEGACY_MQTT_GAP_3SLOT = 306 + 3 * 186;  // 864
 static const size_t LEGACY_OBS_TAIL_MAX = 124;  // rx_boosted(1) + flood(2) + snmp(25) + watchdog(1) + alert block(95)
+
+static bool copyCLIArgument(char* dest, size_t capacity, const char* argument) {
+  size_t len = 0;
+  while (len < capacity && argument[len] != 0) len++;
+  if (len == capacity) return false;
+  memcpy(dest, argument, len + 1);
+  return true;
+}
 
 static bool looksNumeric(const char* s) {
   if (s == NULL) return false;
@@ -439,6 +469,9 @@ static const char* retryPresetName(uint8_t preset) {
 
 bool CommonCLI::calculateRxPowerSavingLevel(uint32_t level, uint8_t sf, float bw, uint32_t preamble,
                                             uint32_t* rx_us, uint32_t* sleep_us) {
+#ifdef WRAPPER_CLASS
+  if (!WRAPPER_CLASS::SupportsRxPowerSaving) return false;
+#endif
   if (level < 1 || level > 10 || preamble > 0xFF
       || !isRxPowerSavingPreamble((uint8_t)preamble)) {
     return false;
@@ -450,6 +483,9 @@ bool CommonCLI::calculateRxPowerSavingLevel(uint32_t level, uint8_t sf, float bw
 
 static void appendRxPowerSavingAdjustmentNote(char* reply, const NodePrefs* prefs,
                                                uint8_t sf, float bw) {
+#ifdef WRAPPER_CLASS
+  if (!WRAPPER_CLASS::SupportsRxPowerSaving) return;
+#endif
   if (!reply || !prefs || !prefs->rx_powersaving_enabled
       || prefs->rx_ps_level < 1 || prefs->rx_ps_level > 10) {
     return;
@@ -493,6 +529,9 @@ static void appendRxPowerSavingAdjustmentNote(char* reply, const NodePrefs* pref
 // radio SF/BW. No-op (returns false) for manual timings (rx_ps_level == 0).
 // Lets level-based RX powersaving auto-retune when SF/BW change.
 bool CommonCLI::recalculateRxPowerSavingFromLevel(NodePrefs* prefs) {
+#ifdef WRAPPER_CLASS
+  if (!WRAPPER_CLASS::SupportsRxPowerSaving) return false;
+#endif
   return recalcRxPowerSavingFromLevel(prefs->rx_ps_level, prefs->sf, prefs->bw,
                                       prefs->rx_ps_preamble, &prefs->rx_ps_rx_us,
                                       &prefs->rx_ps_sleep_us);
@@ -589,7 +628,7 @@ static bool parseFloodRetryPrefixList(uint8_t dest[][FLOOD_RETRY_PREFIX_LEN], ui
   }
 
   char local[FLOOD_RETRY_LIST_TEXT_MAX];
-  StrHelper::strncpy(local, value, sizeof(local));
+  if (!copyCLIArgument(local, sizeof(local), value)) return false;
   const char* parts[FLOOD_RETRY_LIST_PREFIXES + 1];
   int num = mesh::Utils::parseTextParts(local, parts, FLOOD_RETRY_LIST_PREFIXES + 1);
   if (num > max_prefixes) {
@@ -747,8 +786,14 @@ static void formatSnrDbX4Short(char* dest, size_t dest_len, int16_t snr_x4) {
 }
 
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
+#if MESH_ENABLE_BATTERY_FORWARDING
+  loadBatteryForwarding(fs);
+#endif
   mesh::hilStartupTrace("prefs_profiles_begin");
   _radio_profiles.begin(fs, _callbacks->getProfileRadio(), _rtc, true);
+#if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX
+  mesh::loadMorseSettings(fs);
+#endif
   mesh::hilStartupTrace("prefs_profiles_ready");
   _prefs->primary_radio_preamble = _radio_profiles.primaryPreamble();
 #if !defined(WITH_MQTT_BRIDGE) && (defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM))
@@ -763,6 +808,10 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #endif
   mesh::hilStartupTrace("prefs_display_begin");
   const bool display_settings_loaded = mesh::ui::loadDisplayPowerSettings(fs, false);
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) \
+    && HELTEC_TFT_RUNTIME_ROTATION == 1
+  mesh::ui::loadDisplayRotationSettings(fs);
+#endif
   mesh::hilStartupTrace("prefs_display_ready");
   (void)display_settings_loaded;
   bool is_fresh_install = false;
@@ -785,12 +834,18 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   _prefs->trace_when_repeat_off = 0;
   _prefs->ota_channel = 0;
 #ifdef WITH_RS232_BRIDGE
+  _prefs->rs232_heartbeat = 1;
+  _prefs->rs232_autosleep = 1;
+  _prefs->rs232_idle_seconds = mesh::bridge::rs232power::DEFAULT_IDLE_SECONDS;
   _prefs->bridge_uart = WITH_RS232_BRIDGE_UART;
 #else
   _prefs->bridge_uart = 0;
 #endif
   _prefs->bridge_format = mesh::bridge::ESPNOW_FORMAT_WRAPPED;
   _prefs->gps_sync_interval_hours = 0;
+#if defined(RAK_4631)
+  _prefs->peripherals_shared = 0;
+#endif
 
 #ifdef WITH_MQTT_BRIDGE
   bool node_prefs_needs_migration = false;
@@ -848,6 +903,12 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #endif
 #endif
     if (legacy && _prefs->loadSerial(legacy)) {
+#ifdef WITH_RS232_BRIDGE
+      // Observer JSON migration can use the checked writer directly. Normalize
+      // runtime fields here too, not just the bytes emitted by that writer.
+      mesh::bridge::rs232power::sanitize(_prefs->rs232_heartbeat,
+          _prefs->rs232_autosleep, _prefs->rs232_idle_seconds);
+#endif
       loaded = true;
       is_upgrade = true;
 #if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
@@ -991,6 +1052,22 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   if (loaded) syncOtaConfigFromPrefs();   // persisted OTA policy/keys -> OtaContext (else keep safe defaults)
 #endif
   mesh::hilStartupTrace("prefs_apply_begin");
+#if defined(ESP32_PLATFORM)
+  if (!mesh::esp32::cpuclock::validSelection(_prefs->cpu_freq_mhz)
+      || (_prefs->cpu_freq_mhz && !_board->supportsCpuFrequencyMHz(_prefs->cpu_freq_mhz)))
+    _prefs->cpu_freq_mhz = 0;
+  _board->setCpuFrequencyRequest(_prefs->cpu_freq_mhz, _prefs->powersaving_enabled != 0);
+#endif
+#if defined(NRF52_POWER_MANAGEMENT)
+  // The startup voltage policy owns the relative calibration on these boards.
+  // Its checked record must not be replaced by the legacy infrastructure field.
+  if (!mesh::power::voltagePolicySupported())
+#endif
+    _board->setAdcMultiplier(_prefs->adc_multiplier);
+#if defined(RAK_4631)
+  // Boot-time only. Later CLI saves must not cut a live peripheral/flash rail.
+  _sensors->configureSharedPeripheralMode(_prefs->peripherals_shared != 0);
+#endif
 #if MESH_USB_LOGGING_AVAILABLE
   mesh::setUsbDebugEnabled(_prefs->usb_debug_enabled != 0);
   mesh::setUsbLoggingEnabled(_prefs->usb_logging_enabled != 0);
@@ -1031,6 +1108,18 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
   _prefs->gps_sync_interval_hours = 0;
   _prefs->ota_channel = 0;
   _prefs->rs232_bridge_enabled = 0;
+#if defined(ESP32_PLATFORM)
+  _prefs->cpu_freq_mhz = 0;
+#endif
+#if defined(RAK_4631)
+  // Failure to read an existing policy cannot authorize a shared-rail cut.
+  _prefs->peripherals_shared = 1;
+#endif
+#ifdef WITH_RS232_BRIDGE
+  _prefs->rs232_heartbeat = 1;
+  _prefs->rs232_autosleep = 1;
+  _prefs->rs232_idle_seconds = mesh::bridge::rs232power::DEFAULT_IDLE_SECONDS;
+#endif
 #if defined(RP2040_PLATFORM)
   File file = fs->open(filename, "r");
 #else
@@ -1468,6 +1557,15 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
 #ifdef WITH_RS232_BRIDGE
                                 has_runtime_rs232_intent = rs232_profile == 0xB1
                                     && rs232_intent <= 1;
+                                if (has_runtime_rs232_intent && file.available() > 0) {
+                                  uint8_t power_tail[mesh::bridge::rs232power::PREFS_SIZE];
+                                  const size_t count = file.read(power_tail, sizeof(power_tail));
+                                  if (!mesh::bridge::rs232power::decodePrefs(power_tail, count,
+                                          _prefs->rs232_heartbeat, _prefs->rs232_autosleep,
+                                          _prefs->rs232_idle_seconds)) {
+                                    _com_prefs_needs_upgrade = true;
+                                  }
+                                }
 #endif
                               }
                             }
@@ -1709,10 +1807,17 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
       _prefs->rx_ps_preamble = 0;   // 0 = auto (derive from SF)
     }
     ensureRxPowerSavingDefaults(&_prefs->rx_ps_rx_us, &_prefs->rx_ps_sleep_us);
-    recalcRxPowerSavingFromLevel(_prefs->rx_ps_level, _prefs->sf, _prefs->bw, _prefs->rx_ps_preamble,
-                                 &_prefs->rx_ps_rx_us,
-                                 &_prefs->rx_ps_sleep_us); // retune level-based timings to the loaded SF/BW
+    recalculateRxPowerSavingFromLevel(_prefs); // retune supported level-based timings to loaded SF/BW
 
+    // Read the footer independently of optional legacy UART tails/profile.
+#if defined(RAK_4631)
+    _prefs->peripherals_shared = mesh::peripherals::readCommonMode(file);
+#endif
+#if defined(ESP32_PLATFORM)
+    _prefs->cpu_freq_mhz = mesh::esp32::cpuclock::readFooter(file);
+    if (_prefs->cpu_freq_mhz && !_board->supportsCpuFrequencyMHz(_prefs->cpu_freq_mhz))
+      _prefs->cpu_freq_mhz = 0;
+#endif
     file.close();
   }
 }
@@ -1871,11 +1976,99 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
   const uint8_t rs232_profile = 0;
 #endif
   WRITE_COMMON_PREFS(&rs232_profile);                          // UART intent belongs to this profile
+#ifdef WITH_RS232_BRIDGE
+  uint8_t power_tail[mesh::bridge::rs232power::PREFS_SIZE];
+  mesh::bridge::rs232power::encodePrefs(power_tail, prefs->rs232_heartbeat,
+                                      prefs->rs232_autosleep,
+                                      prefs->rs232_idle_seconds);
+  WRITE_COMMON_PREFS_BYTES(power_tail, sizeof(power_tail));
+#endif
+#if defined(RAK_4631)
+  uint8_t peripheral_footer[mesh::peripherals::FooterSize];
+  mesh::peripherals::encodeFooter(peripheral_footer, prefs->peripherals_shared);
+  WRITE_COMMON_PREFS_BYTES(peripheral_footer, sizeof(peripheral_footer));
+#endif
+#if defined(ESP32_PLATFORM)
+  if (prefs->cpu_freq_mhz && mesh::esp32::cpuclock::validSelection(prefs->cpu_freq_mhz)) {
+    uint8_t cpu_footer[mesh::esp32::cpuclock::FooterSize];
+    mesh::esp32::cpuclock::encodeFooter(cpu_footer, prefs->cpu_freq_mhz);
+    WRITE_COMMON_PREFS_BYTES(cpu_footer, sizeof(cpu_footer));
+  }
+#endif
 
 #undef WRITE_COMMON_PREFS_BYTES
 #undef WRITE_COMMON_PREFS
   return true;
 }
+#endif
+
+// This canonical retry/flood span contains no padding. Guard every boundary
+// before replacing its field writes with one bounded LittleFS transaction write.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
+template <typename Writer>
+static void writeCommonRetryPrefs(Writer& writer, NodePrefs* prefs) {
+  static_assert(offsetof(NodePrefs, direct_retry_attempts) == offsetof(NodePrefs, retry_preset)
+      + sizeof(prefs->retry_preset), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_base_ms) == offsetof(NodePrefs, direct_retry_attempts)
+      + sizeof(prefs->direct_retry_attempts), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_step_ms) == offsetof(NodePrefs, direct_retry_base_ms)
+      + sizeof(prefs->direct_retry_base_ms), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_snr_margin_x4) == offsetof(NodePrefs, direct_retry_step_ms)
+      + sizeof(prefs->direct_retry_step_ms), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_cr4_snr_x4) == offsetof(NodePrefs, direct_retry_snr_margin_x4)
+      + sizeof(prefs->direct_retry_snr_margin_x4), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_cr5_snr_x4) == offsetof(NodePrefs, direct_retry_cr4_snr_x4)
+      + sizeof(prefs->direct_retry_cr4_snr_x4), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_cr7_snr_x4) == offsetof(NodePrefs, direct_retry_cr5_snr_x4)
+      + sizeof(prefs->direct_retry_cr5_snr_x4), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_cr8_snr_x4) == offsetof(NodePrefs, direct_retry_cr7_snr_x4)
+      + sizeof(prefs->direct_retry_cr7_snr_x4), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_enabled) == offsetof(NodePrefs, direct_retry_cr8_snr_x4)
+      + sizeof(prefs->direct_retry_cr8_snr_x4), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_cr_enabled) == offsetof(NodePrefs, direct_retry_enabled)
+      + sizeof(prefs->direct_retry_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_prefs_magic) == offsetof(NodePrefs, direct_retry_cr_enabled)
+      + sizeof(prefs->direct_retry_cr_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_attempts) == offsetof(NodePrefs, direct_retry_prefs_magic)
+      + sizeof(prefs->direct_retry_prefs_magic), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_max_path) == offsetof(NodePrefs, flood_retry_attempts)
+      + sizeof(prefs->flood_retry_attempts), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_prefixes) == offsetof(NodePrefs, flood_retry_max_path)
+      + sizeof(prefs->flood_retry_max_path), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_bridge_enabled) == offsetof(NodePrefs, flood_retry_prefixes)
+      + sizeof(prefs->flood_retry_prefixes), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_bridge_buckets) == offsetof(NodePrefs, flood_retry_bridge_enabled)
+      + sizeof(prefs->flood_retry_bridge_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_ignore_prefixes) == offsetof(NodePrefs, flood_retry_bridge_buckets)
+      + sizeof(prefs->flood_retry_bridge_buckets), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_advert_enabled) == offsetof(NodePrefs, flood_retry_ignore_prefixes)
+      + sizeof(prefs->flood_retry_ignore_prefixes), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, battery_alert_enabled) == offsetof(NodePrefs, flood_retry_advert_enabled)
+      + sizeof(prefs->flood_retry_advert_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, battery_alert_low_percent) == offsetof(NodePrefs, battery_alert_enabled)
+      + sizeof(prefs->battery_alert_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, battery_alert_critical_percent) == offsetof(NodePrefs, battery_alert_low_percent)
+      + sizeof(prefs->battery_alert_low_percent), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_recent_enabled) == offsetof(NodePrefs, battery_alert_critical_percent)
+      + sizeof(prefs->battery_alert_critical_percent), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_channel_data_enabled) == offsetof(NodePrefs, direct_retry_recent_enabled)
+      + sizeof(prefs->direct_retry_recent_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, legacy_flood_channel_block_max_hops) == offsetof(NodePrefs, flood_channel_data_enabled)
+      + sizeof(prefs->flood_channel_data_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_channel_data_max_hops) == offsetof(NodePrefs, legacy_flood_channel_block_max_hops)
+      + sizeof(prefs->legacy_flood_channel_block_max_hops), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, telemetry_access) == offsetof(NodePrefs, flood_channel_data_max_hops)
+      + sizeof(prefs->flood_channel_data_max_hops), "Common preference retry tail has padding or changed order");
+  constexpr size_t first = offsetof(NodePrefs, retry_preset);
+  constexpr size_t size = offsetof(NodePrefs, telemetry_access)
+      + sizeof(prefs->telemetry_access) - first;
+  writer.write(reinterpret_cast<const uint8_t*>(prefs) + first, size);
+}
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
 #endif
 
 void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
@@ -1885,6 +2078,15 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     _common_save_succeeded = false;
     _prefs->usb_debug_enabled = _prefs->usb_debug_enabled == 1 ? 1 : 0;
     _prefs->trace_when_repeat_off = _prefs->trace_when_repeat_off == 1 ? 1 : 0;
+#if defined(ESP32_PLATFORM)
+    if (!mesh::esp32::cpuclock::validSelection(_prefs->cpu_freq_mhz)
+        || (_prefs->cpu_freq_mhz && !_board->supportsCpuFrequencyMHz(_prefs->cpu_freq_mhz)))
+      _prefs->cpu_freq_mhz = 0;
+#endif
+#ifdef WITH_RS232_BRIDGE
+    mesh::bridge::rs232power::sanitize(_prefs->rs232_heartbeat,
+        _prefs->rs232_autosleep, _prefs->rs232_idle_seconds);
+#endif
 #if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
     _prefs->rs232_bridge_enabled = _prefs->bridge_enabled == 1 ? 1 : 0;
 #elif !defined(WITH_RS232_BRIDGE)
@@ -1963,34 +2165,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     file.write((uint8_t *)&_prefs->cad_enabled, sizeof(_prefs->cad_enabled));                       // 294
     // next: 295
     markDirectRetryPrefsValid(_prefs);
-    file.write((uint8_t *)&_prefs->retry_preset, sizeof(_prefs->retry_preset));                     // 295
-    file.write((uint8_t *)&_prefs->direct_retry_attempts, sizeof(_prefs->direct_retry_attempts));   // 296
-    file.write((uint8_t *)&_prefs->direct_retry_base_ms, sizeof(_prefs->direct_retry_base_ms));     // 297
-    file.write((uint8_t *)&_prefs->direct_retry_step_ms, sizeof(_prefs->direct_retry_step_ms));     // 299
-    file.write((uint8_t *)&_prefs->direct_retry_snr_margin_x4, sizeof(_prefs->direct_retry_snr_margin_x4)); // 301
-    file.write((uint8_t *)&_prefs->direct_retry_cr4_snr_x4, sizeof(_prefs->direct_retry_cr4_snr_x4)); // 303
-    file.write((uint8_t *)&_prefs->direct_retry_cr5_snr_x4, sizeof(_prefs->direct_retry_cr5_snr_x4)); // 304
-    file.write((uint8_t *)&_prefs->direct_retry_cr7_snr_x4, sizeof(_prefs->direct_retry_cr7_snr_x4)); // 305
-    file.write((uint8_t *)&_prefs->direct_retry_cr8_snr_x4, sizeof(_prefs->direct_retry_cr8_snr_x4)); // 306
-    file.write((uint8_t *)&_prefs->direct_retry_enabled, sizeof(_prefs->direct_retry_enabled));       // 307
-    file.write((uint8_t *)&_prefs->direct_retry_cr_enabled, sizeof(_prefs->direct_retry_cr_enabled)); // 308
-    file.write((uint8_t *)&_prefs->direct_retry_prefs_magic, sizeof(_prefs->direct_retry_prefs_magic)); // 309
-    file.write((uint8_t *)&_prefs->flood_retry_attempts, sizeof(_prefs->flood_retry_attempts));       // 311
-    file.write((uint8_t *)&_prefs->flood_retry_max_path, sizeof(_prefs->flood_retry_max_path));       // 312
-    file.write((uint8_t *)&_prefs->flood_retry_prefixes[0][0], sizeof(_prefs->flood_retry_prefixes)); // 313
-    file.write((uint8_t *)&_prefs->flood_retry_bridge_enabled, sizeof(_prefs->flood_retry_bridge_enabled));
-    file.write((uint8_t *)&_prefs->flood_retry_bridge_buckets[0][0][0], sizeof(_prefs->flood_retry_bridge_buckets));
-    file.write((uint8_t *)&_prefs->flood_retry_ignore_prefixes[0][0], sizeof(_prefs->flood_retry_ignore_prefixes));
-    file.write((uint8_t *)&_prefs->flood_retry_advert_enabled, sizeof(_prefs->flood_retry_advert_enabled));
-    file.write((uint8_t *)&_prefs->battery_alert_enabled, sizeof(_prefs->battery_alert_enabled));
-    file.write((uint8_t *)&_prefs->battery_alert_low_percent, sizeof(_prefs->battery_alert_low_percent));
-    file.write((uint8_t *)&_prefs->battery_alert_critical_percent, sizeof(_prefs->battery_alert_critical_percent));
-    file.write((uint8_t *)&_prefs->direct_retry_recent_enabled, sizeof(_prefs->direct_retry_recent_enabled));
-    file.write((uint8_t *)&_prefs->flood_channel_data_enabled, sizeof(_prefs->flood_channel_data_enabled));
-    file.write((uint8_t *)&_prefs->legacy_flood_channel_block_max_hops,
-               sizeof(_prefs->legacy_flood_channel_block_max_hops));
-    file.write((uint8_t *)&_prefs->flood_channel_data_max_hops, sizeof(_prefs->flood_channel_data_max_hops));
-    file.write((uint8_t *)&_prefs->telemetry_access, sizeof(_prefs->telemetry_access));             // 674
+    writeCommonRetryPrefs(file, _prefs); // Same canonical retry/flood bytes; no file-format change.
 #if defined(ENABLE_OTA)
     file.write((uint8_t *)&_prefs->ota_autofetch, sizeof(_prefs->ota_autofetch));                   // 675
     file.write((uint8_t *)&_prefs->ota_autoinstall, sizeof(_prefs->ota_autoinstall));               // 676
@@ -2052,6 +2227,25 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     const uint8_t rs232_profile = 0;
 #endif
     file.write(&rs232_profile, sizeof(rs232_profile));           // UART intent belongs to this profile
+#ifdef WITH_RS232_BRIDGE
+    uint8_t power_tail[mesh::bridge::rs232power::PREFS_SIZE];
+    mesh::bridge::rs232power::encodePrefs(power_tail, _prefs->rs232_heartbeat,
+                                        _prefs->rs232_autosleep,
+                                        _prefs->rs232_idle_seconds);
+    file.write(power_tail, sizeof(power_tail));
+#endif
+#if defined(RAK_4631)
+    uint8_t peripheral_footer[mesh::peripherals::FooterSize];
+    mesh::peripherals::encodeFooter(peripheral_footer, _prefs->peripherals_shared);
+    file.write(peripheral_footer, sizeof(peripheral_footer));
+#endif
+#if defined(ESP32_PLATFORM)
+    if (_prefs->cpu_freq_mhz && mesh::esp32::cpuclock::validSelection(_prefs->cpu_freq_mhz)) {
+      uint8_t cpu_footer[mesh::esp32::cpuclock::FooterSize];
+      mesh::esp32::cpuclock::encodeFooter(cpu_footer, _prefs->cpu_freq_mhz);
+      file.write(cpu_footer, sizeof(cpu_footer));
+    }
+#endif
 
     _common_save_succeeded = file.commit();
     if (!_common_save_succeeded) {
@@ -2687,11 +2881,11 @@ void CommonCLI::loadMQTTPrefs(
   if (MQTTPrefsCodec::repairDisplayPrefs(&_mqtt_prefs)) {
     // Old payloads retain valid defaults because the object was defaulted before
     // their shorter prefix was copied. This branch repairs only a full/newer
-    // payload carrying invalid display values.
+    // payload carrying invalid display or advert-verification values.
     if (!_mqtt_prefs_hold) {
       mqtt_rewrite_pending = true;
     }
-    MESH_DEBUG_PRINTLN("MQTT: invalid display preferences reset to defaults");
+    MESH_DEBUG_PRINTLN("MQTT: invalid display/advert preferences reset to defaults");
   }
   _legacy_tail.valid = false;
 
@@ -2755,6 +2949,9 @@ void CommonCLI::savePrefs(PrefsSaveRouting::Scope scope) {
   }
 }
 
+// Failure does not prove the previous image is still on disk: publication can
+// succeed before readback fails. Callers can restore runtime values, but must
+// describe the durable save as unconfirmed rather than promise disk rollback.
 bool CommonCLI::trySavePrefs(PrefsSaveRouting::Scope scope) {
   const PrefsSaveRouting::Plan plan = PrefsSaveRouting::planFor(scope);
   const uint8_t old_advert_interval = _prefs->advert_interval;
@@ -2814,6 +3011,45 @@ bool CommonCLI::saveCommonPrefs() {
   return _common_save_result_known && _common_save_succeeded;
 }
 
+bool CommonCLI::applyAndSaveAdcMultiplier(float multiplier, char* reply,
+                                         size_t capacity) {
+  if (!isfinite(multiplier) || multiplier < 0.0f || multiplier > 10.0f) {
+    mesh::cli::formatError(reply, capacity, "multiplier 0-10");
+    return false;
+  }
+  if (_board->getAdcMultiplier() <= 0.0f) {
+    mesh::cli::formatError(reply, capacity, "unsupported");
+    return false;
+  }
+#if defined(NRF52_POWER_MANAGEMENT)
+  if (mesh::power::voltagePolicySupported()) {
+    const bool saved = mesh::power::setConfiguredAdcMultiplier(multiplier,
+                                                             reply, capacity);
+    if (saved) loopBatteryForwarding(true);
+    return saved;
+  }
+#endif
+  const float previous = _board->getAdcMultiplier();
+  const float previous_pref = _prefs->adc_multiplier;
+  if (!_board->setAdcMultiplier(multiplier)) {
+    mesh::cli::formatError(reply, capacity, "invalid multiplier");
+    return false;
+  }
+  _prefs->adc_multiplier = multiplier;
+  if (!trySavePrefs()) {
+    _prefs->adc_multiplier = previous_pref;
+    const bool restored = _board->setAdcMultiplier(previous);
+    snprintf(reply, capacity, "%s", restored
+        ? "Error: save unconfirmed; reboot may differ"
+        : "Error: save unconfirmed; runtime restore failed; reboot may differ");
+    return false;
+  }
+  loopBatteryForwarding(true);
+  if (multiplier == 0.0f) snprintf(reply, capacity, "OK - defaults (saved)");
+  else snprintf(reply, capacity, "OK - multiplier set to %.3f", multiplier);
+  return true;
+}
+
 bool CommonCLI::savePrimaryRadioParams(float freq, float bw, uint8_t sf,
                                        uint8_t cr, uint16_t preamble) {
   if (!isfinite(freq) || !isfinite(bw) || freq < 150.0f || freq > 2500.0f
@@ -2853,16 +3089,262 @@ uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
   }
 }
 
+#if defined(WITH_RS232_BRIDGE)
+bool CommonCLI::handleRs232DiagnosticCommand(uint32_t sender_timestamp,
+                                            const char* command, char* reply) {
+  constexpr size_t capacity = 157;  // Leave room for an infrastructure reply prefix.
+  if (strncmp(command, "get rs232.transport", 19) == 0) {
+    if (strcmp(command, "get rs232.transport") != 0) {
+      mesh::cli::formatError(reply, capacity, "use get rs232.transport");
+    } else {
+      _callbacks->formatRs232Transport(reply, capacity);
+    }
+    return true;
+  }
+  if (strncmp(command, "get rs232.stats", 15) == 0) {
+    const char* page = command + 15;
+    if (*page == 0) {
+      _callbacks->formatRs232Stats("", reply, capacity);
+    } else if (strcmp(page, " rx") == 0 || strcmp(page, " tx") == 0
+               || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0) {
+      _callbacks->formatRs232Stats(page + 1, reply, capacity);
+    } else {
+      mesh::cli::formatError(reply, capacity, "use get rs232.stats [rx|tx|drops|test]");
+    }
+    return true;
+  }
+  if (strncmp(command, "rs232", 5) != 0
+      || (command[5] != 0 && command[5] != ' ')) return false;
+  if (sender_timestamp != 0) {
+    mesh::cli::formatError(reply, capacity, "RS232 test/reset requires a local connection");
+    return true;
+  }
+  if (strcmp(command, "rs232 resetstats") == 0) {
+    snprintf(reply, capacity, "%s", _callbacks->resetRs232Stats()
+        ? "OK - RS232 statistics reset" : "Error: RS232 diagnostics unavailable");
+    return true;
+  }
+  uint32_t nonce = 0;
+  if (strcmp(command, "rs232 test") == 0) {
+    nonce = millis();  // Correlation only; this is not a security token.
+  } else {
+    if (strncmp(command, "rs232 test ", 11) != 0) {
+      mesh::cli::formatError(reply, capacity, "use rs232 test [8 hex digits] or rs232 resetstats");
+      return true;
+    }
+    const char* value = command + 11;
+    if (strlen(value) != 8) {
+      mesh::cli::formatError(reply, capacity, "use rs232 test [8 hex digits] or rs232 resetstats");
+      return true;
+    }
+    for (size_t i = 0; i < 8; ++i) {
+      const char c = value[i];
+      uint8_t digit;
+      if (c >= '0' && c <= '9') digit = static_cast<uint8_t>(c - '0');
+      else if (c >= 'a' && c <= 'f') digit = static_cast<uint8_t>(c - 'a' + 10);
+      else if (c >= 'A' && c <= 'F') digit = static_cast<uint8_t>(c - 'A' + 10);
+      else {
+        mesh::cli::formatError(reply, capacity, "use rs232 test [8 hex digits] or rs232 resetstats");
+        return true;
+      }
+      nonce = (nonce << 4) | digit;
+    }
+  }
+  if (_callbacks->sendRs232Test(nonce)) {
+    snprintf(reply, capacity, "OK - test queued id=%08lX; confirm on peer",
+             static_cast<unsigned long>(nonce));
+  } else {
+    mesh::cli::formatError(reply, capacity, "RS232 test not queued; check status/stats");
+  }
+  return true;
+}
+#endif
+
+#if defined(WITH_ESPNOW_BRIDGE)
+bool CommonCLI::handleEspNowDiagnosticCommand(uint32_t sender_timestamp,
+                                             const char* command, char* reply) {
+  constexpr size_t capacity = 157;  // Leave room for an infrastructure reply prefix.
+  if (strncmp(command, "get espnow.status", 17) == 0) {
+    if (strcmp(command, "get espnow.status") != 0) {
+      mesh::cli::formatError(reply, capacity, "use get espnow.status");
+    } else {
+      _callbacks->formatEspNowStatus(reply, capacity);
+    }
+    return true;
+  }
+  if (strncmp(command, "get espnow.stats", 16) == 0) {
+    const char* page = command + 16;
+    if (*page == 0) {
+      _callbacks->formatEspNowStats("", reply, capacity);
+    } else if (strcmp(page, " rx") == 0 || strcmp(page, " tx") == 0
+               || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0) {
+      _callbacks->formatEspNowStats(page + 1, reply, capacity);
+    } else {
+      mesh::cli::formatError(reply, capacity, "use get espnow.stats [rx|tx|drops|test]");
+    }
+    return true;
+  }
+  if (strncmp(command, "espnow", 6) != 0
+      || (command[6] != 0 && command[6] != ' ')) return false;
+  if (sender_timestamp != 0) {
+    mesh::cli::formatError(reply, capacity, "ESP-NOW test/reset requires a local connection");
+    return true;
+  }
+  if (strcmp(command, "espnow resetstats") == 0) {
+    snprintf(reply, capacity, "%s", _callbacks->resetEspNowStats()
+        ? "OK - ESP-NOW statistics reset" : "Error: ESP-NOW diagnostics unavailable");
+    return true;
+  }
+  uint32_t nonce = 0;
+  if (strcmp(command, "espnow test") == 0) {
+    nonce = millis();  // Correlation only; this is not a security token.
+  } else if (strncmp(command, "espnow test ", 12) != 0
+             || !mesh::bridge::diag::parseNonce(command + 12, nonce)) {
+    mesh::cli::formatError(reply, capacity, "use espnow test [8 hex digits] or espnow resetstats");
+    return true;
+  }
+  if (_callbacks->sendEspNowTest(nonce)) {
+    snprintf(reply, capacity, "OK - test queued id=%08lX; confirm on peer",
+             static_cast<unsigned long>(nonce));
+  } else {
+    mesh::cli::formatError(reply, capacity, "ESP-NOW test not queued; check status/stats");
+  }
+  return true;
+}
+#endif
+
+#if defined(WITH_UDP_BRIDGE)
+bool CommonCLI::handleUDPBridgeCommand(uint32_t sender_timestamp,
+                                        const char* command, char* reply) {
+  constexpr size_t capacity = 157;
+  using namespace mesh::bridge::udp;
+  const bool get = strncmp(command, "get udp.", 8) == 0;
+  const bool set = strncmp(command, "set udp.", 8) == 0;
+  if (get || set) {
+    const char* key = command + 8;
+    if (get && strcmp(key, "status") == 0) {
+      _callbacks->formatUDPBridgeStatus(reply, capacity);
+      return true;
+    }
+    if (get && strncmp(key, "stats", 5) == 0) {
+      const char* page = key + 5;
+      if (*page == 0) _callbacks->formatUDPBridgeStats("", reply, capacity);
+      else if (strcmp(page, " rx") == 0 || strcmp(page, " tx") == 0
+          || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0)
+        _callbacks->formatUDPBridgeStats(page + 1, reply, capacity);
+      else mesh::cli::formatError(reply, capacity, "use get udp.stats [rx|tx|drops|test]");
+      return true;
+    }
+    const Prefs* current = _callbacks->getUDPBridgePrefs();
+    if (!current) { mesh::cli::formatError(reply, capacity, "UDP bridge unavailable"); return true; }
+    Prefs candidate = *current;
+    if (strcmp(key, "enabled") == 0 && get) {
+      snprintf(reply, capacity, "%s", current->enabled ? "on" : "off"); return true;
+    }
+    if (strcmp(key, "port") == 0 && get) {
+      snprintf(reply, capacity, "%u", current->port); return true;
+    }
+    if (strncmp(key, "peer.", 5) == 0 && key[5] >= '1' && key[5] <= '8'
+        && (key[6] == 0 || key[6] == ' ')) {
+      const uint8_t index = static_cast<uint8_t>(key[5] - '1');
+      if (get && key[6] == 0) { formatPeer(current->peers[index], reply, capacity); return true; }
+      if (!set || key[6] != ' ' || !parsePeer(key + 7, candidate.peers[index])) {
+        mesh::cli::formatError(reply, capacity, "use set udp.peer.1..8 <IPv4:port|off>"); return true;
+      }
+    } else if (set && strncmp(key, "enabled ", 8) == 0) {
+      if (strcmp(key + 8, "on") == 0) candidate.enabled = 1;
+      else if (strcmp(key + 8, "off") == 0) candidate.enabled = 0;
+      else { mesh::cli::formatError(reply, capacity, "use set udp.enabled on|off"); return true; }
+    } else if (set && strncmp(key, "port ", 5) == 0) {
+      if (!parsePort(key + 5, candidate.port)) {
+        mesh::cli::formatError(reply, capacity, "UDP port must be 1..65535"); return true;
+      }
+    } else {
+      mesh::cli::formatError(reply, capacity, "use udp.enabled, udp.port, udp.peer.1..8, udp.status or udp.stats");
+      return true;
+    }
+    if (!validPrefs(candidate)) {
+      mesh::cli::formatError(reply, capacity, "invalid or duplicate UDP peer"); return true;
+    }
+    snprintf(reply, capacity, "%s", _callbacks->setUDPBridgePrefs(candidate)
+        ? "OK - UDP settings saved; use get udp.status" : "Error: UDP settings not saved");
+    return true;
+  }
+  if (strncmp(command, "udp", 3) != 0 || (command[3] != 0 && command[3] != ' ')) return false;
+  if (sender_timestamp != 0) {
+    mesh::cli::formatError(reply, capacity, "UDP test/reset requires a local connection"); return true;
+  }
+  if (strcmp(command, "udp resetstats") == 0) {
+    snprintf(reply, capacity, "%s", _callbacks->resetUDPBridgeStats()
+        ? "OK - UDP statistics reset" : "Error: UDP bridge unavailable"); return true;
+  }
+  if (strncmp(command, "udp test ", 9) != 0 || command[9] < '1' || command[9] > '8'
+      || (command[10] != 0 && command[10] != ' ')) {
+    mesh::cli::formatError(reply, capacity, "use udp test <1..8> [8 hex digits] or udp resetstats"); return true;
+  }
+  uint32_t nonce = millis();
+  if (command[10] != 0 && !parseNonce(command + 11, nonce)) {
+    mesh::cli::formatError(reply, capacity, "use udp test <1..8> [8 hex digits] or udp resetstats"); return true;
+  }
+  if (_callbacks->sendUDPBridgeTest(static_cast<uint8_t>(command[9] - '1'), nonce))
+    snprintf(reply, capacity, "OK - test queued id=%08lX; confirm on peer", static_cast<unsigned long>(nonce));
+  else mesh::cli::formatError(reply, capacity, "UDP test not queued; check status/stats");
+  return true;
+}
+#endif
+
 void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
     PrefsSaveReplyGuard save_reply(_prefs_save_failures, reply);
     mesh::cli::normalizeCommandVerb(command);
+    if (mesh::power::handleBatteryCalibrationCommand(*_board, command, reply, 160,
+          [this](float multiplier, char* result, size_t capacity) {
+            return applyAndSaveAdcMultiplier(multiplier, result, capacity);
+          })) return;
+#if MESH_ENABLE_BATTERY_FORWARDING
+    if (handleBatteryForwardingCommand(command, reply)) return;
+#endif
+#if defined(WITH_UDP_BRIDGE)
+    if (handleUDPBridgeCommand(sender_timestamp, command, reply)) return;
+#endif
+#if defined(WITH_RS232_BRIDGE)
+    if (handleRs232DiagnosticCommand(sender_timestamp, command, reply)) return;
+#endif
+#if defined(WITH_ESPNOW_BRIDGE)
+    if (handleEspNowDiagnosticCommand(sender_timestamp, command, reply)) return;
+#endif
+#if MESH_ENABLE_FLEET_CONTROL
+    if (handleFleetCommand(command, reply)) return;
+#endif
 #if MESH_BATTERY_CHARGE_CONTROL
     if (mesh::power::handleBatteryChargeCommand(*_board, command, reply, 160)) return;
 #endif
+    if (mesh::power::handleRegulatorCommand(command, reply, 157)) return;
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+    if (mesh::solar::handleCommand(command, reply, 157, sender_timestamp == 0)) return;
+#endif
+    if (mesh::leds::handleCommand(command, reply, 157)) return;
     if (mesh::handleUsbLoggingWatchdogCommand(command, reply, 160)) return;
+    if (mesh::powerdiag::handleCommand(command, reply, 157, millis())) return;
+#if defined(ESP32_PLATFORM)
+    if (mesh::esp32::cpuclock::handleCommand(*_board, _prefs->cpu_freq_mhz,
+            _prefs->powersaving_enabled != 0, command, reply, 157,
+            [this]() { return saveCommonPrefs(); })) return;
+    if (mesh::esp32::handlePowerTestCommand(command, reply, 157,
+                                           sender_timestamp == 0)) return;
+#endif
     if (handleManagementCommand(command, reply)) return;
+#if MESH_ENABLE_TX_BEACONS
+    if (handleBeaconCommand(command, reply, 157)) return;
+#endif
     if (mesh::wireless::control().handle(command, reply, 160, millis(),
                                        _callbacks->wirelessCommandSource(sender_timestamp))) return;
+    // Infrastructure callers can already have reflected a three-byte CLI
+    // request prefix into the same 160-byte reply. Reserve it for bulk pages.
+#if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX
+    if (mesh::handleMorseReplyCommand(_morse_reply, _callbacks->getProfileRadio(),
+                                      command, reply, 160 - 3, millis())) return;
+    if (mesh::handleMorseCommand(_callbacks->getProfileRadio(), command, reply, 160 - 3)) return;
+#endif
     if (_radio_profiles.handle(command, reply, 160, sender_timestamp != 0)) return;
 #if defined(ENABLE_OTA)
     const auto* ota_context = mesh::ota::ota_context_if_active();
@@ -2884,6 +3366,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       return;
     }
     if (mesh::ui::handleDisplayPowerCommand(command, reply, 160)) return;
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT && defined(DISPLAY_CLASS)
+    if (mesh::ui::handleOLEDControllerCommand(command, reply, 160, true)) return;
+#endif
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) \
+    && HELTEC_TFT_RUNTIME_ROTATION == 1
+    if (mesh::ui::handleDisplayRotationCommand(command, reply, 160, true)) return;
+#endif
 
     // Observer-only top-level commands (ota check/update, tls.bundletest, alert test)
     // live in CommonCLI_Observer.cpp.
@@ -2913,7 +3402,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       strcpy(reply, "OK - Advert sent");
     } else if (memcmp(command, "clock sync", 10) == 0) {
       uint32_t curr = getRTCClock()->getCurrentTime();
-      if (sender_timestamp > curr) {
+      if (sender_timestamp != UINT32_MAX && sender_timestamp > curr) {
         getRTCClock()->setCurrentTime(sender_timestamp + 1);
         _callbacks->onManualClockSet();
         uint32_t now = getRTCClock()->getCurrentTime();
@@ -2925,6 +3414,11 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #if defined(ESP_PLATFORM) && defined(ADMIN_PASSWORD) && !defined(WEBCONFIG_DISABLED)
     } else if (memcmp(command, "start webconfig", 15) == 0
                && (command[15] == 0 || command[15] == ' ')) {
+      if (_prefs->password[0]
+          && !mesh::esp32::managementPassword::publish(_prefs->password)) {
+        strcpy(reply, "ERR: management password busy; retry");
+        return;
+      }
       const bool force_ap = command[15] == ' ' && strcmp(&command[16], "ap") == 0;
       if (command[15] == ' ' && !force_ap) {
         strcpy(reply, "ERR: usage start webconfig [ap]");
@@ -2956,7 +3450,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         strcpy(reply, "ERR: usage start ota [ap]");
         return;
       }
-#if defined(WITH_ESPNOW_BRIDGE)
+#ifdef ESP_PLATFORM
+      if (!mesh::esp32::managementPassword::publish(_prefs->password)) {
+        strcpy(reply, "ERR: set an admin password first, or wait for the active OTA upload");
+        return;
+      }
+#endif
+#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_UDP_BRIDGE)
       const bool ota_was_running = _board->isOTAUpdateRunning();
       // Keep an outstanding pause if an earlier resume failed. Only a
       // successful resume or an explicitly disabled saved intent clears it.
@@ -2981,9 +3481,21 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       }
       _wifi_ota_resume_espnow = _wifi_ota_resume_espnow || espnow_paused;
 #endif
+#if defined(WITH_UDP_BRIDGE)
+      // Close the UDP socket before the browser uploader owns the driver.
+      const bool udp_paused = _callbacks->isUDPBridgeNetworkEnabled();
+      if (udp_paused) _callbacks->setUDPBridgeNetworkState(false);
+      _wifi_ota_resume_udp = _wifi_ota_resume_udp || udp_paused;
+#endif
       reply[0] = 0;
       if (!_board->startOTAUpdate(_prefs->node_name, reply, force_ap)) {
         if (!reply[0]) strcpy(reply, "Error");
+#if defined(WITH_UDP_BRIDGE)
+        if (udp_paused && !ota_was_running) {
+          _callbacks->setUDPBridgeNetworkState(true);
+          _wifi_ota_resume_udp = false;
+        }
+#endif
 #if defined(WITH_ESPNOW_BRIDGE)
         if (espnow_paused && !ota_was_running) {
           if (_callbacks->setEspNowBridgeState(true)) {
@@ -3050,6 +3562,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         }
       }
 #endif
+#if defined(WITH_UDP_BRIDGE)
+      if (ota_stopped && !_board->isOTAUpdateRunning() && _wifi_ota_resume_udp) {
+        const auto* udp_prefs = _callbacks->getUDPBridgePrefs();
+        if (udp_prefs && udp_prefs->enabled) _callbacks->setUDPBridgeNetworkState(true);
+        _wifi_ota_resume_udp = false;
+      }
+#endif
     } else if (memcmp(command, "clock", 5) == 0) {
       uint32_t now = getRTCClock()->getCurrentTime();
       DateTime dt = DateTime(now);
@@ -3091,7 +3610,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       if (_callbacks->scheduleNormalRadio()) {
         strcpy(reply, "OK - normal radio restore scheduled");
       } else {
-        strcpy(reply, "Error: unsupported");
+        mesh::cli::formatError(reply, 160, "unsupported");
       }
     } else if (memcmp(command, "tempradio ", 10) == 0) {
       uint16_t preamble = 0;
@@ -3129,14 +3648,31 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       }
     } else if (memcmp(command, "password ", 9) == 0) {
       // change admin password
+#ifdef ESP_PLATFORM
+      if (!mesh::esp32::managementPassword::validPassword(&command[9])) {
+        mesh::cli::formatError(reply, 160, "password must be 1-15 bytes, no line breaks; use 8-15 ASCII for setup WiFi");
+        return;
+      }
+      mesh::esp32::managementPassword::ChangeGuard change;
+      if (!change.acquired()) {
+        mesh::cli::formatError(reply, 160, "OTA upload or password change busy; retry");
+        return;
+      }
+#endif
       char previous[sizeof(_prefs->password)];
       memcpy(previous, _prefs->password, sizeof(previous));
       StrHelper::strncpy(_prefs->password, &command[9], sizeof(_prefs->password));
       if (!trySavePrefs()) {
         memcpy(_prefs->password, previous, sizeof(previous));
-        strcpy(reply, "Error: password not saved; unchanged");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
         return;
       }
+#ifdef ESP_PLATFORM
+      if (!change.publish(_prefs->password)) {
+        mesh::cli::formatError(reply, 160, "password saved; management unavailable, reboot required");
+        return;
+      }
+#endif
       sprintf(reply, "password now: %s", _prefs->password);   // echo back just to let admin know for sure!!
     } else if (memcmp(command, "clear stats", 11) == 0) {
       _callbacks->clearStats();
@@ -3155,6 +3691,9 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (memcmp(command, "del ", 4) == 0) {
       handleDelCmd(command, reply);
     } else if (sender_timestamp == 0 && strcmp(command, "erase") == 0) {
+#if MESH_ENABLE_TX_BEACONS
+      suspendBeacons();
+#endif
       bool s = _callbacks->formatFileSystem();
       sprintf(reply, "File system erase: %s", s ? "OK" : "Err");
     } else if (memcmp(command, "ver", 3) == 0) {
@@ -3196,7 +3735,11 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       }
 #else
     } else if (memcmp(command, "ota", 3) == 0 && (command[3] == 0 || command[3] == ' ')) {
+#if defined(STM32_PLATFORM) && defined(WIO_E5_MINI_NO_EXTERNAL_SENSORS)
+      strcpy(reply, "LoRa OTA absent; tempradio cannot enable it. Install OTA repeater firmware");
+#else
       strcpy(reply, "LoRa OTA is not included in this build; tempradio cannot enable it. Use an OTA-enabled repeater firmware");
+#endif
 #endif
     } else if (strcmp(command, "power") == 0) {
       const char* usb_state = _board->hasUsbPowerDetect()
@@ -3220,7 +3763,10 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         strcpy(reply, "null");
       }
     } else if (memcmp(command, "sensor set ", 11) == 0) {
-      strcpy(tmp, &command[11]);
+      if (!copyCLIArgument(tmp, sizeof(tmp), &command[11])) {
+        strcpy(reply, "Error, argument too long");
+        return;
+      }
       const char *parts[2];
       int num = mesh::Utils::parseTextParts(tmp, parts, 2, ' ');
       const char *key = (num > 0) ? parts[0] : "";
@@ -3385,7 +3931,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (memcmp(command, "gps", 3) == 0) {
       LocationProvider * l = _sensors->getLocationProvider();
       if (l != NULL) {
-        bool enabled = l->isEnabled(); // is EN pin on ?
+        bool enabled = _sensors->isGpsPowered(); // physical rail/enable policy
         bool fix = l->isValid();       // has fix ?
         int sats = l->satellitesCount();
         const char* gps_setting = _sensors->getSettingByKey("gps");
@@ -3464,6 +4010,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
               _board->getShutdownReasonString(_board->getShutdownReason()));
       sprintf(reply + strlen(reply), "\r\nLast boot voltage: %u mV", _board->getBootVoltage());
 #endif
+#if MESH_ENABLE_PACKET_FILE_LOGGING
     } else if (memcmp(command, "log start", 9) == 0) {
       _callbacks->setLoggingOn(true);
       strcpy(reply, "   logging on");
@@ -3476,6 +4023,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (sender_timestamp == 0 && memcmp(command, "log", 3) == 0) {
       _callbacks->dumpLogFile();
       strcpy(reply, "   EOF");
+#endif
     } else if (sender_timestamp == 0 && memcmp(command, "stats-packets", 13) == 0 && (command[13] == 0 || command[13] == ' ')) {
       _callbacks->formatPacketStatsReply(reply);
     } else if (sender_timestamp == 0 && memcmp(command, "stats-radio-diag", 16) == 0 && (command[16] == 0 || command[16] == ' ')) {
@@ -3493,201 +4041,44 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 
 #if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
 bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
-  if (strncmp(config, "sdcard", 6) != 0 ||
-      (config[6] != 0 && config[6] != ' ')) {
-    return false;
-  }
-
-  const char* action_args = skipSpacesConst(config + 6);
-  bool is_format;
-  bool force = false;
-  if (strcmp(action_args, "format") == 0) {
-    is_format = true;
-  } else if (strcmp(action_args, "format --force") == 0) {
-    is_format = true;
-    force = true;
-  } else if (strcmp(action_args, "erase") == 0) {
-    is_format = false;
-  } else if (strcmp(action_args, "erase --force") == 0) {
-    is_format = false;
-    force = true;
-  } else {
-    strcpy(reply, "Error: use set sdcard format|erase [--force]");
-    return true;
-  }
-
-  const bool recorded = is_format ? _sdcard_format_recorded : _sdcard_erase_recorded;
-  const uint32_t ran_at = is_format ? _sdcard_format_at : _sdcard_erase_at;
-  const char* action = is_format ? "format" : "erase";
-  const uint32_t now = millis();
-  if (!force && recorded && now - ran_at < SDCARD_ACTION_COOLDOWN_MILLIS) {
-    char age[32];
-    formatSdCardElapsed(age, sizeof(age), true, ran_at, now);
-    snprintf(reply, 160,
-             "Error: SD card %s ran %s; use set sdcard %s --force",
-             action, age, action);
-    return true;
-  }
-
-  mesh::ota::OtaContext& context = mesh::ota::ota_ctx();
-  if (context.apply_pending) {
-    strcpy(reply, "Error: OTA apply is pending");
-    return true;
-  }
-#if defined(OTA_TOWER_AUTO_STORE)
-  // Card maintenance must never abandon a fallback update stored internally.
-  if (context.fetch_store.usesInternal() &&
-      (context.manager.fetchState() != mesh::ota::OtaManager::IDLE ||
-       context.fetch_store.staged_size() != 0)) {
-    strcpy(reply, "Error: internal OTA slot is occupied; use ota cancel first");
-    return true;
-  }
-#endif
-
-  mesh::ota::OtaStoreSdNrf52& card = context.sdStagingStore();
-
-  // A card-wide destructive operation invalidates any staged fetch. First let
-  // an archive capture checkpoint and close its shared card handles.
-  context.prepareSdCardReset();
-  context.manager.reset_session();
-  context.manager.want(0);
-  context.manager.want_mid(nullptr);
-  context.session_started_ms = 0;
-  context.prev_fstate = mesh::ota::OtaManager::IDLE;
-
-  if (is_format) {
-    if (!card.formatCard(*_board)) {
-      char error[80];
-      strncpy(error, card.last_error(), sizeof(error) - 1);
-      error[sizeof(error) - 1] = 0;
-      context.finishSdCardReset(millis());
-      snprintf(reply, 160, "Error: SD card format failed: %s",
-               error);
-      return true;
-    }
-    context.finishSdCardReset(millis());
-    _sdcard_format_recorded = true;
-    _sdcard_format_at = millis();
-    strcpy(reply, "OK - SD card format complete");
-    return true;
-  }
-
-  if (!card.eraseCard(*_board)) {
-    char error[80];
-    strncpy(error, card.last_error(), sizeof(error) - 1);
-    error[sizeof(error) - 1] = 0;
-    context.finishSdCardReset(millis());
-    snprintf(reply, 160, "Error: SD card erase failed: %s",
-             error);
-    return true;
-  }
-  _sdcard_erase_recorded = true;
-  _sdcard_erase_at = millis();
-
-  if (!card.formatCard(*_board)) {
-    char error[80];
-    strncpy(error, card.last_error(), sizeof(error) - 1);
-    error[sizeof(error) - 1] = 0;
-    context.finishSdCardReset(millis());
-    snprintf(reply, 160, "Error: SD card erased but format failed: %s",
-             error);
-    return true;
-  }
-  _sdcard_format_recorded = true;
-  _sdcard_format_at = millis();
-  context.finishSdCardReset(millis());
-  strcpy(reply, "OK - SD card erase and format complete");
-  return true;
+  return mesh::cli::handleSdCardSet(_sdcard_cli, *_board, config, reply, 160);
 }
 
 bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
-  if (strncmp(config, "sdcard", 6) != 0 ||
-      (config[6] != 0 && config[6] != ' ')) {
-    return false;
-  }
-
-  const char* query = skipSpacesConst(config + 6);
-  const uint32_t now = millis();
-  if (*query == 0 || strcmp(query, "*") == 0) {
-    char format_age[32];
-    char erase_age[32];
-    formatSdCardElapsed(format_age, sizeof(format_age),
-                        _sdcard_format_recorded, _sdcard_format_at, now);
-    formatSdCardElapsed(erase_age, sizeof(erase_age),
-                        _sdcard_erase_recorded, _sdcard_erase_at, now);
-    snprintf(reply, 160, "> format: %s, erase: %s", format_age, erase_age);
-  } else if (strcmp(query, "format") == 0) {
-    char age[32];
-    formatSdCardElapsed(age, sizeof(age), _sdcard_format_recorded,
-                        _sdcard_format_at, now);
-    snprintf(reply, 160, "> format: %s", age);
-  } else if (strcmp(query, "erase") == 0) {
-    char age[32];
-    formatSdCardElapsed(age, sizeof(age), _sdcard_erase_recorded,
-                        _sdcard_erase_at, now);
-    snprintf(reply, 160, "> erase: %s", age);
-  } else if (strcmp(query, "free") == 0) {
-    uint64_t used_bytes = 0;
-    uint64_t free_bytes = 0;
-    mesh::ota::OtaStoreSdNrf52& store = mesh::ota::ota_ctx().sdStagingStore();
-    if (!store.getSpace(*_board, used_bytes, free_bytes)) {
-      snprintf(reply, 160, "Error: SD card space query failed: %s",
-               store.last_error());
-    } else {
-      char used[24];
-      char free[24];
-      mesh::cli::formatStorageBytes(used, sizeof(used), used_bytes);
-      mesh::cli::formatStorageBytes(free, sizeof(free), free_bytes);
-      snprintf(reply, 160, "> used: %s, free: %s", used, free);
-    }
-  } else if (strncmp(query, "ls", 2) == 0 || strncmp(query, "dir", 3) == 0) {
-    const bool is_ls = strncmp(query, "ls", 2) == 0;
-    const size_t word_len = is_ls ? 2 : 3;
-    if (query[word_len] != 0 && query[word_len] != ' ') {
-      strcpy(reply, "Error: use get sdcard ls|dir [page]");
-      return true;
-    }
-    const char* page_arg = skipSpacesConst(query + word_len);
-    uint32_t page = 1;
-    if (*page_arg) {
-      char* end = nullptr;
-      unsigned long parsed = strtoul(page_arg, &end, 10);
-      if (parsed == 0 || parsed > 65535 || !end || *skipSpacesConst(end) != 0) {
-        strcpy(reply, "Error: use get sdcard ls|dir [page]");
-        return true;
-      }
-      page = parsed;
-    }
-    mesh::ota::OtaStoreSdNrf52& store = mesh::ota::ota_ctx().sdStagingStore();
-    if (!store.listFiles(*_board, (uint16_t)page, reply, 160)) {
-      snprintf(reply, 160, "Error: SD card list failed: %s", store.last_error());
-    }
-  } else {
-    strcpy(reply, "Error: use get sdcard [format|erase|free|ls|dir [page]|*]");
-  }
-  return true;
+  return mesh::cli::handleSdCardGet(_sdcard_cli, *_board, config, reply, 160);
 }
 #endif
 
 void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+#if defined(RAK_4631)
+  if (mesh::peripherals::handleCommand(_prefs->peripherals_shared, command,
+          reply, 160, _sensors->supportsSharedPeripheralMode(),
+          [this]() { return trySavePrefs(); })) return;
+#else
+  if (strncmp(config, "peripherals.mode", 16) == 0
+      && (config[16] == 0 || config[16] == ' ' || config[16] == '\t')) {
+    mesh::cli::formatError(reply, 160, "unsupported");
+    return;
+  }
+#endif
   if (strncmp(config, "repeat.trace", 12) == 0
       && (config[12] == 0 || config[12] == ' ' || config[12] == '\t')) {
     if (strcmp(_callbacks->getRole(), "repeater") != 0) {
-      strcpy(reply, "Error: repeat.trace is only supported by repeaters");
+      mesh::cli::formatError(reply, 160, "repeat.trace is only supported by repeaters");
       return;
     }
     const char* value = config + 12;
     while (*value == ' ' || *value == '\t') ++value;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      strcpy(reply, "Error: usage set repeat.trace on|off");
+      mesh::cli::formatError(reply, 160, "usage set repeat.trace on|off");
       return;
     }
     const uint8_t previous = _prefs->trace_when_repeat_off;
     _prefs->trace_when_repeat_off = strcmp(value, "on") == 0 ? 1 : 0;
     if (!trySavePrefs()) {
       _prefs->trace_when_repeat_off = previous;
-      strcpy(reply, "Error: Repeat trace not saved; unchanged");
+      mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
       return;
     }
     _callbacks->onRetryConfigChanged();
@@ -3695,7 +4086,18 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     return;
   }
 #if defined(NRF52_POWER_MANAGEMENT)
-  if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) return;
+  const bool adc_multiplier_command = strncmp(config, "adc.multiplier", 14) == 0
+      && (config[14] == 0 || config[14] == ' ' || config[14] == '\t');
+  if (adc_multiplier_command && _board->getAdcMultiplier() <= 0.0f) {
+    mesh::cli::formatError(reply, 160, "unsupported");
+    return;
+  }
+  if (!adc_multiplier_command || mesh::power::voltagePolicySupported()) {
+    if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) {
+      if (strncmp(reply, "OK", 2) == 0) loopBatteryForwarding(true);
+      return;
+    }
+  }
 #endif
   // Infrastructure roles dispatch here rather than through CommonRadioPrefs.
   if (strncmp(config, "path.hash.mode", 14) == 0
@@ -3717,15 +4119,15 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     while (*value == ' ' || *value == '\t') ++value;
     uint16_t hours = 0;
     if (!mesh::gps::parseSyncIntervalHours(value, hours)) {
-      strcpy(reply, "Error: GPS sync interval must be 1..336 hours");
+      mesh::cli::formatError(reply, 160, "GPS sync interval must be 1..336 hours");
     } else if (_sensors->getLocationProvider() == nullptr) {
-      strcpy(reply, "Error: GPS unavailable");
+      mesh::cli::formatError(reply, 160, "GPS unavailable");
     } else {
       const uint16_t previous = _prefs->gps_sync_interval_hours;
       _prefs->gps_sync_interval_hours = hours;
       if (!trySavePrefs()) {
         _prefs->gps_sync_interval_hours = previous;
-        strcpy(reply, "Error: GPS sync interval could not be saved");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
       } else {
         _sensors->applyGpsTimeSyncInterval(hours);
         snprintf(reply, 160, "OK - GPS sync interval %u hours (saved)", (unsigned)hours);
@@ -3735,7 +4137,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   }
   if (strncmp(config, "gps ", 4) == 0) {
     if (strcmp(config + 4, "on") != 0 && strcmp(config + 4, "off") != 0) {
-      strcpy(reply, "Error: use set gps on|off");
+      mesh::cli::formatError(reply, 160, "use set gps on|off");
     } else {
       char gps_command[8];
       snprintf(gps_command, sizeof(gps_command), "%s", config);
@@ -3751,14 +4153,14 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     while (*value == ' ' || *value == '\t') value++;
     uint8_t channel = 0;
     if (!mesh::wifi::parseEspNowChannel(value, channel)) {
-      strcpy(reply, "Error: ESP-NOW channel must be 1-13");
+      mesh::cli::formatError(reply, 160, "ESP-NOW channel must be 1-13");
     } else {
       // Snapshot the boot channel before writing NVS. The saved setting must
       // never become the active value in this boot merely because this is the
       // first policy helper reached by a CLI-only image.
       const uint8_t active = mesh::wifi::activeEspNowChannel();
       if (!mesh::wifi::saveConfiguredEspNowChannel(channel)) {
-        strcpy(reply, "Error: failed to save ESP-NOW channel");
+        mesh::cli::formatError(reply, 160, "failed to save ESP-NOW channel");
       } else if (channel == active) {
         snprintf(reply, 160,
                  "OK - ESP-NOW channel %u saved and active",
@@ -3783,14 +4185,14 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       _prefs->usb_logging_enabled = enabled ? 1 : 0;
       if (!trySavePrefs()) {
         _prefs->usb_logging_enabled = previous;
-        strcpy(reply, "Error: USB logging not saved; unchanged");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
         return;
       }
       // Commit before changing the stream's live protocol ownership.
       mesh::setUsbLoggingEnabled(enabled);
       snprintf(reply, 160, "OK - USB logging %s (saved)", enabled ? "on" : "off");
     } else {
-      strcpy(reply, "Error: usage set usb.logging on|off");
+      mesh::cli::formatError(reply, 160, "usage set usb.logging on|off");
     }
     return;
   }
@@ -3805,13 +4207,13 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       _prefs->usb_debug_enabled = enabled ? 1 : 0;
       if (!trySavePrefs()) {
         _prefs->usb_debug_enabled = previous;
-        strcpy(reply, "Error: USB debug not saved; unchanged");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
         return;
       }
       mesh::setUsbDebugEnabled(enabled);
       snprintf(reply, 160, "OK - USB debug %s (saved)", enabled ? "on" : "off");
     } else {
-      strcpy(reply, "Error: usage set usb.debug on|off");
+      mesh::cli::formatError(reply, 160, "usage set usb.debug on|off");
     }
     return;
   }
@@ -3824,11 +4226,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     bool usb_enabled;
     bool wifi_enabled;
     if (!mesh::cli::parseLoggingOutput(value, usb_enabled, wifi_enabled)) {
-      strcpy(reply, "Error: usage set logging.output off|usb|wifi|both");
+      mesh::cli::formatError(reply, 160, "usage set logging.output off|usb|wifi|both");
       return;
     }
     if (wifi_enabled && _callbacks->isMqttBridgeStopping()) {
-      strcpy(reply, "Error: MQTT is stopping; retry when mqtt.stopping is off");
+      mesh::cli::formatError(reply, 160, "MQTT is stopping; retry when mqtt.stopping is off");
       return;
     }
     const uint8_t previous_usb = _prefs->usb_logging_enabled;
@@ -3838,14 +4240,14 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (!trySavePrefs()) {
       _prefs->usb_logging_enabled = previous_usb;
       _prefs->bridge_enabled = previous_bridge;
-      strcpy(reply, "Error: logging output not saved; unchanged");
+      mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
       return;
     }
     mesh::setUsbLoggingEnabled(usb_enabled);
     const bool applied = wifi_enabled ? _callbacks->setMqttBridgeState(true)
                                       : _callbacks->requestMqttBridgeStop();
     if (!applied) {
-      strcpy(reply, "Error: logging output saved, but MQTT runtime change failed");
+      mesh::cli::formatError(reply, 160, "logging output saved, but MQTT runtime change failed");
       return;
     }
     snprintf(reply, 160, "OK - logging.output %s (saved)", value);
@@ -3874,11 +4276,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (strcmp(value, "on") == 0) enabled = true;
     else if (strcmp(value, "off") == 0) enabled = false;
     else {
-      strcpy(reply, "Error: usage set webui on|off");
+      mesh::cli::formatError(reply, 160, "usage set webui on|off");
       return;
     }
     if (!_callbacks->setWebUIEnabled(enabled, reply)) {
-      strcpy(reply, "Error: webui not supported on this build");
+      mesh::cli::formatError(reply, 160, "webui not supported on this build");
     }
     return;
   }
@@ -3888,7 +4290,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (mesh::cli::classifyStandaloneWiFiSet(config, &cli_value) ==
       mesh::cli::StandaloneWiFiKey::CLI) {
     if (!_callbacks->setWiFiCLI(cli_value, reply)) {
-      strcpy(reply, "Error: WiFi CLI unavailable on this build");
+      mesh::cli::formatError(reply, 160, "WiFi CLI unavailable on this build");
     }
     return;
   }
@@ -3900,11 +4302,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (strncmp(config, "mqtt.enabled ", 13) == 0) {
     const char* value = config + 13;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      strcpy(reply, "Error: use set mqtt.enabled on|off");
+      mesh::cli::formatError(reply, 160, "use set mqtt.enabled on|off");
     } else {
       const bool enable = strcmp(value, "on") == 0;
       if (enable && _callbacks->isMqttBridgeStopping()) {
-        strcpy(reply, "Error: MQTT is stopping; retry when mqtt.stopping is off");
+        mesh::cli::formatError(reply, 160, "MQTT is stopping; retry when mqtt.stopping is off");
         return;
       }
       const uint8_t previous = _prefs->bridge_enabled;
@@ -3913,7 +4315,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       // intent first so a failed write leaves the running service unchanged.
       if (!trySavePrefs()) {
         _prefs->bridge_enabled = previous;
-        strcpy(reply, "Error: MQTT setting not saved; unchanged");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
         return;
       }
       const bool applied = enable ? _callbacks->setMqttBridgeState(true)
@@ -3925,16 +4327,71 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   }
 #endif
 #ifdef WITH_RS232_BRIDGE
+  if (strncmp(config, "rs232.heartbeat ", 16) == 0) {
+    bool enable = false;
+    if (!parseOnOffStrict(config + 16, enable)) {
+      mesh::cli::formatError(reply, 160, "use set rs232.heartbeat on|off");
+      return;
+    }
+    const uint8_t previous = _prefs->rs232_heartbeat;
+    _prefs->rs232_heartbeat = enable ? 1 : 0;
+    if (!trySavePrefs()) {
+      _prefs->rs232_heartbeat = previous;
+      mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
+    } else {
+      strcpy(reply, enable ? "OK - RS232 heartbeat enabled" : "OK - heartbeat and standby disabled");
+    }
+    return;
+  }
+  if (strncmp(config, "rs232.autosleep ", 16) == 0) {
+    bool enable = false;
+    const bool force = strcmp(config + 16, "force") == 0;
+    if (!force && !parseOnOffStrict(config + 16, enable)) {
+      mesh::cli::formatError(reply, 160, "use set rs232.autosleep on|off|force");
+      return;
+    }
+    const uint8_t previous = _prefs->rs232_autosleep;
+    _prefs->rs232_autosleep = force ? 2 : enable ? 1 : 0;
+    if (!trySavePrefs()) {
+      _prefs->rs232_autosleep = previous;
+      mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
+    } else {
+      strcpy(reply, force ? "OK - forced standby; stock/unknown peers can miss packets"
+          : enable ? "OK - standby after peer heartbeat confirmed; stock stays active"
+                   : "OK - RS232 standby disabled");
+    }
+    return;
+  }
+  if (strncmp(config, "rs232.idle ", 11) == 0) {
+    uint32_t seconds = 0;
+    if (!mesh::cli::parseUnsignedIntegerStrict(config + 11, seconds)
+        || seconds < mesh::bridge::rs232power::MIN_IDLE_SECONDS
+        || seconds > mesh::bridge::rs232power::MAX_IDLE_SECONDS) {
+      mesh::cli::formatError(reply, 160, "use set rs232.idle 60..3600 seconds");
+      return;
+    }
+    const uint16_t previous = _prefs->rs232_idle_seconds;
+    _prefs->rs232_idle_seconds = static_cast<uint16_t>(seconds);
+    if (!trySavePrefs()) {
+      _prefs->rs232_idle_seconds = previous;
+      mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
+    } else {
+      sprintf(reply, "OK - RS232 idle %us", static_cast<unsigned>(seconds));
+    }
+    return;
+  }
   if (strncmp(config, "rs232.enabled ", 14) == 0) {
     bool enable = false;
     if (!parseOnOffStrict(config + 14, enable)) {
+      // The packaged RS-232 consolidation check verifies this handler's
+      // complete message. Keep its capability evidence as one literal.
       strcpy(reply, "Error: use set rs232.enabled on|off");
       return;
     }
     if (enable && _sensors->gpsSerialTransportMayConflict(_prefs->bridge_uart)
         && (!_sensors->gpsUsesSerialUart(_prefs->bridge_uart)
             || !_sensors->gpsSerialTransportCanYield(_prefs->bridge_uart))) {
-      strcpy(reply, "Error: UART may be driven by GPS; use UART 2 or a no-GPS build");
+      mesh::cli::formatError(reply, 160, "UART may be driven by GPS; use UART 2 or a no-GPS build");
       return;
     }
 #ifdef WITH_MQTT_BRIDGE
@@ -3943,7 +4400,6 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     uint8_t& intent = _prefs->bridge_enabled;
 #endif
     const uint8_t previous_enabled = intent;
-    const bool previous_running = _callbacks->isRs232BridgeRunning();
     intent = enable ? 1 : 0;
     const bool applied = _callbacks->setRs232BridgeState(enable);
     const bool saved = applied && trySavePrefs();
@@ -3952,10 +4408,14 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 #ifndef WITH_MQTT_BRIDGE
       _prefs->rs232_bridge_enabled = _prefs->bridge_enabled == 1 ? 1 : 0;
 #endif
-      const bool restored = _callbacks->setRs232BridgeState(previous_running);
-      strcpy(reply, restored
-          ? "Error: RS232 change failed; setting unchanged"
-          : "Error: RS232 change failed; previous runtime could not be restored");
+      // Saved-on may currently be in soft standby. Restore an owner as well
+      // as its intent, otherwise no object remains to execute the wake timer.
+      const bool restored = _callbacks->setRs232BridgeState(previous_enabled != 0);
+      strcpy(reply, applied
+          ? (restored ? "Error: save unconfirmed; reboot may differ"
+                      : "Error: save unconfirmed; runtime restore failed; reboot may differ")
+          : (restored ? "Error: RS232 change failed; setting unchanged"
+                      : "Error: RS232 change failed; previous runtime could not be restored"));
     } else {
       strcpy(reply, enable && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)
           ? "OK - UART GPS paused" : "OK");
@@ -3969,7 +4429,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (memcmp(config, "espnow.enabled ", 15) == 0) {
     const char* value = config + 15;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      strcpy(reply, "Error: use set espnow.enabled on|off");
+      mesh::cli::formatError(reply, 160, "use set espnow.enabled on|off");
     } else {
       const bool enable = strcmp(value, "on") == 0;
 #if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE) \
@@ -4015,7 +4475,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   }
   if (wifi_key != mesh::cli::StandaloneWiFiKey::None) {
     if (!wifi_supported) {
-      strcpy(reply, "Error: standalone WiFi settings unavailable on this build");
+      mesh::cli::formatError(reply, 160, "standalone WiFi settings unavailable on this build");
     }
     return;
   }
@@ -4053,10 +4513,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       savePrefs();
       strcpy(reply, "OK - disabled; restarting within 60s");
     } else {
-      strcpy(reply, "Error: use set system.watchdog on|off");
+      mesh::cli::formatError(reply, 160, "use set system.watchdog on|off");
     }
 #else
-    strcpy(reply, "Error: unsupported on this platform");
+    mesh::cli::formatError(reply, 160, "unsupported on this platform");
 #endif
   } else if (memcmp(config, "af ", 3) == 0) {
     float factor = 0.0f;
@@ -4074,16 +4534,21 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "cad ", 4) == 0) {
     const char* value = &config[4];
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      strcpy(reply, "Error: use set cad on|off");
+      mesh::cli::formatError(reply, 160, "use set cad on|off");
     } else {
       _prefs->cad_enabled = strcmp(value, "on") == 0;
       savePrefs();
       strcpy(reply, "OK");
     }
   } else if (memcmp(config, "agc.reset.interval ", 19) == 0) {
-    _prefs->agc_reset_interval = atoi(&config[19]) / 4;
-    savePrefs();
-    sprintf(reply, "OK - interval rounded to %d", ((uint32_t) _prefs->agc_reset_interval) * 4);
+    uint32_t seconds;
+    if (!mesh::cli::parseUnsignedIntegerStrict(&config[19], seconds) || seconds > 1020) {
+      mesh::cli::formatError(reply, 160, "AGC interval must be 0-1020 seconds");
+    } else {
+      _prefs->agc_reset_interval = seconds / 4;
+      savePrefs();
+      sprintf(reply, "OK - interval rounded to %d", ((uint32_t) _prefs->agc_reset_interval) * 4);
+    }
   } else if (memcmp(config, "multi.acks ", 11) == 0) {
     _prefs->multi_acks = atoi(&config[11]);
     savePrefs();
@@ -4108,13 +4573,13 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     uint32_t hours = 0;
     if (!parseUint32Strict(&config[22], hours)
         || (hours != 0 && (hours < 3 || hours > 168))) {
-      strcpy(reply, "Error: interval must be 0 (off) or 3-168 hours");
+      mesh::cli::formatError(reply, 160, "interval must be 0 (off) or 3-168 hours");
     } else {
       const uint8_t previous = _prefs->flood_advert_interval;
       _prefs->flood_advert_interval = (uint8_t)(hours);
       if (!trySavePrefs()) {
         _prefs->flood_advert_interval = previous;
-        strcpy(reply, "Error: interval not saved; unchanged");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
         return;
       }
       _callbacks->updateFloodAdvertTimer();
@@ -4130,7 +4595,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       _prefs->advert_interval = (uint8_t)(mins / 2);
       if (!trySavePrefs()) {
         _prefs->advert_interval = previous;
-        strcpy(reply, "Error: interval not saved; unchanged");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
         return;
       }
       _callbacks->updateAdvertTimer();
@@ -4142,7 +4607,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     StrHelper::strncpy(_prefs->guest_password, &config[15], sizeof(_prefs->guest_password));
     if (!trySavePrefs()) {
       memcpy(_prefs->guest_password, previous, sizeof(previous));
-      strcpy(reply, "Error: guest password not saved; unchanged");
+      mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
       return;
     }
     strcpy(reply, "OK");
@@ -4154,7 +4619,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       mesh::LocalIdentity new_id;
       new_id.readFrom(prv_key, PRV_KEY_SIZE);
       if (!_callbacks->saveIdentity(new_id)) {
-        strcpy(reply, "Error: identity not saved; current key unchanged");
+        mesh::cli::formatError(reply, 160, "identity not saved; current key unchanged");
         return;
       }
       strcpy(reply, "OK, reboot to apply! New pubkey: ");
@@ -4186,11 +4651,16 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       savePrefs();
       strcpy(reply, "OK");
     } else {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     }
   } else if (memcmp(config, "radio.fem.rxgain ", 17) == 0) {
+    const auto* radio = _callbacks->getProfileRadio();
+    if (radio && (radio->isMorseTxActive() || radio->isMorseRxActive())) {
+      mesh::cli::formatError(reply, 160, "stop Morse before changing LoRa FEM gain");
+      return;
+    }
     if (!_board->canControlLoRaFemLna()) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else if (memcmp(&config[17], "on", 2) == 0) {
       bool changed = !_board->isLoRaFemLnaEnabled();
       if (_board->setLoRaFemLnaEnabled(true)) {
@@ -4199,7 +4669,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         savePrefs();
         strcpy(reply, "OK - LoRa FEM RX gain on");
       } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
+        mesh::cli::formatError(reply, 160, "failed to apply LoRa FEM RX gain");
       }
     } else if (memcmp(&config[17], "off", 3) == 0) {
       bool changed = _board->isLoRaFemLnaEnabled();
@@ -4209,21 +4679,26 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         savePrefs();
         strcpy(reply, "OK - LoRa FEM RX gain off");
       } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
+        mesh::cli::formatError(reply, 160, "failed to apply LoRa FEM RX gain");
       }
     } else {
-      strcpy(reply, "Error: state must be on or off");
+      mesh::cli::formatError(reply, 160, "state must be on or off");
     }
   } else if (memcmp(config, "radio.fem.txgain ", 17) == 0) {
+    const auto* radio = _callbacks->getProfileRadio();
+    if (radio && (radio->isMorseTxActive() || radio->isMorseRxActive())) {
+      mesh::cli::formatError(reply, 160, "stop Morse before changing LoRa FEM gain");
+      return;
+    }
     if (!_board->canControlLoRaFemPaGain()) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else if (memcmp(&config[17], "on", 2) == 0) {
       if (_board->setLoRaFemPaGainEnabled(true)) {
         _prefs->radio_fem_txgain = 1;
         savePrefs();
         strcpy(reply, "OK - LoRa FEM TX gain on");
       } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM TX gain");
+        mesh::cli::formatError(reply, 160, "failed to apply LoRa FEM TX gain");
       }
     } else if (memcmp(&config[17], "off", 3) == 0) {
       if (_board->setLoRaFemPaGainEnabled(false)) {
@@ -4231,10 +4706,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         savePrefs();
         strcpy(reply, "OK - LoRa FEM TX gain off");
       } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM TX gain");
+        mesh::cli::formatError(reply, 160, "failed to apply LoRa FEM TX gain");
       }
     } else {
-      strcpy(reply, "Error: state must be on or off");
+      mesh::cli::formatError(reply, 160, "state must be on or off");
     }
   } else if (strncmp(config, "radio.rxps.rfrx_disabled ", 25) == 0) {
     const char* value = &config[25];
@@ -4244,12 +4719,12 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else if (strcmp(value, "off") == 0) {
       disabled = false;
     } else {
-      strcpy(reply, "Error: state must be on or off");
+      mesh::cli::formatError(reply, 160, "state must be on or off");
       return;
     }
 
     if (!_callbacks->setRxPowerSavingRfRxDisabled(disabled)) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else {
       sprintf(reply, "OK - radio.rxps.rfrx_disabled %s", disabled ? "on" : "off");
     }
@@ -4274,6 +4749,14 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       return;
     }
     using mesh::cli::RxPowerSavingArgumentMode;
+#ifdef WRAPPER_CLASS
+    if (!WRAPPER_CLASS::SupportsRxPowerSaving) {
+      if (parsed.mode != RxPowerSavingArgumentMode::Off) {
+        strcpy(reply, "ERROR: RX powersaving unsupported");
+        return;
+      }
+    }
+#endif
     if (parsed.mode == RxPowerSavingArgumentMode::Off) {
       enable = 0;
     } else if (parsed.mode == RxPowerSavingArgumentMode::Manual) {
@@ -4383,7 +4866,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         && _radio_profiles.acceptsPrimary(freq, bw, sf, cr, preamble)) {
       const int8_t previous_power = _prefs->tx_power_dbm;
       if (!savePrimaryRadioParams(freq, bw, sf, cr, preamble)) {
-        strcpy(reply, "Error: radio settings could not be saved"); return;
+        mesh::cli::formatError(reply, 160, "radio settings could not be saved"); return;
       }
       if (_prefs->tx_power_dbm != previous_power) {
         sprintf(reply, "OK - reboot to apply; TX power limited to %d dBm",
@@ -4681,7 +5164,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       _prefs->flood_retry_bridge_enabled = 1;
       savePrefs();
       if (!formatFloodRetryBucketCollisionWarning(reply, _prefs, "OK - bucket 7=prefixes; ")) {
+#if defined(STM32_PLATFORM) && defined(WIO_E5_MINI_NO_EXTERNAL_SENSORS)
+        strcpy(reply, "OK - bucket 7 (other)=flood.retry.prefixes; multi-try bridge on");
+#else
         strcpy(reply, "OK - flood.retry.prefixes acts as bucket 7 (other); multi-try bridge routing enabled");
+#endif
       }
     } else if (strcmp(&config[19], "off") == 0) {
       _prefs->flood_retry_bridge_enabled = 0;
@@ -4692,9 +5179,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     }
   } else if (memcmp(config, "flood.retry.bucket ", 19) == 0) {
     const char* params = &config[19];
-    uint8_t bucket = atoi(params);
+    char* end;
+    const long bucket = strtol(params, &end, 10);
+    while (*end == '\t') end++;
     const char* list = strchr(params, ' ');
-    if (bucket < 1 || bucket > FLOOD_RETRY_BRIDGE_BUCKETS || list == NULL || *(list + 1) == 0) {
+    if (bucket < 1 || bucket > FLOOD_RETRY_BRIDGE_BUCKETS || end != list || list == NULL || *(list + 1) == 0) {
       sprintf(reply, "Error, usage: set flood.retry.bucket <1-%d> <prefixes|none>", FLOOD_RETRY_BRIDGE_BUCKETS);
     } else if (parseFloodRetryPrefixList(_prefs->flood_retry_bridge_buckets[bucket - 1],
                                          FLOOD_RETRY_BUCKET_PREFIXES, list + 1)) {
@@ -4707,6 +5196,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
               (unsigned int)FLOOD_RETRY_BUCKET_PREFIXES);
     }
   } else if (memcmp(config, "direct.retry.cr ", 16) == 0) {
+    if (!copyCLIArgument(tmp, sizeof(tmp), &config[16])) {
+      strcpy(reply, "Error, argument too long");
+      return;
+    }
     if (strcmp(&config[16], "off") == 0) {
       _prefs->direct_retry_cr_enabled = 0;
       savePrefs();
@@ -4720,7 +5213,6 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         strcpy(reply, "Error, use on or off on this role");
       }
     } else {
-      strcpy(tmp, &config[16]);
       const char *parts[4];
       int num = mesh::Utils::parseTextParts(tmp, parts, 4, ',');
       if (num == 4 && looksNumeric(parts[0]) && looksNumeric(parts[1]) && looksNumeric(parts[2]) && looksNumeric(parts[3])) {
@@ -4744,7 +5236,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       }
     }
   } else if (memcmp(config, "recent.repeater ", 16) == 0) {
-    strcpy(tmp, &config[16]);
+    if (!copyCLIArgument(tmp, sizeof(tmp), &config[16])) {
+      strcpy(reply, "Error, argument too long");
+      return;
+    }
     const char *parts[2];
     int num = mesh::Utils::parseTextParts(tmp, parts, 2, ' ');
     uint8_t prefix[MAX_HASH_SIZE];
@@ -4806,12 +5301,12 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     const int8_t minimum = mesh::minLoRaTxPowerForFrequency(_prefs->freq);
     const int8_t maximum = mesh::maxLoRaTxPowerForFrequency(_prefs->freq);
     if (!mesh::cli::parseIntegerStrict(&config[3], power)) {
-      strcpy(reply, "Error: invalid TX power");
+      mesh::cli::formatError(reply, 160, "invalid TX power");
     } else if (!mesh::isLoRaTxPowerValid(power, _prefs->freq)) {
       sprintf(reply, "Error: TX power range is %d to %d dBm",
               (int)minimum, (int)maximum);
     } else if (!_callbacks->setTxPower(static_cast<int8_t>(power))) {
-      strcpy(reply, "Error: radio busy or TX power rejected");
+      mesh::cli::formatError(reply, 160, "radio busy or TX power rejected");
     } else {
       _prefs->tx_power_dbm = static_cast<int8_t>(power);
       savePrefs();
@@ -4839,7 +5334,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "bridge.enabled ", 15) == 0) {
     bool enable = false;
     if (!parseOnOffStrict(&config[15], enable)) {
-      strcpy(reply, "Error: usage set bridge.enabled on|off");
+      mesh::cli::formatError(reply, 160, "usage set bridge.enabled on|off");
     } else {
 #if defined(WITH_ESPNOW_BRIDGE) \
     && (defined(WITH_MQTT_BRIDGE) \
@@ -4860,11 +5355,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
           && _sensors->gpsSerialTransportMayConflict(_prefs->bridge_uart)
           && (!_sensors->gpsUsesSerialUart(_prefs->bridge_uart)
               || !_sensors->gpsSerialTransportCanYield(_prefs->bridge_uart))) {
-        strcpy(reply, "Error: UART may be driven by GPS; use UART 2 or a no-GPS build");
+        mesh::cli::formatError(reply, 160, "UART may be driven by GPS; use UART 2 or a no-GPS build");
         return;
       }
       const uint8_t previous_enabled = _prefs->bridge_enabled;
-      const bool previous_running = _callbacks->isRs232BridgeRunning();
+      const bool previous_running = previous_enabled != 0;
       _prefs->bridge_enabled = enable;
       const bool applied = _callbacks->setRs232BridgeState(enable);
       if (applied && trySavePrefs()) {
@@ -4886,9 +5381,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
           // non-running heap-backed bridge instance.
           restored = _callbacks->setRs232BridgeState(previous_running);
         }
-        strcpy(reply, restored
-            ? "Error: bridge state change failed; setting unchanged"
-            : "Error: bridge state change failed; previous runtime state could not be restored");
+        strcpy(reply, applied
+            ? (restored ? "Error: save unconfirmed; reboot may differ"
+                        : "Error: save unconfirmed; runtime restore failed; reboot may differ")
+            : (restored ? "Error: bridge state change failed; setting unchanged"
+                        : "Error: bridge state change failed; previous runtime state could not be restored"));
       }
 #else
       // MQTT and ESP-NOW preserve configured intent across missing WiFi
@@ -4910,12 +5407,12 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       savePrefs();
       strcpy(reply, "OK");
     } else {
-      strcpy(reply, "Error: delay must be between 0-10000 ms");
+      mesh::cli::formatError(reply, 160, "delay must be between 0-10000 ms");
     }
   } else if (memcmp(config, "bridge.source ", 14) == 0) {
     const char* source = &config[14];
     if (strcmp(source, "rx") != 0 && strcmp(source, "tx") != 0) {
-      strcpy(reply, "Error: usage set bridge.source rx|tx");
+      mesh::cli::formatError(reply, 160, "usage set bridge.source rx|tx");
       return;
     }
     _prefs->bridge_pkt_src = strcmp(source, "rx") == 0;
@@ -4939,7 +5436,12 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (mesh::cli::parseUnsignedIntegerStrict(&config[12], baud)
         && baud >= 9600 && baud <= BRIDGE_MAX_BAUD) {
       const uint32_t previous_baud = _prefs->bridge_baud;
-      const bool previous_running = _callbacks->isRs232BridgeRunning();
+      const bool previous_running =
+#ifdef WITH_MQTT_BRIDGE
+          _prefs->rs232_bridge_enabled != 0;
+#else
+          _prefs->bridge_enabled != 0;
+#endif
       _prefs->bridge_baud = baud;
       const bool applied =
 #ifdef WITH_MQTT_BRIDGE
@@ -4954,9 +5456,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         const bool restored = previous_running
             ? _callbacks->restartRs232Bridge()
             : _callbacks->setRs232BridgeState(false);
-        strcpy(reply, restored
-            ? "Error: bridge failed to restart; baud unchanged"
-            : "Error: bridge failed to restart; previous baud could not be restored");
+        strcpy(reply, applied
+            ? (restored ? "Error: save unconfirmed; reboot may differ"
+                        : "Error: save unconfirmed; runtime restore failed; reboot may differ")
+            : (restored ? "Error: bridge failed to restart; baud unchanged"
+                        : "Error: bridge failed to restart; previous baud could not be restored"));
       }
     } else {
       sprintf(reply, "Error: baud rate must be between 9600-%d",BRIDGE_MAX_BAUD);
@@ -4987,11 +5491,16 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
           && _sensors->gpsSerialTransportMayConflict((uint8_t)uart)
           && (!_sensors->gpsUsesSerialUart((uint8_t)uart)
               || !_sensors->gpsSerialTransportCanYield((uint8_t)uart))) {
-        strcpy(reply, "Error: UART may be driven by GPS; keep UART 2 or use a no-GPS build");
+        mesh::cli::formatError(reply, 160, "UART may be driven by GPS; keep UART 2 or use a no-GPS build");
         return;
       }
       const uint8_t previous_uart = _prefs->bridge_uart;
-      const bool previous_running = _callbacks->isRs232BridgeRunning();
+      const bool previous_running =
+#ifdef WITH_MQTT_BRIDGE
+          _prefs->rs232_bridge_enabled != 0;
+#else
+          _prefs->bridge_enabled != 0;
+#endif
       _prefs->bridge_uart = (uint8_t)uart;
       const bool applied =
 #ifdef WITH_MQTT_BRIDGE
@@ -5004,9 +5513,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         const bool restored = previous_running
             ? _callbacks->restartRs232Bridge()
             : _callbacks->setRs232BridgeState(false);
-        strcpy(reply, restored
-            ? "Error: bridge failed to restart; UART unchanged"
-            : "Error: bridge failed to restart; previous UART could not be restored");
+        strcpy(reply, applied
+            ? (restored ? "Error: save unconfirmed; reboot may differ"
+                        : "Error: save unconfirmed; runtime restore failed; reboot may differ")
+            : (restored ? "Error: bridge failed to restart; UART unchanged"
+                        : "Error: bridge failed to restart; previous UART could not be restored"));
       } else if (
 #ifdef WITH_MQTT_BRIDGE
                  _prefs->rs232_bridge_enabled
@@ -5061,10 +5572,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "bridge.format ", 14) == 0) {
     uint8_t format = mesh::bridge::ESPNOW_FORMAT_WRAPPED;
     if (!mesh::bridge::parseEspNowFormat(&config[14], format)) {
-      strcpy(reply, "Error: format must be wrapped or raw");
+      mesh::cli::formatError(reply, 160, "format must be wrapped or raw");
     } else if (!mesh::bridge::isValidEspNowBridgeChannel(
                    _prefs->bridge_channel, format)) {
-      strcpy(reply, "Error: set bridge.channel to 1-13 before changing format");
+      mesh::cli::formatError(reply, 160, "set bridge.channel to 1-13 before changing format");
     } else {
       _prefs->bridge_format = format;
       const bool applied =
@@ -5075,7 +5586,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 #endif
       savePrefs();
       if (!applied) {
-        strcpy(reply, "Error: setting saved; bridge failed to restart");
+        mesh::cli::formatError(reply, 160, "setting saved; bridge failed to restart");
       } else {
         strcpy(reply, format == mesh::bridge::ESPNOW_FORMAT_RAW
             ? "OK - raw MeshCore frames; bridge.secret is ignored"
@@ -5086,17 +5597,9 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "adc.multiplier ", 15) == 0) {
     float multiplier = 0.0f;
     if (!mesh::cli::parseDecimalStrict(&config[15], multiplier)) {
-      strcpy(reply, "Error: invalid multiplier");
-    } else if (_board->setAdcMultiplier(multiplier)) {
-      _prefs->adc_multiplier = multiplier;
-      savePrefs();
-      if (_prefs->adc_multiplier == 0.0f) {
-        strcpy(reply, "OK - using default board multiplier");
-      } else {
-        sprintf(reply, "OK - multiplier set to %.3f", _prefs->adc_multiplier);
-      }
+      mesh::cli::formatError(reply, 160, "invalid multiplier");
     } else {
-      strcpy(reply, "Error: unsupported");
+      applyAndSaveAdcMultiplier(multiplier, reply, 160);
     };
   } else if (memcmp(config, "reboot.interval ", 16) == 0) {
     int hours = _atoi(&config[16]);
@@ -5105,7 +5608,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       savePrefs();
       strcpy(reply, "reboot.interval disabled");
     } else if (hours < 1 || 255 < hours) {
-      strcpy(reply, "Error: interval range is 1-255 hours");
+      mesh::cli::formatError(reply, 160, "interval range is 1-255 hours");
     } else {
       _prefs->reboot_interval = hours;
       savePrefs();
@@ -5131,34 +5634,57 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       }
     }
 #else
-    strcpy(reply, "Error: extra.sf requires an LR2021 radio");
+    mesh::cli::formatError(reply, 160, "extra.sf requires an LR2021 radio");
+#endif
+#if defined(STATION_G3_ESP32)
+  } else if (_board->handleCommand(command, sender_timestamp, reply)) {
+    // Board-specific settings come after the shared validation/ownership gates.
+    if (_prefs->isDirty()) savePrefs();
 #endif
   } else {
-    sprintf(reply, "unknown config: %s", config);
+    strcpy(reply, "unknown config");
   }
 }
 
 void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+#if defined(RAK_4631)
+  if (mesh::peripherals::handleCommand(_prefs->peripherals_shared, command,
+          reply, 160, _sensors->supportsSharedPeripheralMode(),
+          [this]() { return trySavePrefs(); })) return;
+#else
+  if (strcmp(config, "peripherals.mode") == 0) {
+    mesh::cli::formatError(reply, 160, "unsupported");
+    return;
+  }
+#endif
   if (strncmp(config, "repeat.trace", 12) == 0
       && (config[12] == 0 || config[12] == ' ' || config[12] == '\t')) {
     if (strcmp(_callbacks->getRole(), "repeater") != 0) {
-      strcpy(reply, "Error: repeat.trace is only supported by repeaters");
+      mesh::cli::formatError(reply, 160, "repeat.trace is only supported by repeaters");
     } else if (strcmp(config, "repeat.trace") != 0) {
-      strcpy(reply, "Error: usage get repeat.trace");
+      mesh::cli::formatError(reply, 160, "usage get repeat.trace");
     } else {
       snprintf(reply, 160, "> %s", _prefs->trace_when_repeat_off == 1 ? "on" : "off");
     }
     return;
   }
 #if defined(NRF52_POWER_MANAGEMENT)
-  if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) return;
+  const bool adc_multiplier_command = strncmp(config, "adc.multiplier", 14) == 0
+      && (config[14] == 0 || config[14] == ' ' || config[14] == '\t');
+  if (adc_multiplier_command && _board->getAdcMultiplier() <= 0.0f) {
+    mesh::cli::formatError(reply, 160, "unsupported");
+    return;
+  }
+  if (!adc_multiplier_command || mesh::power::voltagePolicySupported()) {
+    if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) return;
+  }
 #endif
   if (strcmp(config, "password") == 0) {
     if (sender_timestamp == 0) {
       snprintf(reply, 160, "> %s", _prefs->password);
     } else {
-      strcpy(reply, "Error: get password requires a local connection");
+      mesh::cli::formatError(reply, 160, "get password requires a local connection");
     }
     return;
   }
@@ -5167,7 +5693,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (sender_timestamp != 0) {
       strcpy(reply, "> ******** (local connection only)");
     } else if (!_callbacks->getWiFiPassword(reply)) {
-      strcpy(reply, "Error: WiFi password unavailable on this build");
+      mesh::cli::formatError(reply, 160, "WiFi password unavailable on this build");
     }
     return;
   }
@@ -5180,7 +5706,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (strcmp(config, "gps.sync.interval") == 0) {
     auto* provider = _sensors->getLocationProvider();
     if (provider == nullptr) {
-      strcpy(reply, "Error: GPS unavailable");
+      mesh::cli::formatError(reply, 160, "GPS unavailable");
     } else {
       const uint16_t hours = provider->getTimeSyncIntervalHours();
       if (hours == 0) strcpy(reply, "> default (board GPS sync policy)");
@@ -5238,7 +5764,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
 #if defined(ESP_PLATFORM) && defined(ADMIN_PASSWORD) && !defined(WEBCONFIG_DISABLED)
   if (strcmp(config, "webui") == 0) {
     if (!_callbacks->getWebUIStatus(reply)) {
-      strcpy(reply, "Error: webui not supported on this build");
+      mesh::cli::formatError(reply, 160, "webui not supported on this build");
     }
     return;
   }
@@ -5247,7 +5773,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (mesh::cli::classifyStandaloneWiFiGet(config) ==
       mesh::cli::StandaloneWiFiKey::CLI) {
     if (!_callbacks->getWiFiCLI(reply)) {
-      strcpy(reply, "Error: WiFi CLI unavailable on this build");
+      mesh::cli::formatError(reply, 160, "WiFi CLI unavailable on this build");
     }
     return;
   }
@@ -5284,7 +5810,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   }
   if (wifi_key != mesh::cli::StandaloneWiFiKey::None) {
     if (!wifi_supported) {
-      strcpy(reply, "Error: WiFi information unavailable on this build");
+      mesh::cli::formatError(reply, 160, "WiFi information unavailable on this build");
     }
     return;
   }
@@ -5309,7 +5835,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
 #if defined(NRF52_PLATFORM)
     sprintf(reply, "> %s", _prefs->system_watchdog_enabled ? "on" : "off");
 #else
-    strcpy(reply, "Error: unsupported on this platform");
+    mesh::cli::formatError(reply, 160, "unsupported on this platform");
 #endif
   } else if (configKeyEquals(config, "af")) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->airtime_factor));
@@ -5352,13 +5878,13 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _prefs->rx_boosted_gain ? "on" : "off");
   } else if (configKeyEquals(config, "radio.fem.rxgain")) {
     if (!_board->canControlLoRaFemLna()) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else {
       sprintf(reply, "> %s", _board->isLoRaFemLnaEnabled() ? "on" : "off");
     }
   } else if (configKeyEquals(config, "radio.fem.txgain")) {
     if (!_board->canControlLoRaFemPaGain()) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else {
       sprintf(reply, "> %s", _board->isLoRaFemPaGainEnabled() ? "on" : "off");
     }
@@ -5368,10 +5894,12 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     _callbacks->formatScheduledRadioParams(false, skipSpacesConst(&config[7]), reply);
   } else if (strcmp(config, "radio.rxps.rfrx_disabled") == 0) {
     if (!_callbacks->supportsRxPowerSavingRfRxDisable()) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else {
       sprintf(reply, "> %s", _callbacks->isRxPowerSavingRfRxDisabled() ? "on" : "off");
     }
+  } else if (strcmp(config, "radio.rxps.status") == 0) {
+    _prefs->getRadioPrefs()->formatRxPowerSavingStatus(reply, 157);
   } else if (strcmp(config, "radio.rxps.config") == 0) {
     ensureRxPowerSavingDefaults(&_prefs->rx_ps_rx_us, &_prefs->rx_ps_sleep_us);
     sprintf(reply, "> %s,level=%u,preamble=%u,rx=%lu,sleep=%lu",
@@ -5511,7 +6039,9 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _callbacks->getRole());
   } else if (configKeyEquals(config, "bridge.type")) {
     sprintf(reply, "> %s",
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_UDP_BRIDGE) && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE) && !defined(WITH_ESPNOW_BRIDGE)
+            "udp"
+#elif defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
             "mqtt+rs232+espnow"
 #elif defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
             "mqtt+rs232"
@@ -5527,6 +6057,9 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
             "mqtt"
 #else
             "none"
+#endif
+#if defined(WITH_UDP_BRIDGE) && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE))
+            "+udp"
 #endif
     );
 #ifdef WITH_BRIDGE
@@ -5562,6 +6095,15 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _prefs->bridge_pkt_src ? "rx" : "tx");
 #endif
 #ifdef WITH_RS232_BRIDGE
+  } else if (configKeyEquals(config, "rs232.heartbeat")) {
+    sprintf(reply, "> %s", _prefs->rs232_heartbeat ? "on" : "off");
+  } else if (configKeyEquals(config, "rs232.autosleep")) {
+    sprintf(reply, "> %s", _prefs->rs232_autosleep == 2 ? "force"
+        : _prefs->rs232_autosleep == 1 ? "on" : "off");
+  } else if (configKeyEquals(config, "rs232.idle")) {
+    sprintf(reply, "> %us", static_cast<unsigned>(_prefs->rs232_idle_seconds));
+  } else if (configKeyEquals(config, "rs232.status")) {
+    _callbacks->formatRs232Status(reply);
   } else if (configKeyEquals(config, "rs232.enabled")) {
     sprintf(reply, "> %s",
 #ifdef WITH_MQTT_BRIDGE
@@ -5594,12 +6136,12 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
           strcpy(reply, "> unknown");
       }
   #else
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
   #endif
   } else if (configKeyEquals(config, "adc.multiplier")) {
     float adc_mult = _board->getAdcMultiplier();
     if (adc_mult == 0.0f) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else {
       sprintf(reply, "> %.3f", adc_mult);
     }
@@ -5642,7 +6184,11 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "No extra SF configured");
     }
 #else
-    strcpy(reply, "Error: extra.sf requires an LR2021 radio");
+    mesh::cli::formatError(reply, 160, "extra.sf requires an LR2021 radio");
+#endif
+#if defined(STATION_G3_ESP32)
+  } else if (_board->handleCommand(command, sender_timestamp, reply)) {
+    // A board getter must not persist unrelated pending preferences.
 #endif
   } else {
     mesh::cli::formatUnknownSetting(reply, 160, config);

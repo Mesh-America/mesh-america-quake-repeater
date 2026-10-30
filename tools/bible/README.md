@@ -5,37 +5,46 @@ include an embedded 879-verse corpus from the World English Bible:
 
 ```text
 get reader 3:16
+get reader 2
+get reader 2:2-12
 ```
 
-Book/verb case and surrounding spaces are ignored. One chapter:verse reference
-is required; ranges, whole chapters and other books are not supported. ASCII
-verse text is printed in full, including verses longer than the ordinary
-160-byte CLI response. This is a local terminal command, not a LoRa request or
-an extension of the framed Companion API. No WiFi, phone, API key, filesystem
+Verb case and surrounding spaces are ignored. A chapter number selects the
+whole chapter; `chapter:first-last` selects an inclusive range within it.
+Other books and ranges crossing chapter boundaries are not supported.
+USB/TCP/browser text terminals print each selected verse in full. The output
+advances by at most 96 bytes per mesh loop and resumes after short or zero-byte
+writes, so a chapter larger than the USB queue does not get truncated. A new
+terminal command or a session disconnect cancels unfinished output.
+
+The app's local USB/BLE CLI uses the existing bounded reply frames. Long verses
+and selections include a `Next: get reader ...` continuation, preserving the
+last verse of a range. An optional page number refers to the first verse in
+that command: `get reader 21:17 2`. No radio request can access the reader.
+No WiFi, phone, API key, filesystem
 space or bootloader update is needed. Reduced/ordinary Companion and other
 roles omit the corpus. `COMPANION_FEATURE_READER=0` excludes it from a Full build.
 
 ## On-device Reader
 
-Full Companions using the `ui-new` display (including the V4) also offer a
-Reader from the radio-settings page:
+Full Companions using the `ui-new` display (including the V4) use these
+reading controls:
 
-- Long press opens at the first reference, or resumes the saved position.
-- Single click advances one screenful, then to the next verse.
-- Double click goes back one screenful; at a verse boundary it shows the
-  previous verse's last screenful.
+- Single click advances one screenful; double click goes back one screenful.
+  Pages continue across verse and chapter boundaries to fill the available rows.
 - Three taps jump to verse one of the next chapter; four taps jump to verse
   one of the previous chapter. Navigation stops at the first and last chapters.
-- Long press exits to the radio page. It does not invoke early-boot CLI rescue
-  while opening or closing the reader.
+- Long press exits.
 
-The header shows the reference and part count. Single-button builds alternate
+Each verse starts with its subsection number. The header shows the first and
+last references on the screen instead of a verse-local part count. This layout
+applies to all boards with Reader support. Single-button builds alternate
 `<- 2 tap  1 tap ->  long press: exit` and `<<- 4 tap  3 tap ->>` in the footer
 every three seconds, matching the message controls (which change channels).
 These are taps of the user button. Narrower displays use `hold: X` for exit
 or split the hint across lines. Both hint views reserve the same height; the
 V4 keeps its existing single footer row. Touch/joystick builds keep their own
-controls. The entry gesture stays hidden on the radio page. The footer has
+controls. The footer has
 reserved space in the pagination calculation, so text continues on another
 page when necessary.
 Text wraps at word boundaries without truncation. Both the screen and CLI use
@@ -47,14 +56,14 @@ the display.
 
 Sub-160px displays use the same adaptive font selector as received messages:
 Squeezed Regular 6 on panels at least 128x64 (or 64x128 when rotated), and
-5px Picopixel on smaller panels. The reference and part counter retain their
+5px Picopixel on smaller panels. The reference range retains its
 normal header font, stacking on narrow rotated screens to avoid overlap. On
 the V4's 128x64 display, five complete 8-pixel-spaced body rows fit above the
 navigation hint, and reference 3:16 fits on one screen. Wrapping and pagination use the selected font's
 actual character widths and line height. Any panel with either dimension at
 least 160px uses its normal font, including rotated 80x160 panels. Larger display classes, and builds with
 `UI_SMALL_MESSAGE_FONT=0`, retain the regular body font. Existing bookmarks
-resume at the page containing the same text offset after a font/layout change.
+resume at the line containing the same text offset after a font/layout change.
 
 The T096 and other ST7735 boards use native 160x80 coordinates and the normal
 body font (five 10-pixel-spaced rows between the header and button hint). The existing color
@@ -76,7 +85,7 @@ replacement and `.bak` fallback for interrupted saves. It does not change the
 radio-preference layout, contacts, channels, or keys. A malformed bookmark
 falls back to the previous valid record or the first reference; no filesystem is formatted.
 The reader allocates only a small cursor object on first use, reusing the
-same flash corpus and on-demand 2 KiB decode scratch as the terminal.
+same flash corpus and on-demand 4 KiB decode scratch as the terminal.
 
 ## Source and reproduction
 
@@ -88,9 +97,29 @@ headings; punctuation and words are preserved as UTF-8 in this source file.
 The packer converts curly quotes/apostrophes to straight ones, en/em dashes to
 hyphens, and nonbreaking spaces to ordinary spaces before compression. No
 letters or words are changed. Any other non-ASCII character is rejected for
-review, never silently dropped or transliterated. This conversion happens on
-the computer, with no firmware conversion buffer or extra decoding step.
+review, never silently dropped or transliterated. This typography conversion
+happens on the computer; the firmware never changes wording or punctuation.
 No NLT or ERV text is included.
+
+The generated copy uses 128 exact, case-sensitive word tokens before DEFLATE.
+Each token retains its original letters and optional preceding space in a
+flash dictionary. Lookup inflates one token block, then expands only the
+selected verse after that block in the same 4 KiB scratch. The packer checks
+that every block plus its largest expanded selection fits; a very long literal
+verse can stay in place to retain the original 4095-byte text limit. Legacy
+plain corpora keep their original format and lookup behavior. Dictionary
+indices, word bounds, printable ASCII and output headroom are checked before
+returning a verse. No heap, filesystem cache or additional decode buffer is
+used.
+
+The pinned 879 verses remain 96,568 ASCII bytes including separators. The
+generated 14-block copy uses 32,324 DEFLATE bytes, 112 block-index bytes, 705
+dictionary bytes and 258 dictionary-offset bytes: 33,399 bytes in total,
+5,086 fewer than the preceding 38,485-byte plain-block copy. This is static
+asset accounting; the complete firmware size also includes the lookup code.
+Tests compare all 879 decoded verses and their terminal output against the
+independently normalized pinned source, including pagination, corruption and
+the existing ARM stack limits.
 
 The text is [public domain](https://ebible.org/engwebp/copyright.htm).
 World English Bible is a trademark of eBible.org; the source must not be
@@ -120,22 +149,27 @@ terminators, versus 98,911 bytes for the pinned UTF-8 source):
 
 | Block limit | Blocks | DEFLATE bytes | Index bytes | Total flash data | Savings |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 1 KiB | 101 | 47,133 | 1,212 | 48,345 | 49.94% |
-| **2 KiB** | **49** | **42,187** | **588** | **42,775** | **55.70%** |
-| 4 KiB | 24 | 38,366 | 288 | 38,654 | 59.97% |
+| 1 KiB | 101 | 46,945 | 808 | 47,753 | 50.55% |
+| 2 KiB | 49 | 42,074 | 392 | 42,466 | 56.02% |
+| **4 KiB** | **24** | **38,293** | **192** | **38,485** | **60.15%** |
 
 Savings in the table are relative to uncompressed ASCII. Google Zopfli 0.4.3
-uses 15 optimization iterations to write standards-compliant raw DEFLATE, so
-the existing firmware decoder and RAM use do not change. At the chosen 2 KiB
-limit, the Zopfli asset is **2,097 bytes (4.67%)** smaller than the prior
-44,872-byte UTF-8 level-9 DEFLATE data and index; that result includes the
-existing ASCII typography conversion. No 6-bit packing is used.
+uses 1,000 host optimization iterations to write standards-compliant raw DEFLATE.
+The chosen 4 KiB limit saves **3,981 flash bytes** versus 2 KiB packing at the
+same compression effort, including indexes, and uses another 2 KiB of temporary
+decode stack. The decode block size and stack do not increase in this revision.
+All 879 references, wording, canonical source digest, navigation and terminal
+behavior are retained. No 6-bit packing is used. These figures include
+block-index padding but exclude command code, attribution and the decoder.
 
-The chosen 2 KiB limit saves 5,570 flash bytes over 1 KiB for another 1 KiB
-of temporary decode storage. Going to 4 KiB saves only another 4,121 flash
-bytes and doubles that buffer. The 2 KiB choice leaves more stack headroom
-for nRF52's existing BLE/USB/radio calls. These figures include block-index
-padding but exclude the small command code, attribution strings and decoder.
+The generated index uses aligned 16-bit block offsets while every block start
+fits that range, and selects the original 32-bit representation automatically
+for larger corpora. The lookup is specialized at compile time, with no runtime
+format branch or packed/unaligned fields. The current 24 indexes use eight
+bytes each instead of twelve, saving 96 bytes. Higher compression saves another
+73 bytes versus the previous 15-iteration 4 KiB data, for **169 fewer data bytes**
+with the same plaintext, decoder and scratch capacity. Tests decode real blocks
+at offsets 65,535 and 65,536 to cover both representations and their bounds.
 
 Compression runs on the computer. Firmware reuses the existing bounds-checked
 C `tinf` decoder and expands one independent raw-DEFLATE block per lookup.
@@ -144,32 +178,29 @@ inside the decoded block avoids a large per-verse index. Text/indexes remain
 in memory-mapped flash on ESP32 and nRF52. There is no permanent text buffer,
 cache, or additional compression library. The terminal needs no heap allocation;
 the screen reader's small cursor object is described above. The temporary
-2 KiB output buffer is **in addition to** the decoder's trees and call stack.
+4 KiB output buffer is **in addition to** the decoder's trees and call stack.
 
-A Cortex-M4 GCC 14.2 `-Os -fstack-usage` build of the RAK3401 Full Companion
-reports a 2,088-byte frame for verse output, a 16-byte command dispatcher,
-and about 1,720 bytes for the nested decoder calls. Including the terminal
-and main-loop frames, the decode path is approximately **4.3 KiB**, before
-framework/task and interrupt overhead; the nRF52 loop task has an 8 KiB stack.
-Before the navigation-hint addition, the small-font reader's decode/draw
-function had a 2,480-byte frame on RAK3401
-and a 2,496-byte frame on V4. Its nested decode path is approximately 4.3 KiB
-on RAK3401 and 4.7 KiB on V4, including the main-loop/UI frames but before
-framework/task and interrupt overhead. The ESP32-S3 V4 terminal's corresponding
-decode path is approximately 4.6 KiB.
-This is a compiler-derived estimate, not a hardware stack high-water reading.
-Ordinary non-reader commands never enter the decode-buffer function. Its object
-file has zero `.data`/`.bss`; the screen reader adds only its small UI state.
+The native Reader suite also cross-compiles the production Reader and C
+`tinf` decoder with Cortex-M4 GCC 14.2 and `-fstack-usage`. With 4 KiB blocks,
+the terminal decode frames use at most 6,304 bytes including the bounded
+page wrapper; the adaptive-font/button Reader screen's local decode path is
+6,456 bytes. The check reserves another 1,536 bytes for outer callers within
+the unchanged 8 KiB nRF52 loop stack. This is a compiler-derived bound on
+these paths, not a physical stack high-water measurement. Decoder frames are
+counted in addition to output scratch; ordinary commands never reserve it.
+The terminal retains only its existing cursor between calls, with no heap
+buffer or text cache. Linked firmware and physical stack checks remain
+separate from this native source-level bound.
 
 Tests compare all 879 decoded verses and terminal responses with an independently
 ASCII-normalized copy of the pinned plaintext source, check references across
 every block boundary, exercise malformed references and corrupted block
 bounds, and verify that unrelated build profiles exclude the data.
 
-Reader tests additionally traverse every part of all 879 verses in both
-directions, with and without the button hint, using regular and adaptive
+Reader tests additionally traverse full pages spanning all 879 numbered verses
+in both directions, with and without the button hint, using regular and adaptive
 5px/6px fonts at 128x64, 64x128, 160x80,
-240x135, 72x40, 40x72, 128x32, 32x128, 64x48 and 48x64. They compare rendered
+240x135, 250x122, 320x240, 72x40, 40x72, 128x32, 32x128, 64x48 and 48x64. They compare rendered
 body pixels/text separately from the hint, check active-reader resizing across
 font thresholds, and cover resume
 within a verse, book/chapter boundaries, no writes at the start, clearing stale

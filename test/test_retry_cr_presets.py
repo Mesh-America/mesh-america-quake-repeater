@@ -53,6 +53,9 @@ class Mesh { public:
 class MyMesh : public mesh::Mesh {
 public:
   NodePrefs _prefs{};
+  struct BatteryPolicy {
+    bool batteryAllowsTransmit(const mesh::Packet*) const { return true; }
+  } _cli;
   unsigned direct_cancellations = 0, flood_cancellations = 0;
   uint8_t getFloodRetryMaxAttempts(const mesh::Packet*) const;
   uint8_t roomFloodAttempts(const mesh::Packet*) const;

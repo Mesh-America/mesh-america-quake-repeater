@@ -29,6 +29,18 @@
 #define NOISE_FLOOR_CALIB_INTERVAL_MS 2000
 #define AGC_RESET_INTERVAL_MS 30000
 
+// Lab-only boot diagnostics must never contaminate a native-USB or dedicated
+// UART KISS stream. Ordinary builds compile all stage calls away.
+#if defined(ESP32) && defined(MESH_HIL_KISS_BOOT_TRACE) && MESH_HIL_KISS_BOOT_TRACE \
+    && (!defined(ARDUINO_USB_CDC_ON_BOOT) || !ARDUINO_USB_CDC_ON_BOOT) \
+    && !(defined(KISS_UART_RX) && defined(KISS_UART_TX))
+  #define KISS_UART_BOOT_TRACE 1
+  #define KISS_BOOT_STAGE(stage) do { Serial.print("KISS_BOOT "); Serial.println(stage); } while (0)
+#else
+  #define KISS_UART_BOOT_TRACE 0
+  #define KISS_BOOT_STAGE(stage) ((void)0)
+#endif
+
 #if MESH_ESP32_HWCDC_SESSION_GUARD && !(defined(KISS_UART_RX) && defined(KISS_UART_TX))
   #define KISS_HWCDC_TRANSPORT 1
 #else
@@ -72,7 +84,6 @@ void loadOrCreateIdentity() {
   InternalFS.begin();
   IdentityStore store(InternalFS, "");
 #elif defined(ESP32)
-  SPIFFS.begin(true);
   IdentityStore store(SPIFFS, "/identity");
 #elif defined(RP2040_PLATFORM)
   LittleFS.begin();
@@ -98,21 +109,28 @@ void loadOrCreateIdentity() {
     }
   }
 #else
+  KISS_BOOT_STAGE("identity.load.before");
   const IdentityLoadResult identity_load = store.loadResult("_main", identity);
+  KISS_BOOT_STAGE("identity.load.after");
 #endif
   const bool needs_identity = identity_load == IdentityLoadResult::Missing
       || (identity_load == IdentityLoadResult::Loaded
           && mesh::hasReservedIdentityPrefix(identity));
   bool identity_ready = identity_load != IdentityLoadResult::Unreadable;
   if (needs_identity) {
+    KISS_BOOT_STAGE("identity.generate.before");
     identity_ready = mesh::generateUsableLocalIdentity(identity, radio_new_identity);
+    KISS_BOOT_STAGE("identity.generate.after");
+    KISS_BOOT_STAGE("identity.save.before");
     if (identity_ready) identity_ready = store.saveWithRetry("_main", identity);
+    KISS_BOOT_STAGE("identity.save.after");
   }
 
 #if defined(ESP32_PLATFORM)
   mesh::discardESP32TrueRandom();
 #endif
   if (!identity_ready) {
+    KISS_BOOT_STAGE("identity.failed");
     MESH_DEBUG_PRINTLN("Identity generation or persistence failed after retries; rebooting");
     board.reboot();
     halt(); // Never let setup continue if a platform's reboot returns.
@@ -144,13 +162,43 @@ void onGetStats(uint32_t* rx, uint32_t* tx, uint32_t* errors) {
 }
 
 void setup() {
+#if KISS_UART_BOOT_TRACE
+  Serial.begin(115200);
+  KISS_BOOT_STAGE("setup.enter");
+#endif
 #if KISS_HWCDC_TRANSPORT
   // KISS owns the entire serial byte stream, including gaps between chunks.
   mesh::setUsbLoggingEnabled(false);
   mesh::setUsbDebugEnabled(false);
 #endif
+#if defined(STATION_G3_ESP32)
+  // G3 can wait in no-radio recovery before modem construction. Bring up
+  // USB now so its prefixed recovery console is reachable on an empty slot.
+  mesh::prepareUsbLoggingPort();
+  Serial.begin(115200);
+  mesh::beginUsbLoggingPort();
+#endif
+  KISS_BOOT_STAGE("board.before");
   board.begin();
+  board.applyMcuRegulator(mesh::power::RegulatorMode::Default);
+  KISS_BOOT_STAGE("board.after");
 
+#if defined(ESP32)
+  // Mount (and, on a virgin store, format) before radio interrupts start,
+  // matching the Companion startup order. Never generate a replacement
+  // identity when primary storage has failed to become available.
+  KISS_BOOT_STAGE("filesystem.before");
+  const bool filesystem_ready = SPIFFS.begin(true);
+  KISS_BOOT_STAGE("filesystem.after");
+  if (!filesystem_ready) {
+    KISS_BOOT_STAGE("filesystem.failed");
+    MESH_DEBUG_PRINTLN("SPIFFS initialization failed; rebooting");
+    board.reboot();
+    halt();
+  }
+#endif
+
+  KISS_BOOT_STAGE("radio.before");
   int radioinit_attempts = 0;
   while (!radio_init()) {
     ++radioinit_attempts;
@@ -161,14 +209,24 @@ void setup() {
     }
     delay(500);
   }
+  KISS_BOOT_STAGE("radio.after");
 
+  KISS_BOOT_STAGE("driver.before");
   radio_driver.begin();
+  KISS_BOOT_STAGE("driver.after");
 
+  KISS_BOOT_STAGE("rng.before");
   rng.begin(radio_driver.getRngSeed());
+  KISS_BOOT_STAGE("rng.after");
+  KISS_BOOT_STAGE("identity.before");
   loadOrCreateIdentity();
+  KISS_BOOT_STAGE("identity.after");
 
+  KISS_BOOT_STAGE("sensors.before");
   sensors.begin();
+  KISS_BOOT_STAGE("sensors.after");
 
+  KISS_BOOT_STAGE("serial.before");
 #if defined(KISS_UART_RX) && defined(KISS_UART_TX)
 #if defined(ESP32)
   Serial1.setPins(KISS_UART_RX, KISS_UART_TX);
@@ -189,6 +247,7 @@ void setup() {
 #endif
   modem = new KissModem(Serial1, identity, rng, radio_driver, board, sensors);
 #else
+#if !defined(STATION_G3_ESP32)
 #if KISS_HWCDC_TRANSPORT
   // Allocate the USB queues before begin() enables the live driver ISR.
   mesh::prepareUsbLoggingPort();
@@ -197,6 +256,7 @@ void setup() {
 #if KISS_HWCDC_TRANSPORT
   mesh::beginUsbLoggingPort();
 #endif
+#endif // G3 already started USB before radio discovery, including UART builds.
   uint32_t start = millis();
   while (!Serial && millis() - start < 3000) delay(10);
   delay(100);
@@ -207,13 +267,18 @@ void setup() {
 #endif
 #endif
 
+  KISS_BOOT_STAGE("serial.after");
   modem->setRadioCallback(onSetRadio);
   modem->setTxPowerCallback(onSetTxPower);
   modem->setGetCurrentRssiCallback(onGetCurrentRssi);
   modem->setGetStatsCallback(onGetStats);
+  KISS_BOOT_STAGE("modem.before");
   modem->begin();
+  KISS_BOOT_STAGE("modem.after");
 
+  KISS_BOOT_STAGE("boot_complete.before");
   board.onBootComplete();
+  KISS_BOOT_STAGE("setup.complete");
 }
 
 void loop() {

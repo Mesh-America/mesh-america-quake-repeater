@@ -37,6 +37,7 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
         lifecycle = "\n".join(extract_braced(processed_header, signature) for signature in (
             "AbstractBridge* activeBridge() {", "const AbstractBridge* activeBridge() const {",
             "RS232Bridge* createRS232Bridge()", "bool beginRS232Bridge()", "bool endRS232Bridge()",
+            "void serviceRs232BridgePower()", "void formatRs232Status(char* reply)",
             "bool isBridgeRunning() const override", "bool rs232BridgeEnabled() const", "bool isRs232BridgeRunning()",
             "bool setRs232BridgeState(bool enable)", "bool restartRs232Bridge()",
             "bool startSharedEspNowBridgeIfReady()", "bool isEspNowBridgeRunning()",
@@ -54,13 +55,14 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
         for name in ("logRx", "logTx"):
             start = implementation.index("void MyMesh::" + name + "(")
             start = implementation.index("#ifdef WITH_MQTT_BRIDGE\n", start)
-            end = implementation.index("  if (_logging)", start)
+            # Keep the complete bridge guards, stopping before file logging's guard.
+            end = implementation.index("#if MESH_ENABLE_PACKET_FILE_LOGGING\n", start)
             routing[name] = implementation[start:end]
         service_start = implementation.index("#if defined(WITH_MQTT_BRIDGE)\n  // MQTT owns TLS",
                                              implementation.index("MyMesh::servicePostMeshLoop()"))
         service_end = implementation.index("  if (next_flood_advert", service_start)
         pending_start = implementation.index("#if defined(WITH_BRIDGE)",
-                                             implementation.index("bool MyMesh::hasPendingWork()"))
+                                             implementation.index("mesh::powerdiag::Mask MyMesh::pendingWorkReason()"))
         pending_end = implementation.index("  if (radio_driver.isWatchdogObserving()", pending_start)
         commands = preprocess("\n".join(extract_braced(cli, signature) for signature in (
             "void CommonCLI::handleSetCmd(", "void CommonCLI::handleGetCmd(")))
@@ -135,6 +137,7 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
         lifecycle = "\n".join(extract_braced(processed_header, signature) for signature in (
             "AbstractBridge* activeBridge() {", "const AbstractBridge* activeBridge() const {",
             "RS232Bridge* createRS232Bridge()", "bool beginRS232Bridge()", "bool endRS232Bridge()",
+            "void serviceRs232BridgePower()", "void formatRs232Status(char* reply)",
             "bool rs232BridgeEnabled() const", "bool isBridgeRunning() const override",
             "bool isRs232BridgeRunning()", "bool setRs232BridgeState(bool enable)",
             "bool restartRs232Bridge()", "bool isMqttBridgeRunning()", "bool requestMqttBridgeStop()",
@@ -156,12 +159,14 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
         boot_end = implementation.index('mesh::hilStartupTrace("mesh_bridge_ready");', boot_start)
         service_start = implementation.index("#if defined(WITH_MQTT_BRIDGE)\n  // MQTT owns TLS", implementation.index("MyMesh::servicePostMeshLoop()"))
         service_end = implementation.index("  if (next_flood_advert", service_start)
-        pending_start = implementation.index("#if defined(WITH_BRIDGE)", implementation.index("bool MyMesh::hasPendingWork()"))
+        pending_start = implementation.index("#if defined(WITH_BRIDGE)", implementation.index("mesh::powerdiag::Mask MyMesh::pendingWorkReason()"))
         pending_end = implementation.index("  if (radio_driver.isWatchdogObserving()", pending_start)
         route = {}
         for name in ("logRx", "logTx"):
             start = implementation.index("#ifdef WITH_MQTT_BRIDGE\n", implementation.index("void MyMesh::" + name + "("))
-            route[name] = implementation[start:implementation.index("  if (_logging)", start)]
+            # Keep the complete bridge guards, stopping before file logging's guard.
+            end = implementation.index("#if MESH_ENABLE_PACKET_FILE_LOGGING\n", start)
+            route[name] = implementation[start:end]
         ota_start = cli.index('    } else if (memcmp(command, "start ota", 9)')
         defaults_start = implementation.index("// bridge defaults")
         substitutions = {
@@ -187,9 +192,14 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
   MyMesh mesh; mesh.defaults(); mesh.boot(); CommonCLI cli(mesh);
   expect_get(cli, "bridge.type", "> mqtt+rs232");
   assert(mesh.isMqttBridgeRunning() && !mesh.isRs232BridgeRunning());
+  mesh.mqtt_bridge->setNetworkSuspended(true);
+  assert(mesh.isMqttBridgeRunning() && mesh._prefs.bridge_enabled);
+  assert(!mesh.bridgesPreventSleep());
   char reply[256] = {};
   cli.set("rs232.enabled on", reply); assert(strcmp(reply, "OK") == 0);
   assert(mesh.isRs232BridgeRunning() && mesh.isMqttBridgeRunning());
+  assert(mesh.bridgesPreventSleep());  // Paused MQTT cannot mask an active UART.
+  mesh.mqtt_bridge->setNetworkSuspended(false);
   const unsigned starts = mesh.mqtt_bridge->begins;
   cli.set("bridge.baud 57600", reply); assert(strcmp(reply, "OK") == 0);
   assert(mesh.isRs232BridgeRunning() && mesh.mqtt_bridge->begins == starts);

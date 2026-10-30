@@ -101,6 +101,8 @@ namespace mesh { struct Utils {
                 str(ROOT / "src/helpers/ConfigSerializer.cpp"),
                 str(ROOT / "src/helpers/DynamicConfigSerializer.cpp"),
                 str(ROOT / "src/helpers/CommonRadioPrefs.cpp"),
+                str(ROOT / "src/helpers/radiolib/RXPowerSaving.cpp"),
+                str(ROOT / "src/helpers/radiolib/RXPowerSavingCLI.cpp"),
                 str(ROOT / "src/helpers/TxtDataHelpers.cpp"),
                 "-o", str(binary),
             ], capture_output=True, text=True)

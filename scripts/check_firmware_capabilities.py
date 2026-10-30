@@ -11,6 +11,12 @@ import sys
 import struct
 import zipfile
 import zlib
+from rp2040_application import read_application as read_rp2040_application
+from package_meshtext_license import (CAPABILITY as MESHTEXT_CAPABILITY,
+    meshtext_evidence, notice_bytes as meshtext_notice_bytes,
+    notice_record as meshtext_notice_record)
+from package_pocket_gui_license import (pocket_gui_evidence,
+    notice_bytes as pocket_gui_notice_bytes, notice_record as pocket_gui_notice_record)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "mota"))
 from motalib import parse_nrf52_layout
@@ -37,7 +43,11 @@ def nrf52_lora_details(application):
              "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device."]
     if layout.auto_store:
         notes.append("One application detects RAK external NOR and chooses QSPI only with the exact matching OTAFIX bootloader; otherwise it uses internal flash where safe.")
-        notes.append("External QSPI accepts full images and in-place deltas; internal flash accepts in-place deltas only and needs the retained-RAM OTAFIX profile.")
+        if layout.hybrid_ram:
+            notes.append("External QSPI accepts full images and in-place deltas; internal flash accepts in-place deltas only and needs the retained-RAM OTAFIX profile.")
+        else:
+            notes.append("External QSPI accepts full images and in-place deltas; this legacy application's internal staging is flash-only and accepts in-place deltas only.")
+            notes.append("Retained-RAM staging and bootloader self-update are not compiled into this legacy application.")
         notes.append("OTAFIX 2.4.11 provides normal RAK3401/RAK4631 *_auto bootloaders with standard board identities and internal signed bootloader-update staging. Historical *_AUTO_DFU or dedicated external identities need the documented local identity-matching migration, not a cross-profile LoRa update.")
     elif layout.hybrid_ram:
         notes.append("Requires the exact-board retained-RAM handoff bootloader profile; a transfer cannot resume after the receiver restarts.")
@@ -67,9 +77,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--capability", action="append", default=[])
     parser.add_argument("--reduction", action="append", default=[])
     parser.add_argument("--require-ota", action="store_true")
+    parser.add_argument(
+        "--require-meshtext", action="store_true",
+        help="Require linked Meshtext encode/decode and Companion raw-frame transport implementations.",
+    )
     parser.add_argument("--firmware-bin", type=Path)
     parser.add_argument("--partitions", type=Path)
     parser.add_argument("--dfu-package", type=Path)
+    parser.add_argument("--uf2-package", type=Path)
     parser.add_argument(
         "--expect",
         action="append",
@@ -85,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--expect-application", action="append", default=[],
         metavar="CAPABILITY=TEXT",
-        help="Require TEXT in the packaged firmware.bin or DFU application, not ELF metadata.",
+        help="Require TEXT in the packaged BIN, DFU application, or verified RP2040 UF2 application, not ELF metadata.",
     )
     return parser.parse_args()
 
@@ -113,6 +128,10 @@ def linked_gzip_assets(image):
 
 
 def read_application(args):
+    if args.platform == "RP2040_PLATFORM" or args.uf2_package is not None:
+        if args.platform != "RP2040_PLATFORM" or args.uf2_package is None or args.firmware_bin is None:
+            raise ValueError("RP2040 application checks require both --uf2-package and --firmware-bin")
+        return read_rp2040_application(args.uf2_package, args.firmware_bin)
     if args.firmware_bin is not None:
         return args.firmware_bin.read_bytes()
     if args.dfu_package is not None:
@@ -186,6 +205,31 @@ def main() -> int:
 
     checks = []
     malformed = False
+    third_party_notices = []
+    codec_symbols, chat_symbols = [], []
+    try:
+        codec_symbols, chat_symbols = meshtext_evidence(args.image)
+        if codec_symbols:
+            stem = args.output.name.removesuffix(".capabilities.json")
+            third_party_notices.append(meshtext_notice_record(stem, meshtext_notice_bytes()))
+        if chat_symbols:
+            checks.append({"capability": MESHTEXT_CAPABILITY,
+                           "evidence": "; ".join(chat_symbols), "present": True,
+                           "source": "linked ELF symbols"})
+    except (OSError, ValueError) as error:
+        print(f"capability check: cannot qualify linked Meshtext code: {error}", file=sys.stderr)
+        malformed = True
+    try:
+        if pocket_gui_evidence(args.image):
+            stem = args.output.name.removesuffix(".capabilities.json")
+            third_party_notices.append(pocket_gui_notice_record(stem, pocket_gui_notice_bytes()))
+    except (OSError, ValueError) as error:
+        print(f"capability check: cannot qualify linked MeshPocket GUI/fonts: {error}", file=sys.stderr)
+        malformed = True
+    if args.require_meshtext and not chat_symbols:
+        checks.append({"capability": MESHTEXT_CAPABILITY,
+                       "evidence": "Meshtext encode/decode, Companion send/receive, and Dispatcher raw-frame queue implementations",
+                       "present": False, "source": "linked ELF symbols"})
     application = b""
     if args.expect_application:
         try:
@@ -221,6 +265,10 @@ def main() -> int:
     capabilities = stable_unique(
         args.capability + [check["capability"] for check in checks]
     )
+    if not chat_symbols:
+        # Neither a requested capability nor CLI strings prove the optional
+        # codec and its complete Companion transport survived linking.
+        capabilities = [value for value in capabilities if value != MESHTEXT_CAPABILITY]
     missing = [check for check in checks if not check["present"]]
     ota_methods = stable_unique([
         check["capability"].removeprefix("ota.update.")
@@ -245,6 +293,8 @@ def main() -> int:
         "ota_update_evidence": ota_evidence,
         "verified": not malformed and not missing and (not args.require_ota or ota_verified),
     }
+    if third_party_notices:
+        manifest["third_party_notices"] = third_party_notices
     if ota_verified and args.platform == "NRF52_PLATFORM" and "lora" in ota_methods:
         with zipfile.ZipFile(args.dfu_package) as package:
             app = json.loads(package.read("manifest.json"))["manifest"]["application"]

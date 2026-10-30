@@ -5,6 +5,14 @@
 #include <Packet.h>
 #include <Utils.h>
 #include <RadioProfiles.h>
+#include <helpers/RadioSwitchTuning.h>
+#include <helpers/MeshtextConfig.h>
+#include <helpers/MorseTx.h>
+#include <helpers/MorseRx.h>
+#include <helpers/AGCResetScheduler.h>
+#include <helpers/BeaconConfig.h>
+#include <helpers/RegulatorMode.h>
+#include <helpers/TelemetryHistoryConfig.h>
 #ifndef RADIO_LIVENESS_SOFT_ONLY
   #include <helpers/RadioLivenessTracker.h>
 #endif
@@ -31,6 +39,12 @@ public:
 */
 class Radio {
 public:
+  MESH_REGULATOR_VIRTUAL uint8_t regulatorModes() const { return 0; }
+  MESH_REGULATOR_VIRTUAL power::RegulatorMode defaultRegulatorMode() const { return power::RegulatorMode::Default; }
+  // Cache a selection before the first hardware initialization. Save later
+  // choices for the next reboot; never change a live RX/TX regulator here.
+  MESH_REGULATOR_VIRTUAL bool configureBootRegulator(power::RegulatorMode) { return false; }
+  MESH_REGULATOR_VIRTUAL power::RegulatorMode activeRegulatorMode() const { return power::RegulatorMode::Default; }
   static constexpr uint32_t CarrierWaveDefaultMillis = 10000;
   static constexpr uint32_t CarrierWaveMaxMillis = 60000;
   virtual bool supportsCarrierWave() const { return false; }
@@ -41,10 +55,77 @@ public:
   virtual bool isCarrierWaveActive() const { return false; }
   virtual uint8_t carrierWaveProfile() const { return 0; }
   virtual uint32_t carrierWaveRemainingMillis() const { return 0; }
+  virtual bool supportsMorseTx() const { return false; }
+  virtual MorseTxResult startMorseTx(float frequency_mhz, uint8_t wpm, const char* text) {
+    (void)frequency_mhz; (void)wpm; (void)text;
+    return MorseTxResult::Unsupported;
+  }
+  virtual MorseTxResult stopMorseTx() { return MorseTxResult::Unsupported; }
+  virtual bool isMorseTxActive() const { return false; }
+  virtual float morseTxFrequency() const { return MorseTx::DefaultFrequencyMHz; }
+  virtual uint8_t morseTxWpm() const { return MorseTx::DefaultWpm; }
+  virtual uint32_t morseTxRemainingMillis() const { return 0; }
+  virtual bool supportsMorseRx() const { return false; }
+  virtual MorseRxResult startMorseRx(float frequency_mhz, uint8_t wpm, uint32_t duration_ms) {
+    (void)frequency_mhz; (void)wpm; (void)duration_ms;
+    return MorseRxResult::Unsupported;
+  }
+  virtual MorseRxResult stopMorseRx() { return MorseRxResult::Unsupported; }
+  virtual bool isMorseRxActive() const { return false; }
+  virtual bool morseRxRecovering() const { return false; }
+  virtual bool morseRxLearning() const { return false; }
+  virtual float morseRxFrequency() const { return MorseTx::DefaultFrequencyMHz; }
+  virtual float morseRxBandwidthKHz() const { return 0; }
+  virtual uint32_t morseRxRemainingMillis() const { return 0; }
+  virtual uint32_t morseCaptureGeneration() const { return 0; }
+  virtual bool morseRxDiagnostics(MorseRxDiagnostics& out) const { out = {}; return false; }
+  virtual size_t morseCaptureLength() const { return 0; }
+  virtual bool morseCaptureTruncated() const { return false; }
+  virtual const char* morseCaptureText() const { return ""; }
+  virtual size_t readMorseCapture(size_t offset, char* out, size_t capacity) const {
+    (void)offset;
+    if (out && capacity) out[0] = 0;
+    return 0;
+  }
+  virtual void clearMorseCapture() { }
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  virtual size_t morseTraceLength() const { return 0; }
+  virtual uint32_t morseTraceTotal() const { return 0; }
+  virtual bool morseTraceTruncated() const { return false; }
+  virtual bool readMorseTrace(size_t offset, MorseRssiTraceEntry& out) const {
+    (void)offset; (void)out; return false;
+  }
+#endif
   virtual void begin() { }
   virtual RadioProfiles* profiles() { return nullptr; }
   virtual const RadioProfiles* profiles() const { return nullptr; }
+#if MESH_RADIO_SWITCH_TUNING
+  virtual RadioSwitchCapabilities switchTuningCapabilities() const { return {}; }
+  virtual RadioSwitchTuning switchTuning() const { return {}; }
+  virtual uint32_t switchSpiHz() const { return 0; }
+  virtual bool configureBootSwitchTuning(const RadioSwitchTuning&) { return false; }
+  // Commit only after admission and verified RX restoration. The callback
+  // must not access the radio; a failed save restores the previous policy.
+  virtual RadioParamApplyResult trySetSwitchTuning(const RadioSwitchTuning&,
+      bool (*)(void*, const RadioSwitchTuning&) = nullptr, void* = nullptr) {
+    return RadioParamApplyResult::FAILED;
+  }
+#endif
   virtual bool validateProfile(const RadioProfileParams&) const { return false; }
+  virtual bool supportsMeshtext() const { return false; }
+  virtual bool supportsEthernetTunnel() const { return false; }
+#if MESH_ENABLE_TX_BEACONS
+  // Check the requested antenna power at the prospective beacon frequency.
+  // Validation must not retune the radio or alter its current power setting.
+  virtual bool validateBeaconPower(float, int8_t) const { return false; }
+  virtual RadioParamApplyResult prepareBeaconTransmit(const RadioProfileParams&, int8_t) {
+    return RadioParamApplyResult::FAILED;
+  }
+  virtual RadioParamApplyResult restoreBeaconReceive() { return RadioParamApplyResult::APPLIED; }
+  virtual bool isBeaconRadioOwned() const { return false; }
+  virtual bool isBeaconChannelBusy() { return true; }
+  virtual uint32_t getBeaconAirtime(const RadioProfileParams&, int) { return 0; }
+#endif
   virtual uint8_t receiveProfile() const { return 0; }
   virtual uint32_t receiveProfileGeneration() const {
     return profiles() ? profiles()->generation[receiveProfile()] : 0;
@@ -119,6 +200,11 @@ public:
   virtual void idle() { }
   virtual void startRecv() { }
 
+  // A tracker may stop RF reception between explicit check-in windows. The
+  // dispatcher must be made unavailable while asleep so watchdog recovery
+  // cannot restart RX. Unsupported transports decline without changing state.
+  virtual bool setTrackerSleep(bool sleeping) { (void)sleeping; return false; }
+
   // Recover a radio whose MCU driver is still running but whose RF state has
   // stopped making progress.  hard=false is a safe receive/AGC re-arm;
   // hard=true may reset only the radio peripheral.  The default remains useful
@@ -140,6 +226,16 @@ public:
     (void)profile;
     return getNoiseFloorDbm();
   }
+  // Only successfully published estimates have a timestamp. Unsupported
+  // transports and disabled/unmeasured profiles return false, not a zero dBm
+  // reading. millis() may legitimately be zero or wrap between publications.
+  MESH_TELEMETRY_HISTORY_VIRTUAL bool getNoiseFloorReading(
+      uint8_t profile, float& dbm, uint32_t& published_at_ms) const {
+    (void)profile; (void)dbm; (void)published_at_ms; return false;
+  }
+  // Join a bounded idle-RX collection without discarding a valid estimate or
+  // interrupting reception, transmission, or another owner of the radio.
+  MESH_TELEMETRY_HISTORY_VIRTUAL void requestNoiseFloorMeasurement() { }
 
   // A zero result means there is no active sampled calibration window (or
   // that this transport does not expose one). The estimate itself may remain
@@ -150,6 +246,28 @@ public:
     return getNoiseFloorCalibrationSecondsRemaining();
   }
   virtual bool isCalibratingNoiseFloor() const { return false; }
+  // MCU service deadline only: RF calibration can continue in continuous RX
+  // while the CPU idles between readings. Unknown implementations retain the
+  // conservative whole-batch veto rather than inventing a safe sample gap.
+  virtual bool getNoiseFloorWakeDelay(uint32_t now, uint32_t& delay_ms) const {
+    (void)now;
+    if (!isCalibratingNoiseFloor()) return false;
+    delay_ms = 0;
+    return true;
+  }
+  // A failed receive start may need a later retry without keeping the MCU
+  // awake. Transports without a deferred receive retry retain their cadence.
+  virtual bool getReceiveRetryDelay(uint32_t now, uint32_t& delay_ms) const {
+    (void)now; (void)delay_ms; return false;
+  }
+  // A supported profile scanner may idle the MCU while RF keeps receiving.
+  // Return a conservative whole-millisecond service budget, not an RF sleep
+  // permission. False (unsupported/not ready) or zero retains fast polling.
+  // The caller must preserve every other work deadline and the validated
+  // board wake contract, then recheck admission immediately before waiting.
+  virtual bool getProfileIdleDelay(uint32_t& delay_millis) const {
+    (void)delay_millis; return false;
+  }
 
   virtual void triggerNoiseFloorCalibrate(int threshold) { }
 
@@ -166,6 +284,10 @@ public:
   uint32_t getCADScanTimeoutMillis() const { return 0; }
 
   virtual void resetAGC() { }
+  // True means the maintenance sequence was admitted, not that receiver
+  // sensitivity has been measured. Busy implementations may defer it.
+  virtual bool tryResetAGC() { resetAGC(); return true; }
+  virtual uint32_t getRecoveryCount() const { return 0; }
 
   virtual uint8_t getRadioState() const { return 0; }
   virtual unsigned long getLastRecvMillis() const { return 0; }
@@ -296,6 +418,7 @@ typedef uint32_t  DispatcherAction;
  *      and scheduling of outbound Packets.
 */
 class Dispatcher {
+  friend class FleetChannel;  // bounded deferred receiver and exact reply retirement
   enum class OutboundCancellation : uint8_t { None, Cancelled, Delivered };
   Packet* outbound;  // current outbound packet
   unsigned long outbound_expiry, outbound_start, total_air_time, rx_air_time;
@@ -312,9 +435,7 @@ class Dispatcher {
   uint32_t ota_tx_airtime = 0;
   unsigned long cad_busy_start;
   unsigned long radio_nonrx_start;
-  unsigned long next_floor_calib_time, next_agc_reset_time;
-  int   armed_agc_reset_interval;
-  bool  agc_reset_armed;
+  unsigned long next_floor_calib_time;
   bool  radio_nonrx_timer_armed;
   bool  prev_isrecv_mode;
   bool  radio_available;
@@ -331,10 +452,26 @@ class Dispatcher {
   unsigned long tx_budget_ms;
   unsigned long last_budget_update;
   unsigned long duty_cycle_window_ms;
-  uint8_t receive_context_profile = 0;
-  uint32_t receive_context_generation = 0;
-  bool receive_context_active = false;
-  uint32_t profile_cad_busy[2] = {};
+#if MESH_ENABLE_FOREIGN_RADIO
+  // One bounded user-send slot; never placed in the MeshCore packet pool.
+  uint8_t foreign_radio_bytes[MAX_TRANS_UNIT] = {};
+  uint16_t foreign_radio_length = 0;
+  uint8_t foreign_radio_profile = 0;
+  RadioProfileProtocol foreign_radio_protocol = RadioProfileProtocol::MeshCore;
+  uint32_t foreign_radio_generation = 0;
+#if MESH_ENABLE_OTA_KISS_DIRECT
+  uint32_t foreign_radio_ota_epoch = 0;
+#endif
+  uint32_t foreign_radio_retry_at = 0, foreign_radio_prepare_deadline = 0;
+  uint32_t foreign_radio_start = 0, foreign_radio_expiry = 0;
+  bool foreign_radio_sending = false;
+  bool foreign_radio_yield_meshcore = false;
+  bool isForeignRadioCurrent() const;
+  bool supportsForeignRadioProtocol(RadioProfileProtocol protocol) const;
+  bool serviceForeignRadioFrame();
+  bool checkForeignRadioSend();
+  void finishForeignRadioFrame(bool success, bool account_airtime);
+#endif
 
   void processRecvPacket(Packet* pkt);
   void releaseDroppedOutbound();
@@ -388,9 +525,7 @@ protected:
     last_meshcore_recv_millis = 0;
     next_tx_time = ms.getMillis();
     cad_busy_start = 0;
-    next_floor_calib_time = next_agc_reset_time = 0;
-    armed_agc_reset_interval = 0;
-    agc_reset_armed = false;
+    next_floor_calib_time = 0;
     _err_flags = 0;
     radio_nonrx_start = 0;
     radio_nonrx_timer_armed = false;
@@ -417,6 +552,31 @@ protected:
   virtual void onTracePacketQueuedForSend(Packet* packet) { }
   virtual void onSendComplete(Packet* packet) { }
   virtual void onSendFail(Packet* packet) { }
+#if MESH_ENABLE_FOREIGN_RADIO
+  // Foreign RX is consumed here before MeshCore parsing or any raw bridge.
+  // Returning false drops the frame; it never falls through to MeshCore.
+  virtual bool onForeignRadioFrame(const uint8_t*, size_t, uint8_t, uint32_t, float, float) { return false; }
+  virtual void onForeignRadioSendComplete(bool) { }
+  virtual bool allowForeignRadioTransmit() const { return true; }
+#if MESH_ENABLE_OTA_KISS_DIRECT
+  // The KISS host framing is off-air. These are bounded, zero-hop OTA radio
+  // frames, never Packet objects and never a second physical TX owner.
+  virtual bool onDirectOtaRadioFrame(const uint8_t*, size_t, uint8_t, uint32_t) { return false; }
+  virtual bool allowDirectOtaTransmit(uint8_t, uint32_t) const { return false; }
+  // Captured when queued: abort, fallback and workspace replacement retire
+  // this token even when the physical temporary profile remains unchanged.
+  virtual uint32_t directOtaEpoch() const { return 0; }
+  bool queueDirectOtaRadioFrame(const uint8_t* message, uint16_t length,
+                               uint8_t profile, uint32_t generation);
+#endif
+  bool queueForeignRadioFrame(const uint8_t* bytes, size_t length, uint8_t profile, uint32_t generation,
+                             RadioProfileProtocol protocol = RadioProfileProtocol::Meshtext);
+  RadioProfileProtocol queuedForeignRadioProtocol() const { return foreign_radio_protocol; }
+  // Cancel host work that has not reached RF. An in-flight frame cannot be
+  // unsent and retains normal completion/airtime accounting.
+  bool discardQueuedForeignRadioFrame(RadioProfileProtocol protocol);
+  bool hasForeignRadioFrame() const { return foreign_radio_length != 0; }
+#endif
   virtual void onRadioProfileCopyQueued(Packet* packet, const Packet* original, uint8_t priority) { }
   // Policy gate for the other profile only; same-profile TX remains eligible.
   // Called before admitting copies (including bound retry packets) to a queue.
@@ -447,6 +607,7 @@ protected:
   virtual int getInterferenceThreshold() const { return 0; }    // disabled by default
   virtual bool getCADEnabled() const { return false; }    // hardware CAD disabled by default
   virtual int getAGCResetInterval() const { return 0; }    // disabled by default
+  virtual bool useAdaptiveAGC() const { return false; }
   virtual unsigned long getDutyCycleWindowMs() const { return 3600000; }
 #ifdef WITH_MQTT_BRIDGE
   virtual uint32_t getRadioWatchdogMillis() const;  // observer-only radio recovery
@@ -464,6 +625,27 @@ protected:
   // This includes queue schedules, delayed inbound processing, airtime-budget
   // waits, and short channel-busy deferrals.
   bool getNextQueueWakeDelay(uint32_t& delay_millis) const;
+  // Timed MCU wakes are not RF leases: an idle tracker can suspend the radio
+  // across AGC maintenance and a future beacon, but not actual packet work.
+  bool hasPendingRadioWork() const {
+    if (hasOutbound() || outbound_restore_cr || _mgr->getOutboundTotal() != 0
+        || _radio->isCarrierWaveActive() || _radio->isMorseTxActive()
+        || _radio->isMorseRxActive()) return true;
+    uint32_t ignored;
+    return _mgr->getNextInboundTime(_ms->getMillis(), ignored)
+        || (radio_available && _radio->getReceiveRetryDelay(_ms->getMillis(), ignored));
+  }
+#if MESH_ENABLE_TX_BEACONS
+  // A deliberately suspended tracker must still wake before the beacon CLI
+  // consumes its one admission attempt. Other unavailable radios retain the
+  // existing getNextQueueWakeDelay() policy.
+  bool getNextBeaconWakeDelay(uint32_t& delay_millis) const {
+    if (!beacon_wake_enabled) return false;
+    const int32_t wait = int32_t(beacon_wake_at - uint32_t(_ms->getMillis()));
+    delay_millis = wait > 0 ? uint32_t(wait) : 0;
+    return true;
+  }
+#endif
   bool hasQueuedWorkDue() const {
     uint32_t delay_millis;
     return getNextQueueWakeDelay(delay_millis) && delay_millis == 0;
@@ -476,12 +658,47 @@ protected:
   // Planned fan-out before transport filters; also bounds OTA queue admission.
   uint8_t getTransmitProfileMask(const Packet* packet) const;
   uint32_t getTransmitAirtime(const Packet* packet) const;
+  // TRACE callers supply final DIRECT length; createTrace()'s unset route
+  // bits would otherwise add four transport-code bytes before sendDirect().
+  uint32_t getTransmitAirtime(const Packet* packet, int wire_length) const;
 
 public:
+  // Kept separate from whole-second queue sleep policy: a 50 ms calibration
+  // deadline needs a bounded millisecond wake, not a zero-second queue veto.
+  bool getNextNoiseFloorWakeDelay(uint32_t& delay_millis) const;
   void begin();
   void loop();
+#if MESH_ENABLE_TX_BEACONS
+  ~Dispatcher();
+  bool queueBeaconRadioFrame(const uint8_t* bytes, size_t length,
+                            const RadioProfileParams& params, int8_t power);
+  void cancelBeaconRadioFrame();
+  bool hasBeaconRadioFrame() const { return beacon_tx != nullptr; }
+  void setBeaconWakeDelay(uint32_t now, uint32_t delay, bool enabled) {
+    beacon_wake_at = now + delay;
+    beacon_wake_enabled = enabled;
+  }
+#endif
   Radio* getProfileRadio() { return _radio; }
   bool isDualRadioActive() const { return _radio->profiles() && _radio->profiles()->enabled(); }
+  bool canIdleDualRadio() const {
+    if (!isDualRadioActive()) return true;
+    uint32_t delay_millis = 0;
+    return radio_available && _radio->getProfileIdleDelay(delay_millis)
+        && delay_millis > 0;
+  }
+  // A timed-sleep caller must use the remaining visit budget, not just the
+  // boolean admission. Single-profile radios retain their existing policy.
+  // Read the sleep clock before calling, cap the caller's absolute deadline,
+  // and fail closed if setup/preemption consumes that budget before sleeping.
+  bool getDualRadioIdleDelay(uint32_t& delay_millis) const {
+    delay_millis = 0;
+    uint32_t profile_millis = 0;
+    if (!isDualRadioActive() || !radio_available
+        || !_radio->getProfileIdleDelay(profile_millis) || !profile_millis) return false;
+    delay_millis = profile_millis;
+    return true;
+  }
 
   Packet* obtainNewPacket();
   void releasePacket(Packet* packet);
@@ -498,7 +715,16 @@ public:
   // Raw radio reads, local sends, and statistics resets do not update this clock.
   uint32_t getLastMeshCoreRecvMillis() const { return last_meshcore_recv_millis; }
   uint16_t getErrFlags() const { return _err_flags; }  // Get error flags
-  bool hasOutbound() const { return outbound != NULL; }
+  bool hasOutbound() const {
+    return outbound != NULL
+#if MESH_ENABLE_TX_BEACONS
+        || hasBeaconRadioFrame()
+#endif
+#if MESH_ENABLE_FOREIGN_RADIO
+        || hasForeignRadioFrame()
+#endif
+        ;
+  }
   bool isCurrentOutbound(const Packet* packet) const { return outbound == packet; }
   void resetStats() {
     n_sent_flood = n_sent_direct = n_recv_flood = n_recv_direct = 0;
@@ -510,6 +736,24 @@ public:
   unsigned long futureMillis(int millis_from_now) const;
 
 private:
+  void retireUnusedCADWait(uint8_t profile);
+  bool queueTransmitCandidate(Packet* packet, uint8_t priority, uint32_t scheduled_for);
+  // Keep the frequently accessed core fields at compact ARM load offsets.
+  AGCResetScheduler agc_reset;
+  uint32_t receive_context_generation = 0;
+  uint32_t profile_cad_busy[2] = {};
+  uint8_t receive_context_profile = 0;
+  bool receive_context_active = false;
+#if MESH_ENABLE_TX_BEACONS
+  static constexpr uint32_t BEACON_START_GUARD_MS = 3600000UL;
+  struct BeaconTransmit;
+  BeaconTransmit* beacon_tx = nullptr;
+  uint32_t beacon_wake_at = 0, beacon_last_start = 0;
+  bool beacon_wake_enabled = false, beacon_has_started = false;
+  bool serviceBeaconRadioFrame();
+  bool checkBeaconRadioSend();
+  void accountBeaconAirtime();
+#endif
 #if MESH_PACKET_LOGGING
   void logPacketLine(const char* direction, const Packet* packet, int len,
                      bool include_rx_metrics, float score,

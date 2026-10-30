@@ -74,6 +74,9 @@ class SerialLogLine {
  public:
   static_assert(CAP >= 3, "SerialLogLine needs room for text and CRLF");
 
+  SerialLogLine() = default;
+  explicit SerialLogLine(char prefix) : _len(1) { _buffer[0] = prefix; }
+
   void printf(const char* format, ...) {
     size_t room = capacity() - _len;
     if (room == 0) {
@@ -138,6 +141,20 @@ class SerialLogLine {
   size_t _len = 0;
   bool _truncated = false;
 };
+
+// Compact RX and TX share the same bounded formatter. Keep one copy even when
+// LTO knows the direction, and avoid a variadic formatter for the single byte.
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, noclone))
+#elif defined(__GNUC__)
+__attribute__((noinline))
+#endif
+inline bool serialLogCompactPacket(Stream& out, char direction,
+                                   const uint8_t* raw, size_t len) {
+  SerialLogLine<> line(direction);
+  line.hex(raw, len);
+  return line.flush(out, false);
+}
 
 inline void serialLogBegin() {
 #if defined(ESP32_PLATFORM) && defined(ARDUINO_USB_CDC_ON_BOOT) && \

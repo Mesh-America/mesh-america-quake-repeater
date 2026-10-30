@@ -123,6 +123,8 @@ def export(port_name):
             terminal.read_prompt()
             for command in ("ver", "get radio", "get tx", "get bluetooth.trace.state",
                             "get bluetooth.trace.stats", "get bluetooth.trace.timing",
+                            "get bluetooth.trace.stack", "get bluetooth.trace.advertiser",
+                            "get bluetooth.trace.identity", "get bluetooth.trace.advertising",
                             "get bluetooth.trace"):
                 result["commands"][command] = terminal.command(command)
             head = values(result["commands"]["get bluetooth.trace"])

@@ -60,6 +60,7 @@ public:
   int8_t _snr;
   uint8_t tx_cr;  // volatile local-only TX coding-rate override; not serialized
   uint8_t flood_retry_policy;  // volatile receive-policy result; not serialized
+  bool forwarded = false;  // local relay ownership, copied into retries; never serialized
   uint32_t radio_generation = 0;
   uint32_t radio_origin_generation = 0;
   uint8_t radio_profile = 0;
@@ -69,6 +70,10 @@ public:
   uint8_t tx_radio = RADIO_TX_AUTO;  // local policy, never sent over the air
   bool radio_reply = false;  // locally generated response, never a forwarded packet
   bool radio_reply_force = false;  // captured reply-only RX-mode override
+#if defined(WITH_UDP_BRIDGE)
+  // Volatile origin marker, copied with radio retries but never serialized.
+  bool udp_bridge_ingress = false;
+#endif
 
   /**
    * \brief calculate the hash of payload + type

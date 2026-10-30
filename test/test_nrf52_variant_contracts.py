@@ -34,6 +34,30 @@ def hex_define(source: str, name: str) -> int:
 
 
 class Nrf52VariantContractsTest(unittest.TestCase):
+    def test_ikoka_handheld_companion_size_matches_its_linked_flash(self) -> None:
+        recipe = (ROOT / "variants/ikoka_handheld_nrf/platformio.ini").read_text()
+        sections = re.findall(r"^\[(env:ikoka_handheld[^\]]*companion_radio_(?:usb|ble))\]$",
+                              recipe, re.MULTILINE)
+        self.assertEqual(len(sections), 4)
+        for name in sections:
+            with self.subTest(target=name):
+                section = ini_section(recipe, name)
+                linker = re.search(r"^board_build\.ldscript\s*=\s*(\S+)$",
+                                   section, re.MULTILINE)
+                size = re.search(r"^board_upload\.maximum_size\s*=\s*(\d+)$",
+                                 section, re.MULTILINE)
+                self.assertIsNotNone(linker)
+                self.assertIsNotNone(size)
+                flash = re.search(
+                    r"FLASH\s*\(rx\)\s*:\s*ORIGIN\s*=\s*(0x[0-9A-Fa-f]+),"
+                    r"\s*LENGTH\s*=\s*(0x[0-9A-Fa-f]+)\s*-\s*(0x[0-9A-Fa-f]+)",
+                    (ROOT / linker.group(1)).read_text())
+                self.assertIsNotNone(flash)
+                origin, end, length_origin = (int(value, 16) for value in flash.groups())
+                self.assertEqual(origin, length_origin)
+                self.assertEqual(end, 0xD4000)
+                self.assertEqual(int(size.group(1)), end - origin)
+
     def test_rak3401_w25q16_handoff_keeps_rak13302_and_gps_isolated(self) -> None:
         shared = (ROOT / "platformio.ini").read_text()
         recipe = (ROOT / "variants/rak3401/platformio.ini").read_text()
@@ -259,18 +283,35 @@ class Nrf52VariantContractsTest(unittest.TestCase):
         self.assertIn("strap INA3221 A0 to SCL for 0x43", recipe)
         self.assertIn("-DTELEM_INA3221_ADDRESS=0x43", recipe)
 
-    def test_rak4631_shared_sensor_rail_stays_enabled(self) -> None:
+    def test_rak4631_shared_sensor_rail_is_owned_by_boot_policy(self) -> None:
         recipe = (ROOT / "variants/rak4631/platformio.ini").read_text()
+        rak3401_recipe = (ROOT / "variants/rak3401/platformio.ini").read_text()
         board = (ROOT / "variants/rak4631/RAK4631Board.cpp").read_text()
-        sensors = (
-            ROOT / "src/helpers/sensors/EnvironmentSensorManager.cpp"
+        sensor_header = (
+            ROOT / "src/helpers/sensors/EnvironmentSensorManager.h"
         ).read_text()
+        policy = (
+            ROOT / "src/helpers/sensors/WisBlockSharedPowerPolicy.h"
+        ).read_text()
+        prefs = (ROOT / "src/helpers/PeripheralModePrefs.h").read_text()
 
-        self.assertRegex(recipe, r"-D\s+FORCE_GPS_ALIVE\b")
+        for current_recipe in (recipe, rak3401_recipe):
+            self.assertNotRegex(current_recipe, r"-D\s+FORCE_GPS_ALIVE\b")
+        self.assertIn("peripherals.mode defaults to gps-only", recipe)
         self.assertIn("pinMode(WB_IO2, OUTPUT)", board)
         self.assertIn("digitalWrite(WB_IO2, HIGH)", board)
-        self.assertIn("setRakGpsControl(ioPin, shared_power_rail, true)", sensors)
-        self.assertIn("setRakGpsControl(ioPin, shared_power_rail, false)", sensors)
+        self.assertIn("WisBlockSharedPowerPolicy _wisblock_power", sensor_header)
+        self.assertIn("_state(DiscoveryActive)", policy)
+        self.assertIn("GpsOnly = 0", policy)
+        self.assertIn("Shared = 1", policy)
+        self.assertIn("#if defined(RAK_3401)", policy)
+        self.assertIn("| RadioPower", policy)
+        self.assertIn("defined(ETHERNET_ENABLED)", policy)
+        self.assertIn("| EthernetPower", policy)
+        self.assertIn("ExternalStorage =", policy)
+        self.assertIn("get peripherals.mode", prefs)
+        self.assertIn("set peripherals.mode", prefs)
+        self.assertIn("saved; reboot to apply", prefs)
 
     def test_rak4631_ethernet_does_not_suppress_shared_rail_gps(self) -> None:
         recipe = (ROOT / "variants/rak4631/platformio.ini").read_text()
@@ -362,17 +403,17 @@ class Nrf52VariantContractsTest(unittest.TestCase):
         self.assertIn(
             "return uart == 1 && gps_detected && gps_serial_transport", sensors
         )
-        self.assertIn(
-            "#if defined(RAK_WISBLOCK_GPS) && defined(FORCE_GPS_ALIVE)",
-            can_yield,
+        shared_rail_guard = (
+            "#if defined(RAK_WISBLOCK_GPS) "
+            "&& !(defined(PIN_GPS_EN) && PIN_GPS_EN >= 0)"
         )
-        forced_rak = can_yield[
-            can_yield.index(
-                "#if defined(RAK_WISBLOCK_GPS) && defined(FORCE_GPS_ALIVE)"
-            ):
-            can_yield.index("#elif defined(RAK_WISBLOCK_GPS)")
+        self.assertIn(shared_rail_guard, can_yield)
+        shared_rak = can_yield[
+            can_yield.index(shared_rail_guard):
+            can_yield.index("#endif", can_yield.index(shared_rail_guard))
         ]
-        self.assertIn("return false;", forced_rak)
+        self.assertIn("return false;", shared_rak)
+        self.assertNotIn("FORCE_GPS_ALIVE", can_yield)
         refusal = block.index(
             "if (blocked && !gpsSerialTransportCanYield(uart)) return false;"
         )
@@ -380,7 +421,7 @@ class Nrf52VariantContractsTest(unittest.TestCase):
             "setGpsTelemetryTransportAvailable(false)",
             "gps_serial_transport_blocked = true",
             "stop_gps()",
-            "Serial1.end()",
+            "stopGpsSerialTransport()",
         ):
             self.assertLess(refusal, block.index(mutation))
         self.assertIn("setGpsTelemetryTransportAvailable(false)", sensors)
@@ -399,7 +440,8 @@ class Nrf52VariantContractsTest(unittest.TestCase):
 
         self.assertIn("bool isBridgeRunning() const override", header)
         self.assertIn("if (isRs232BridgeRunning()) reply_data[8] |= 0x01", implementation)
-        self.assertIn("if (isBridgeRunning()) reply_data[8] |= 0x03", implementation)
+        self.assertIn("if (isEspNowBridgeRunning()) reply_data[8] |= 0x03", implementation)
+        self.assertNotIn("if (isBridgeRunning()) reply_data[8] |= 0x03", implementation)
         boot_failure = implementation[
             implementation.index("if (!bridge || !beginRS232Bridge())"):
             implementation.index("#else", implementation.index(

@@ -17,6 +17,8 @@ public:
 
   #define BATTERY_SAMPLES 8
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
     analogReadResolution(12);
 
@@ -34,8 +36,13 @@ public:
   }
 
 #if defined(P_LORA_TX_LED)
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
   }
 
   void onAfterTransmit() override {

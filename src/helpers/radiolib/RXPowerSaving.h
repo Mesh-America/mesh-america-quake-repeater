@@ -1,5 +1,6 @@
 #pragma once
-#include <Arduino.h>
+#include <stdint.h>
+#include <math.h>
 
 #define RX_POWERSAVING_DEFAULT_RX_US      65625UL
 #define RX_POWERSAVING_DEFAULT_SLEEP_US   60000UL
@@ -345,7 +346,9 @@ inline bool calcRxPowerSavingLevel(uint8_t level, uint8_t sf, float bw, uint8_t 
                             uint32_t transition_us = rxPowerSavingDefaultTransitionUs()) {
   if (rx_us == nullptr || sleep_us == nullptr || level < 1 ||
       level > RX_POWERSAVING_RISKY_WORKING_MAX_LEVEL || sf < 5 || sf > 12 ||
-      !(bw > 0.0f) || bw > 1000000.0f || !isRxPowerSavingPreamble(preamble)) {
+      !(bw > 0.0f) || bw > 1000000.0f || !isRxPowerSavingPreamble(preamble)
+      || !(capture_cost_symbols > 0.0f) || !(capture_cost_symbols < preamble)
+      || transition_us >= RX_POWERSAVING_MAX_PERIOD_US) {
     return false;
   }
   const bool unguarded = isRxPowerSavingUnguardedLevel(level);
@@ -466,10 +469,12 @@ inline bool calcRxPowerSavingLevelAtOrAbove(
     uint8_t requested_level, uint8_t sf, float bw, uint8_t preamble,
     uint32_t transition_us, uint32_t *rx_us, uint32_t *sleep_us,
     uint8_t *effective_level = nullptr,
-    uint8_t *effective_preamble = nullptr) {
+    uint8_t *effective_preamble = nullptr,
+    float capture_cost_symbols = rxPowerSavingDefaultCaptureCost()) {
   if (!rx_us || !sleep_us || requested_level < 1 || requested_level > 10
       || sf < 5 || sf > 12 || !(bw > 0.0f) || bw > 1000000.0f
-      || !isRxPowerSavingPreamble(preamble)) {
+      || !isRxPowerSavingPreamble(preamble) || !(capture_cost_symbols > 0.0f)
+      || !(capture_cost_symbols < preamble) || transition_us >= RX_POWERSAVING_MAX_PERIOD_US) {
     return false;
   }
 
@@ -491,7 +496,7 @@ inline bool calcRxPowerSavingLevelAtOrAbove(
       uint32_t candidate_rx_us = 0, candidate_sleep_us = 0;
       if (!calcRxPowerSavingLevel(level, sf, bw, candidate_preamble,
               &candidate_rx_us, &candidate_sleep_us,
-              rxPowerSavingDefaultCaptureCost(), transition_us)) continue;
+              capture_cost_symbols, transition_us)) continue;
 
       // The catch assumption can be conservative, but the receive timeout
       // must still cover the entire preamble our senders actually transmit.
@@ -544,7 +549,8 @@ inline bool recalcRxPowerSavingFromLevel(uint8_t level, uint8_t sf, float bw, ui
                                          uint32_t *rx_ps_rx_us, uint32_t *rx_ps_sleep_us,
                                          uint8_t *effective_level = nullptr,
                                          uint8_t *effective_preamble = nullptr,
-                                         uint32_t transition_us = rxPowerSavingDefaultTransitionUs()) {
+                                         uint32_t transition_us = rxPowerSavingDefaultTransitionUs(),
+                                         float capture_cost_symbols = rxPowerSavingDefaultCaptureCost()) {
   if (level < 1 || level > 10) {
     return false; // manual: nothing to recompute
   }
@@ -556,7 +562,7 @@ inline bool recalcRxPowerSavingFromLevel(uint8_t level, uint8_t sf, float bw, ui
   uint32_t rx_us, sleep_us;
   if (!calcRxPowerSavingLevelAtOrAbove(
           level, sf, bw, preamble, transition_us, &rx_us, &sleep_us,
-          effective_level, effective_preamble)) {
+          effective_level, effective_preamble, capture_cost_symbols)) {
     return false;
   }
 
@@ -569,3 +575,68 @@ inline bool recalcRxPowerSavingFromLevel(uint8_t level, uint8_t sf, float bw, ui
 
   return true;
 }
+
+// Runtime RXPS control is separate from the persisted role-specific layout.
+class RxPowerSavingArmRetryState {
+  uint8_t _consecutive_failures = 0;
+public:
+  bool canAttempt() const { return _consecutive_failures < RX_POWERSAVING_MAX_CONSEC_ARM_FAILURES; }
+  void recordSuccess() { _consecutive_failures = 0; }
+  void recordFailure() {
+    if (canAttempt()) ++_consecutive_failures;
+  }
+  void reset() { _consecutive_failures = 0; }
+  uint8_t consecutiveFailures() const { return _consecutive_failures; }
+};
+
+struct RxPowerSavingConfig {
+  uint8_t enabled = 0;
+  uint32_t rx_us = RX_POWERSAVING_DEFAULT_RX_US;
+  uint32_t sleep_us = RX_POWERSAVING_DEFAULT_SLEEP_US;
+  uint8_t level = RX_POWERSAVING_BALANCED_LEVEL;
+  uint8_t preamble = RX_POWERSAVING_PROFILE_PREAMBLE;
+
+  constexpr RxPowerSavingConfig() = default;
+  constexpr RxPowerSavingConfig(uint8_t enabled_value, uint32_t rx_value,
+      uint32_t sleep_value, uint8_t level_value, uint8_t preamble_value)
+      : enabled(enabled_value), rx_us(rx_value), sleep_us(sleep_value),
+        level(level_value), preamble(preamble_value) { }
+};
+
+struct RxPowerSavingStatus {
+  bool supported = false;
+  bool armed = false;
+  int16_t last_error = 0;
+  uint32_t arm_failures = 0;
+  uint32_t effective_rx_us = 0;
+  uint32_t effective_sleep_us = 0;
+};
+
+class RxPowerSavingControl {
+protected:
+  ~RxPowerSavingControl() = default;
+public:
+  virtual bool setRxPowerSaving(bool enabled, uint32_t rx_us, uint32_t sleep_us) {
+    (void)rx_us; (void)sleep_us;
+    return !enabled;
+  }
+  virtual RxPowerSavingStatus getRxPowerSavingStatus() const { return {}; }
+  virtual void setRxPowerSavingConfigError(bool invalid) { (void)invalid; }
+  virtual float rxPowerSavingCaptureCostSymbols() const { return rxPowerSavingDefaultCaptureCost(); }
+  virtual uint32_t rxPowerSavingTransitionUs() const { return rxPowerSavingDefaultTransitionUs(); }
+};
+
+inline uint8_t rxPowerSavingPreambleForSF(uint8_t sf) { return sf <= 8 ? 32 : 16; }
+inline bool isRxPowerSavingNumeric(const char* value) { return isNumeric(value); }
+inline float rxPowerSavingCaptureCost(const RxPowerSavingControl* control) {
+  return control ? control->rxPowerSavingCaptureCostSymbols() : rxPowerSavingDefaultCaptureCost();
+}
+inline uint32_t rxPowerSavingTransition(const RxPowerSavingControl* control) {
+  return control ? control->rxPowerSavingTransitionUs() : rxPowerSavingDefaultTransitionUs();
+}
+bool normalizeRxPowerSavingConfig(RxPowerSavingConfig* config, uint8_t sf, float bw,
+    float capture_cost_symbols = rxPowerSavingDefaultCaptureCost(),
+    uint32_t transition_us = rxPowerSavingDefaultTransitionUs());
+bool applyRxPowerSavingConfig(RxPowerSavingConfig* config, uint8_t sf, float bw,
+    RxPowerSavingControl* control);
+static constexpr int16_t RX_POWERSAVING_ERR_TIMING = -10001;

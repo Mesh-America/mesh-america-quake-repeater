@@ -20,6 +20,11 @@ class CompanionAccessPointOwnershipTest(unittest.TestCase):
         main = (ROOT / "examples/companion_radio/main.cpp").read_text(encoding="ascii")
         reload = method(main, "  static void serviceCompanionWiFiCredentialReload(")
         start_wifi = method(main, "  static void startCompanionWiFi(")
+        power_guards = "\n".join(method(main, signature) for signature in (
+            "  static bool companionWiFiBackgroundSuspended(",
+            "  static bool companionWiFiAutomaticRecoveryAllowed(",
+        ))
+        auto_webconfig = method(main, "  static void startCompanionWiFiAutoWebConfig(")
         start = main.index("  const unsigned long wifi_now = millis();")
         end = main.index("#ifdef WITH_MQTT_BRIDGE", start)
         station_loop = main[start:end]
@@ -27,6 +32,8 @@ class CompanionAccessPointOwnershipTest(unittest.TestCase):
         guard = method(policy, "inline bool stationMutationAllowed(")
         fixture = (ROOT / "test/fixtures/companion_ap_ownership.cpp").read_text(encoding="ascii")
         return (fixture.replace("@STATION_GUARD@", guard).replace("@RELOAD@", reload)
+                .replace("@POWER_GUARDS@", power_guards)
+                .replace("@AUTO_WEBCONFIG@", auto_webconfig)
                 .replace("@START_WIFI@", start_wifi).replace("@STATION_LOOP@", station_loop))
 
     def run_fixture(self, scenario, source=None, webconfig=True):
@@ -59,10 +66,22 @@ class CompanionAccessPointOwnershipTest(unittest.TestCase):
         self.run_fixture("start_wifi")
         self.run_fixture("start_wifi", webconfig=False)
 
+    def test_failed_transport_registration_does_not_start_unserviced_socket(self):
+        self.run_fixture("registration")
+        self.run_fixture("registration", webconfig=False)
+
     def test_deliberate_recovery_setup_handoff_remains_available(self):
         self.run_fixture("setup_handoff")
         self.run_fixture("setup_handoff", webconfig=False)
         self.run_fixture("unrelated_setup")
+
+    def test_managed_suspension_retains_reload_and_wifi_start_intent(self):
+        self.run_fixture("suspended")
+        self.run_fixture("suspended", webconfig=False)
+
+    def test_foreground_and_ota_holds_do_not_bypass_ap_ownership(self):
+        self.run_fixture("suspended_ap")
+        self.run_fixture("suspended_ap", webconfig=False)
 
     def test_reverted_retry_guard_removes_the_ota_ap(self):
         source = self.fixture().replace(

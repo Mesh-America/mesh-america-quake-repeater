@@ -7,6 +7,8 @@
 #include "helpers/ESPNowRawFragmentation.h"
 #include "helpers/bridges/BridgeBase.h"
 #include "helpers/bridges/ESPNowBridgeFormat.h"
+#include "helpers/bridges/ESPNowBridgeDiagnostics.h"
+#include <atomic>
 
 #ifdef WITH_ESPNOW_BRIDGE
 
@@ -102,10 +104,15 @@ private:
   // instead of transmitting an orphan fragment.
   struct QueuedTransmit {
     mesh::espnow::ESPNowRawFrames frames;
-    mesh::Packet packet;
+    SimpleMeshTables::SeenKey seen_key;
     uint8_t next_frame;
     bool started;
+    uint8_t start_retries;
+    bool diagnostic;
   };
+  static_assert(sizeof(QueuedTransmit) <= sizeof(mesh::espnow::ESPNowRawFrames) +
+                    sizeof(SimpleMeshTables::SeenKey) + 8,
+                "ESP-NOW TX must retain encoded frames without a second packet copy");
   QueuedTransmit _tx_queue[TX_QUEUE_DEPTH];
   portMUX_TYPE _tx_mux = portMUX_INITIALIZER_UNLOCKED;
   volatile uint8_t _tx_head;
@@ -116,6 +123,11 @@ private:
   volatile int _tx_callback_status;
   volatile uint32_t _tx_dropped;
   uint32_t _tx_dropped_reported;
+  uint32_t _tx_started_at = 0, _tx_retry_at = 0;
+  bool _sdk_teardown_failed = false;
+  static constexpr uint32_t TX_CALLBACK_TIMEOUT_MS = 1000;
+  static constexpr uint32_t TX_RETRY_DELAY_MS = 20;
+  static constexpr uint8_t TX_MAX_START_RETRIES = 3;
 
   /** Raw-mode fragment assemblies, keyed by source MAC. */
   mesh::espnow::ESPNowRawReassembler _raw_reassembler;
@@ -123,6 +135,17 @@ private:
   // Snapshotted by begin() and immutable until end(), so callbacks and sends
   // never observe a partially applied preference change.
   uint8_t _active_format;
+  mesh::bridge::diag::Stats _stats;
+  std::atomic<bool> _debug_dirty{true};
+  uint32_t _debug_last_at = 0;
+  bool _debug_was_enabled = false;
+
+  mesh::bridge::diag::Stats snapshotStats();
+  void noteRx(uint32_t mesh::bridge::diag::RxStats::* field);
+  void noteTx(uint32_t mesh::bridge::diag::TxStats::* field);
+  void recordError(mesh::bridge::diag::Stage stage, int32_t code);
+  void emitDebug();
+  void onIngressResult(IngressResult result) override;
 
   /**
    * Performs XOR encryption/decryption of data
@@ -138,7 +161,7 @@ private:
   bool xorCrypt(uint8_t *data, size_t len);
 
   /** Parse and queue one serialized MeshCore packet. */
-  void receiveMeshPacket(const uint8_t *data, size_t len);
+  void receiveMeshPacket(mesh::Packet* packet, const uint8_t *data, size_t len);
 
   /**
    * ESP-NOW receive callback
@@ -151,12 +174,12 @@ private:
   void queueReceivedFrame(const uint8_t *mac, const uint8_t *data, int len);
 
   /** Parse a queued frame from loop(), never from the WiFi callback. */
-  void processReceivedFrame(const uint8_t *mac, const uint8_t *data,
-                            size_t len);
+  bool processReceivedFrame(mesh::Packet* packet, const uint8_t *mac,
+                            const uint8_t *data, size_t len);
 
   /** Atomically append one logical packet's one or two transport frames. */
   bool queueTransmitFrames(const mesh::espnow::ESPNowRawFrames& frames,
-                           const mesh::Packet& packet);
+                           const mesh::Packet& packet, bool diagnostic = false);
 
   /** Submit at most one queued frame after the previous send callback. */
   void pumpTransmitQueue();
@@ -221,6 +244,13 @@ public:
    * @param packet The mesh packet to transmit
    */
   void sendPacket(mesh::Packet *packet) override;
+
+  // Runtime diagnostics work in ordinary firmware, without BRIDGE_DEBUG.
+  // All output is bounded and generated on the main loop, never a callback.
+  void formatStatus(char* reply, size_t reply_size);
+  void formatStats(const char* page, char* reply, size_t reply_size);
+  bool sendTest(uint32_t nonce);
+  void resetStats();
 };
 
 #endif

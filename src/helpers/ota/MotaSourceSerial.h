@@ -24,6 +24,10 @@ public:
   uint8_t count() override;
   bool    describe(uint8_t idx, MotaDesc& out) override;
   bool    read(uint8_t idx, uint32_t off, uint8_t* buf, uint32_t len) override;
+#if OTA_BOUNDED_SOURCE_PROOFS
+  uint16_t read_quantum() const override { return responsePayloadCapacity(); }
+  bool read_metadata(uint8_t idx, uint32_t off, uint8_t* buf, uint32_t len) override;
+#endif
   bool    read_deflated_block(uint8_t idx, uint16_t block, uint8_t* buf,
                               uint16_t cap, uint16_t* len) override;
 
@@ -38,7 +42,14 @@ public:
   bool hasPendingResponse() const { return _response_pending; }
   void resetSessionState();
 
+protected:
+  // Full framed response capacity, including magic/op/status/checksum. The
+  // default preserves USB/UART/TCP geometry. A BLE source can override this
+  // using its current ATT MTU without storing another buffer or callback.
+  virtual uint16_t responseFrameCapacity() const { return 197; }
+
 private:
+  uint16_t responsePayloadCapacity() const;
   // Send a request (op+args) and read its response header; on OK, `payload` (if non-null) receives
   // `payload_len` bytes. Returns true iff a well-formed OK response for `op` arrived in time.
   bool txn(uint8_t op, const uint8_t* args, uint8_t arglen, uint8_t* payload, uint32_t payload_len);

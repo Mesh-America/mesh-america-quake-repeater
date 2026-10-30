@@ -1,10 +1,14 @@
 #pragma once
 
 #include <RadioLib.h>
+#include "RadioRegulatorState.h"
 #include "MeshCore.h"
 #include "RXPowerSaving.h"
 #include "LR1110RxRecovery.h"
 #include "LR1110ProfileSwitchState.h"
+#include <helpers/RadioSwitchTuning.h>
+#include "LR11x0MorseRfSwitch.h"
+#include "../MorseRx.h"
 
 #ifndef MC_LR1110_FAST_PROFILE_SWITCH
 // All MeshCore LR1110 targets use the checked FS-mode continuous-RX retune.
@@ -17,23 +21,78 @@
 #endif
 
 class CustomLR1110 : public LR1110 {
+  // Existing LR11xx recipes already require the fitted DC/DC network.
+  mesh::power::RadioRegulatorState _regulator{mesh::power::REGULATOR_DCDC | mesh::power::REGULATOR_LDO,
+      mesh::power::RegulatorMode::Dcdc};
   uint32_t _preambleMillis = 66;
   uint32_t _maxPayloadMillis = 3934;
   uint32_t _activityAt = 0;
   bool _headerSeen = false;
   bool _rx_boosted = false;
+  bool _lfClockRestoreNeeded = false;
   LR1110ProfileSwitchState _profileSwitch{MC_LR1110_FAST_PROFILE_SWITCH != 0};
+  uint8_t _profileSwitchFeatures = profileSwitchCapabilities();
   bool _profileStandbyWarm = false;
   bool _profilePacketDirty = false;
   uint32_t _profileFastResumes = 0;
+  LR11x0MorseRfSwitch _morse_rf_switch;
 
   public:
     CustomLR1110(Module *mod) : LR1110(mod) { }
 
-    void setProfileSwitchOptimization(bool enabled) {
-      _profileSwitch.enabled = enabled;
+    uint8_t regulatorModes() const { return _regulator.modes(); }
+    mesh::power::RegulatorMode defaultRegulatorMode() const { return _regulator.defaultMode(); }
+    bool configureBootRegulator(mesh::power::RegulatorMode mode) { return _regulator.configureBoot(mode); }
+    mesh::power::RegulatorMode activeRegulatorMode() const { return _regulator.activeMode(); }
+
+    void setRfSwitchTable(const uint32_t (&pins)[Module::RFSWITCH_MAX_PINS],
+                          const Module::RfSwitchMode_t table[]) {
+      _morse_rf_switch.capture(this->mod, pins, table);
+      LR1110::setRfSwitchTable(pins, table);
+    }
+
+    int16_t beginMorseReceive(float frequency_mhz) {
+      const auto regulator = _regulator.beginInitialization();
       _profileSwitch.invalidate();
       _profilePacketDirty = false;
+      int16_t status = LR1110::beginGFSK(frequency_mhz,
+          mesh::MorseRx::ReceiverBitRateKbps, 0.6f, 4.8f, 2, 16, tcxoVoltage);
+      if (status == RADIOLIB_ERR_NONE) status = applyMeshCoreTcxoDelay();
+      if (status == RADIOLIB_ERR_NONE) status = regulator == mesh::power::RegulatorMode::Ldo
+          ? setRegulatorLDO() : setRegulatorDCDC();
+      if (status == RADIOLIB_ERR_NONE) status = _morse_rf_switch.restore(
+          [this](uint8_t enable, const uint8_t* modes) {
+            return setDioAsRfSwitch(enable, modes[0], modes[1], modes[2],
+                modes[3], modes[4], modes[5], modes[6]);
+          });
+      if (status == RADIOLIB_ERR_NONE) status = LR1110::setRxBoostedGainMode(_rx_boosted);
+      if (status == RADIOLIB_ERR_NONE) {
+        // The LR11xx public sync-word setter rejects length zero. Stage the
+        // native no-lock packet tuple and commit it through checked setCRC.
+        syncWordLength = preambleDetLength = 0;
+        status = LR1110::setCRC(0);
+      }
+      // Infinite continuous RX samples envelope power independently of the
+      // FSK packet detector; no direct-data pin or TX/PA activation is used.
+      return _regulator.finishInitialization(status);
+    }
+
+    uint8_t profileSwitchCapabilities() const {
+      return MC_LR1110_FAST_PROFILE_SWITCH
+          ? mesh::RadioSwitchTuning::Warm | mesh::RadioSwitchTuning::Fs
+              | mesh::RadioSwitchTuning::Packet | mesh::RadioSwitchTuning::Modem
+              | mesh::RadioSwitchTuning::Batch
+          : 0;
+    }
+    uint8_t getProfileSwitchFeatures() const { return _profileSwitchFeatures; }
+    void setProfileSwitchFeatures(uint8_t features) {
+      _profileSwitchFeatures = features & profileSwitchCapabilities();
+      _profileSwitch.enabled = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Warm) != 0;
+      _profileSwitch.invalidate();
+      _profilePacketDirty = false;
+    }
+    void setProfileSwitchOptimization(bool enabled) {
+      setProfileSwitchFeatures(enabled ? profileSwitchCapabilities() : 0);
     }
     void setProfileStandbyWarm(bool enabled) {
       _profileStandbyWarm = enabled;
@@ -75,8 +134,8 @@ class CustomLR1110 : public LR1110 {
       const bool warm = _profileSwitch.active && _profileSwitch.rxValid;
       if (!warm) _profileSwitch.invalidate();
       // RadioLib 7.7.1 defines STANDBY_XOSC as 0, the same as STANDBY_RC.
-      // The LR1110 command's XOSC selector is 1 (Semtech UM §2.1.1).
-      bool useFs = warm;
+      // The LR1110 command's XOSC selector is 1 (Semtech UM section 2.1.1).
+      bool useFs = warm && (_profileSwitchFeatures & mesh::RadioSwitchTuning::Fs);
 #ifdef MC_LR1110_HIL
       useFs = useFs && hilUseFsOnRetune;
 #endif
@@ -139,6 +198,39 @@ class CustomLR1110 : public LR1110 {
       return LR1110::setCodingRate(cr, longInterleave);
     }
 
+    // Ordinary packet setters revoke the acknowledged continuous-RX tuple,
+    // including failed writes. A later hop must rebuild normal RX first.
+    int16_t setCRC(uint8_t len, uint32_t initial = 0x00001D0FUL,
+                   uint32_t polynomial = 0x00001021UL, bool inverted = true) {
+      _profileSwitch.invalidate();
+      return LR1110::setCRC(len, initial, polynomial, inverted);
+    }
+    int16_t implicitHeader(size_t len) {
+      _profileSwitch.invalidate();
+      return LR1110::implicitHeader(len);
+    }
+    int16_t explicitHeader() {
+      _profileSwitch.invalidate();
+      return LR1110::explicitHeader();
+    }
+    int16_t invertIQ(bool enabled) override {
+      _profileSwitch.invalidate();
+      return LR1110::invertIQ(enabled);
+    }
+
+    // Protocol changes are outside the acknowledged fast-RX context. Use
+    // checked RadioLib setters so cached packet fields and hardware agree,
+    // including after a partial failure and a later MeshCore restoration.
+    int16_t setProfileProtocol(uint8_t syncWord) {
+      _profileSwitch.invalidate();
+      _profilePacketDirty = false;
+      int16_t status = LR1110::setSyncWord(syncWord);
+      if (status == RADIOLIB_ERR_NONE) status = LR1110::setCRC(2);
+      if (status == RADIOLIB_ERR_NONE) status = LR1110::explicitHeader();
+      if (status == RADIOLIB_ERR_NONE) status = LR1110::invertIQ(false);
+      return status;
+    }
+
     // A single acknowledged SetModulationParams replaces three RadioLib
     // setters. Keep RadioLib's cached tuple and automatic LDRO calculation.
     int16_t setLoRaModulationParams(float bw, uint8_t sf, uint8_t cr) {
@@ -150,7 +242,8 @@ class CustomLR1110 : public LR1110 {
       else if (fabsf(bw - 250.0f) < 0.01f) bwCode = RADIOLIB_LR11X0_LORA_BW_250_0;
       else if (fabsf(bw - 500.0f) < 0.01f) bwCode = RADIOLIB_LR11X0_LORA_BW_500_0;
       else return RADIOLIB_ERR_INVALID_BANDWIDTH;
-      if (!_profileSwitch.canResumeFast()) {
+      if (!(_profileSwitchFeatures & mesh::RadioSwitchTuning::Modem)
+          || !_profileSwitch.canResumeFast()) {
         uint8_t type = RADIOLIB_LR11X0_PACKET_TYPE_NONE;
         const int16_t rc = getPacketType(&type);
         if (rc != RADIOLIB_ERR_NONE) return rc;
@@ -160,7 +253,8 @@ class CustomLR1110 : public LR1110 {
           ? (float(uint32_t(1) << sf) / bw >= 16.0f
                 ? RADIOLIB_LR11X0_LORA_LDRO_ENABLED : RADIOLIB_LR11X0_LORA_LDRO_DISABLED)
           : ldrOptimize;
-      const bool unchanged = _profileSwitch.matchesModulation(sf, bwCode, cr - 4, effectiveLdro);
+      const bool unchanged = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Batch)
+          && _profileSwitch.matchesModulation(sf, bwCode, cr - 4, effectiveLdro);
       const auto oldSf = spreadingFactor, oldBw = bandwidth, oldCr = codingRate, oldLdro = ldrOptimize;
       const auto oldBwKhz = bandwidthKhz;
       spreadingFactor = sf;
@@ -187,14 +281,16 @@ class CustomLR1110 : public LR1110 {
     int16_t begin(float freq = 434.0, float bw = 125.0, uint8_t sf = 9, uint8_t cr = 7,
                   uint8_t syncWord = RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE, int8_t power = 10,
                   uint16_t preambleLength = 8, float tcxoVoltage = 1.6) {
+      const auto regulator = _regulator.beginInitialization();
       _profileSwitch.invalidate();
       _profilePacketDirty = false;
       int16_t state = LR1110::begin(freq, bw, sf, cr, syncWord, power, preambleLength,
                                     tcxoVoltage);
       if (state == RADIOLIB_ERR_NONE) state = applyMeshCoreTcxoDelay();
-      // RadioLib begin() defaults to LDO; use the LR1110 DC/DC regulator.
-      if (state == RADIOLIB_ERR_NONE) state = setRegulatorDCDC();
-      return state;
+      // Native begin() resets to LDO; restore the boot choice on every reset.
+      if (state == RADIOLIB_ERR_NONE) state = regulator == mesh::power::RegulatorMode::Ldo
+          ? setRegulatorLDO() : setRegulatorDCDC();
+      return _regulator.finishInitialization(state);
     }
 
     int16_t applyMeshCoreTcxoDelay() {
@@ -286,10 +382,22 @@ class CustomLR1110 : public LR1110 {
     }
 
     float getFreqMHz() const { return freqMHz; }
+    uint32_t getTcxoDelay() const { return tcxoDelay; }
+
+    // DIO11 also carries RadioLib's IRQ2, so retain the LF RC clock.
+    bool needsLfClockRestore() const { return _lfClockRestoreNeeded; }
+    int16_t restoreLfClock() {
+      if (!_lfClockRestoreNeeded) return RADIOLIB_ERR_NONE;
+      const int16_t state = configLfClock(
+          RADIOLIB_LR11X0_LF_BUSY_RELEASE_DISABLED | RADIOLIB_LR11X0_LF_CLK_RC);
+      if (state == RADIOLIB_ERR_NONE) _lfClockRestoreNeeded = false;
+      return state;
+    }
 
     int16_t startReceiveDutyCycle(uint32_t rxPeriod, uint32_t sleepPeriod,
                                   RadioLibIrqFlags_t irqFlags = RADIOLIB_IRQ_RX_DEFAULT_FLAGS,
-                                  RadioLibIrqFlags_t irqMask = RADIOLIB_IRQ_RX_DEFAULT_MASK) {
+                                  RadioLibIrqFlags_t irqMask = RADIOLIB_IRQ_RX_DEFAULT_MASK,
+                                  uint32_t* effectiveRxPeriod = nullptr) {
       uint32_t symbolPeriod = (uint32_t)(((1000.0f * (float)(1UL << this->spreadingFactor)) /
                                           this->bandwidthKhz) + 0.999f);
       uint32_t transitionTime = this->tcxoDelay + 1000;
@@ -307,6 +415,7 @@ class CustomLR1110 : public LR1110 {
       if (extendedPeriod < requiredExtendedPeriod) {
         rxPeriod = (uint32_t)((requiredExtendedPeriod - programmedSleepPeriod + 1ULL) / 2ULL);
       }
+      if (effectiveRxPeriod) *effectiveRxPeriod = rxPeriod;
 
       uint32_t rxPeriodRaw = (uint32_t)(((uint64_t)rxPeriod * 32768UL) / 1000000UL);
       uint32_t sleepPeriodRaw =
@@ -324,6 +433,7 @@ class CustomLR1110 : public LR1110 {
       // before SetRxDutyCycle. RadioLib does neither in its LoRa RXPS path.
       int16_t state = standby(RADIOLIB_LR11X0_STANDBY_RC);
       RADIOLIB_ASSERT(state);
+      _lfClockRestoreNeeded = true;
       state = configLfClock(
           RADIOLIB_LR11X0_LF_CLK_RC | RADIOLIB_LR11X0_LF_BUSY_RELEASE_ENABLED);
       RADIOLIB_ASSERT(state);
@@ -341,7 +451,12 @@ class CustomLR1110 : public LR1110 {
 
       // Send the already converted values. RadioLib 7.7.1 converts them again
       // with 32-bit arithmetic, which overflows for periods above about 131 ms.
-      return this->setRxDutyCycle(rxPeriodRaw, sleepPeriodRaw, RADIOLIB_LR11X0_RX_DUTY_CYCLE_MODE_RX);
+      state = this->setRxDutyCycle(rxPeriodRaw, sleepPeriodRaw, RADIOLIB_LR11X0_RX_DUTY_CYCLE_MODE_RX);
+      if (state == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
+      return state;
     }
 
     int16_t setRxBoostedGainMode(bool en) {
@@ -383,7 +498,8 @@ class CustomLR1110 : public LR1110 {
         fastClearCycles += DWT->CYCCNT - segment;
         segment = DWT->CYCCNT;
 #endif
-        if (rc == RADIOLIB_ERR_NONE && _profilePacketDirty) {
+        if (rc == RADIOLIB_ERR_NONE && (_profilePacketDirty
+            || !(_profileSwitchFeatures & mesh::RadioSwitchTuning::Packet))) {
           rc = setPacketParamsLoRa(preambleLengthLoRa, headerType,
               RADIOLIB_LR11X0_MAX_PACKET_LENGTH, crcTypeLoRa, invertIQEnabled);
         }
@@ -400,7 +516,11 @@ class CustomLR1110 : public LR1110 {
         fastSetRxCycles += DWT->CYCCNT - segment;
 #endif
         stagedMode = RADIOLIB_RADIO_MODE_NONE;
-        if (rc == RADIOLIB_ERR_NONE) ++_profileFastResumes;
+        if (rc == RADIOLIB_ERR_NONE) {
+          ++_profileFastResumes;
+          _activityAt = 0;
+          _headerSeen = false;
+        }
         if (rc == RADIOLIB_ERR_NONE) _profilePacketDirty = false;
         _profileSwitch.rxResult(rc, true);
         return rc;
@@ -411,6 +531,10 @@ class CustomLR1110 : public LR1110 {
           RADIOLIB_LR11X0_RX_TIMEOUT_INF,
           RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
           RADIOLIB_IRQ_RX_DEFAULT_MASK | (1UL << RADIOLIB_IRQ_HEADER_ERR), 0);
+      if (rc == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
       _profileSwitch.rxResult(rc, true);
       if (rc == RADIOLIB_ERR_NONE) _profilePacketDirty = false;
       return rc;

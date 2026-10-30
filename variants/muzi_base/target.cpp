@@ -1,11 +1,13 @@
 #include <Arduino.h>
 #include <nrf_gpio.h>
 #include "target.h"
+#include <helpers/radiolib/TunableRadioHal.h>
 #include "variant.h"
 
 MuziBaseBoard board;
 
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
+static TunableRadioHal radio_hal(SPI);
+RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 
 WRAPPER_CLASS radio_driver(radio, board);
 
@@ -38,11 +40,19 @@ static void muziPowerOff() {
 
 bool MuziBaseSensorManager::begin() {
   pwr_btn.begin();
+#if ENV_INCLUDE_GPS
+  // The accessory's mode-switch connector is open on a bare Base. A fixed
+  // pulldown prevents that open input from requesting GPS or claiming it is
+  // present; the shared manager still requires real UART discovery.
+  pinMode(PIN_GPS_SWITCH, INPUT_PULLDOWN);
+  _last_gps_sw = digitalRead(PIN_GPS_SWITCH);   // initial gps state from the switch
+#endif
   bool ok = EnvironmentSensorManager::begin();
 #if ENV_INCLUDE_GPS
-  pinMode(PIN_GPS_SWITCH, INPUT);
-  _last_gps_sw = digitalRead(PIN_GPS_SWITCH);   // initial gps state from the switch
-  if (_last_gps_sw == HIGH) start_gps(); else stop_gps();
+  setSettingValue("gps", _last_gps_sw == HIGH ? "1" : "0");
+  if (gps_detected) {
+    if (_last_gps_sw == HIGH) start_gps(); else stop_gps();
+  }
 #endif
   return ok;
 }
@@ -62,7 +72,12 @@ void MuziBaseSensorManager::loop() {
     int sw = digitalRead(PIN_GPS_SWITCH);
     if (sw != _last_gps_sw) {
       _last_gps_sw = sw;
-      if (sw == HIGH) start_gps(); else stop_gps();
+      setSettingValue("gps", sw == HIGH ? "1" : "0");
+      // An absent optional receiver must never become active merely because
+      // a switch moved. Discovery owns the pending UART/power transition.
+      if (gps_detected) {
+        if (sw == HIGH) start_gps(); else stop_gps();
+      }
     }
   }
 #endif
@@ -131,6 +146,9 @@ bool radio_init() {
   #ifdef RX_BOOSTED_GAIN
   radio.setRxBoostedGainMode(RX_BOOSTED_GAIN);
   #endif
+
+  // Preserve this board's TCXO and DIO RF routing during full modem recovery.
+  radio_driver.setDeepInitCallback(radio_init);
 
   return true;  // success
 #else  // USE_SX1262

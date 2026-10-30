@@ -1,4 +1,5 @@
 #include "UITask.h"
+#include <helpers/MorseLoopPolicy.h>
 #include "target.h"
 #include <Arduino.h>
 #include <helpers/CommonCLI.h>
@@ -77,10 +78,25 @@ static const uint8_t meshcore_logo [] PROGMEM = {
     0xe3, 0xe3, 0x8f, 0xff, 0x1f, 0xfc, 0x3c, 0x0e, 0x1f, 0xf8, 0xff, 0xf8, 0x70, 0x3c, 0x7f, 0xf8, 
 };
 
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) && HELTEC_TFT_RUNTIME_ROTATION == 1
+#include <helpers/ui/DisplayRotationSettings.h>
+
+void UITask::applyDisplayRotation() {
+  if (_display == nullptr || !_display->supportsRotation()) return;
+  const uint16_t degrees = mesh::ui::displayRotationDegrees();
+  if (degrees == _rotation_seen || !_display->setRotationDegrees(degrees)) return;
+  _rotation_seen = degrees;
+  _last_refresh = uint32_t(millis()) - 1000u;
+}
+#endif
+
 void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* firmware_version) {
   _prevBtnState = HIGH;
   _node_prefs = node_prefs;
   resetRadioProfileDisplayPage();
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) && HELTEC_TFT_RUNTIME_ROTATION == 1
+  applyDisplayRotation();
+#endif
   _display->servicePower(board.isExternalPowered() || board.isUsbHostConnected());
 #if defined(PIN_USER_BTN) && defined(DISPLAY_CLASS) \
     && defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
@@ -88,17 +104,23 @@ void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* fi
   user_btn.begin();
 #endif
 
-  // strip off dash and commit hash by changing dash to null terminator
+  // strip off dash and commit hash without allocating a mutable version copy
   // e.g: v1.2.3-abcdef -> v1.2.3
-  char *version = strdup(firmware_version);
-  char *dash = strchr(version, '-');
-  if(dash){
-    *dash = 0;
+  size_t version_len = 0;
+  while (version_len < sizeof(_version_info) - 1
+      && firmware_version[version_len] && firmware_version[version_len] != '-') {
+    ++version_len;
   }
 
   // v1.2.3 (1 Jan 2025)
-  snprintf(_version_info, sizeof(_version_info), "%s (%s)", version, build_date);
-  free(version);
+  snprintf(_version_info, sizeof(_version_info), "%.*s (%s)",
+           static_cast<int>(version_len), firmware_version, build_date);
+
+  // Make the first read/frame immediately due, including begin() after wrap.
+  const uint32_t now = millis();
+  _last_read = now - 200u;
+  _last_refresh = now - 1000u;
+  _startup_complete = now >= BOOT_SCREEN_MILLIS;
 }
 
 void UITask::resetRadioProfileDisplayPage() {
@@ -122,7 +144,7 @@ bool UITask::showingSecondaryRadioProfilePage() {
 
 void UITask::renderCurrScreen() {
   char tmp[80];
-  if (millis() < BOOT_SCREEN_MILLIS) { // boot screen
+  if (!_startup_complete && millis() < BOOT_SCREEN_MILLIS) { // boot screen
     // meshcore logo
     _display->setColor(UIColor::corp_blue);
     int logoWidth = 128;
@@ -204,9 +226,17 @@ void UITask::renderCurrScreen() {
 }
 
 void UITask::loop() {
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) && HELTEC_TFT_RUNTIME_ROTATION == 1
+  applyDisplayRotation();
+#endif
+  // This UI's splash is relative to boot, not to begin(). Retire it once.
+  if (!_startup_complete && millis() >= BOOT_SCREEN_MILLIS) {
+    _startup_complete = true;
+  }
+  const bool morse_timing = mesh::morseTimingActive(activeSensorMesh().getProfileRadio());
   if (_display->servicePower(board.isExternalPowered() || board.isUsbHostConnected())) {
     resetRadioProfileDisplayPage();
-    _next_refresh = 0;
+    _last_refresh = millis() - 1000u;
   }
 #if defined(PIN_USER_BTN) && defined(DISPLAY_CLASS) \
     && defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
@@ -216,12 +246,12 @@ void UITask::loop() {
     if (!_display->isOn()) {
       _display->wake(mesh::ui::DisplayWake::Button);
       resetRadioProfileDisplayPage();
-      _next_refresh = 0;
+      _last_refresh = millis() - 1000u;
     }
     _display->wake(mesh::ui::DisplayWake::Button);
   }
 #elif defined(PIN_USER_BTN)
-  if (millis() >= _next_read) {
+  if (static_cast<uint32_t>(millis() - _last_read) >= 200u) {
     int btnState = digitalRead(PIN_USER_BTN);
     if (btnState != _prevBtnState) {
       if (btnState == USER_BTN_PRESSED) {  // pressed?
@@ -235,17 +265,17 @@ void UITask::loop() {
       }
       _prevBtnState = btnState;
     }
-    _next_read = millis() + 200;  // 5 reads per second
+    _last_read = millis();  // 5 reads per second, timed from completed I/O
   }
 #endif
 
-  if (_display->isOn()) {
-    if (millis() >= _next_refresh) {
+  if (!morse_timing && _display->isOn()) {
+    if (static_cast<uint32_t>(millis() - _last_refresh) >= 1000u) {
       _display->startFrame();
       renderCurrScreen();
       _display->endFrame();
 
-      _next_refresh = millis() + 1000;   // refresh every second
+      _last_refresh = millis();   // refresh every second, after the frame ends
     }
 #if MOMENTARY_BUTTON_WAKE_HOLD_MS > 0 && defined(PIN_USER_BTN)
     if (user_btn.isWakeHoldActive()) _display->wake(mesh::ui::DisplayWake::Button);

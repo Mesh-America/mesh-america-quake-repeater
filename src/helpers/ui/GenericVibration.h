@@ -25,9 +25,13 @@ public:
   void loop();        // non-blocking timer handling
   bool isVibrating(); // returns true if currently vibrating
   void stop();        // stop vibration immediately
+  void pulse(bool on);
+  void quiet(bool q) { if (q) stop(); _quiet = q; }
+  bool isQuiet() const { return _quiet; }
 
 private:
-  unsigned long duration;
+  unsigned long duration = 0;
+  bool _quiet = false;
 };
 
 #endif // ifdef PIN_VIBRATION

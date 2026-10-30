@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "target.h"
+#include <helpers/radiolib/SX126xBufferedRadioHal.h>
 
 TBeamBoard board;
 
@@ -10,7 +11,8 @@ TBeamBoard board;
 
 static SPIClass spi;
 
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi);
+static SX126xBufferedRadioHal radio_hal(spi);
+RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 
 WRAPPER_CLASS radio_driver(radio, board);
 

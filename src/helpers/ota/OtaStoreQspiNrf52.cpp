@@ -4,6 +4,7 @@
 
 #include "OtaByteIO.h"
 #include "OtaFlashLayout_nrf52.h"
+#include <helpers/nrf52/QspiFlashWake.h>
 #include "hal/nrf_gpio.h"
 #include "hal/nrf_qspi.h"
 #include "nrf.h"
@@ -13,6 +14,12 @@
   #include <SPI.h>
 #endif
 #include <string.h>
+#if defined(RAK4631_COMBINED_ETHERNET) || defined(OTA_RAK15002_SD_STORE)
+  #include "../nrf52/Rak4631SharedSpi.h"
+#endif
+#if defined(OTA_RAK15002_SD_STORE)
+  #include "OtaSdSpiBusNrf52.h"
+#endif
 
 namespace mesh {
 namespace ota {
@@ -229,47 +236,6 @@ static void release_rak3401_radio_bus() {
 }
 #endif
 
-static void wake_qspi_flash_before_activate(const nrf_qspi_pins_t& pins) {
-  // nRF52840 TASKS_ACTIVATE communicates with the NOR before CINSTR is
-  // available. A flash put to sleep by our preceding 0xB9 ignores that
-  // activation traffic, so issue the only command it accepts (0xAB) with a
-  // short mode-0 GPIO transaction first. IO2/WP# and IO3/HOLD# stay high.
-  nrf_gpio_pin_clear(pins.sck_pin);
-  nrf_gpio_pin_set(pins.csn_pin);
-  nrf_gpio_pin_set(pins.io0_pin);
-  if (pins.io2_pin != NRF_QSPI_PIN_NOT_CONNECTED) nrf_gpio_pin_set(pins.io2_pin);
-  if (pins.io3_pin != NRF_QSPI_PIN_NOT_CONNECTED) nrf_gpio_pin_set(pins.io3_pin);
-
-  nrf_gpio_cfg(pins.sck_pin, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-               NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_NOSENSE);
-  nrf_gpio_cfg(pins.csn_pin, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-               NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_NOSENSE);
-  nrf_gpio_cfg(pins.io0_pin, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-               NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_NOSENSE);
-  nrf_gpio_cfg(pins.io1_pin, NRF_GPIO_PIN_DIR_INPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-               NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_NOSENSE);
-  if (pins.io2_pin != NRF_QSPI_PIN_NOT_CONNECTED)
-    nrf_gpio_cfg(pins.io2_pin, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-                 NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_NOSENSE);
-  if (pins.io3_pin != NRF_QSPI_PIN_NOT_CONNECTED)
-    nrf_gpio_cfg(pins.io3_pin, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-                 NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_NOSENSE);
-
-  delayMicroseconds(1);
-  nrf_gpio_pin_clear(pins.csn_pin);
-  delayMicroseconds(1);
-  for (uint8_t bit = 0; bit < 8u; bit++) {
-    nrf_gpio_pin_write(pins.io0_pin, mota_qspi_release_from_dpd_bit(bit));
-    delayMicroseconds(1);
-    nrf_gpio_pin_set(pins.sck_pin);
-    delayMicroseconds(1);
-    nrf_gpio_pin_clear(pins.sck_pin);
-    delayMicroseconds(1);
-  }
-  nrf_gpio_pin_set(pins.csn_pin);
-  delayMicroseconds(MOTA_QSPI_DPD_WAKE_GUARD_US);
-}
-
 #if defined(OTA_RAK_AUTO_STORE)
 static uint8_t gpio_spi_byte(const nrf_qspi_pins_t& pins, uint8_t out) {
   uint8_t in = 0;
@@ -293,7 +259,7 @@ static uint32_t probe_nor(uint8_t cs) {
   };
   // A previous reset may have left the NOR in deep power-down. This GPIO
   // wake precedes the nRF QSPI ACTIVATE for the same reason as ensureFlash().
-  wake_qspi_flash_before_activate(pins);
+  mesh::nrf52::wakeQspiFlashBeforeActivate(pins);
   // The wake helper leaves GPIO input buffers disconnected for QSPI handoff.
   // This bit-banged JEDEC read instead samples IO1 through GPIO->IN, which
   // requires the MISO input buffer to be connected.
@@ -324,7 +290,20 @@ static uint32_t probe_nor(uint8_t cs) {
 
 #if defined(OTA_RAK_AUTO_STORE)
 uint8_t OtaStoreQspiNrf52::autoDetect() {
+#if defined(OTA_RAK15002_SD_STORE)
+  // SD and the RAK15001 use the same CS26. Even an unmounted/unsupported
+  // inserted card must never see the NOR wake or JEDEC command sequence.
+  if (ota_rak15002_sd_card_present()) return 0u;
+#endif
+#if defined(RAK4631_COMBINED_ETHERNET)
+  // Do not even bit-bang a JEDEC probe while the Ethernet task owns SPI.
+  // Leave the cached physical discovery unchanged for the next idle handoff.
+  if (rak4631_ethernet_owns_spi()) return 0u;
+#endif
   if (auto_detection != 0xFFu) return auto_detection;
+#if defined(OTA_RAK15002_SD_STORE)
+  if (!rak4631_try_acquire_spi(RakSharedSpiOwner::Nor)) return 0u;
+#endif
 
   const uint8_t w25_cs = arduino_to_physical(31);
   nrf_gpio_pin_set(w25_cs);
@@ -374,6 +353,9 @@ uint8_t OtaStoreQspiNrf52::autoDetect() {
     auto_cs_pin = w25_cs;
     auto_jedec_id = 0xEF4015UL;
   }
+#if defined(OTA_RAK15002_SD_STORE)
+  rak4631_release_spi(RakSharedSpiOwner::Nor);
+#endif
   return auto_detection;
 }
 
@@ -479,6 +461,18 @@ bool OtaStoreQspiNrf52::waitMemoryReady(uint32_t timeout_ms) {
 }
 
 bool OtaStoreQspiNrf52::ensureFlash() {
+#if defined(OTA_RAK15002_SD_STORE)
+  if (ota_rak15002_sd_card_present() || !rak4631_try_acquire_spi(RakSharedSpiOwner::Nor)) {
+    fail("SD card present or WisBlock SPI owned by SD/Ethernet");
+    return false;
+  }
+#endif
+#if defined(RAK4631_COMBINED_ETHERNET)
+  if (rak4631_ethernet_owns_spi()) {
+    fail("Ethernet owns WisBlock SPI; external OTA unavailable");
+    return false;
+  }
+#endif
   if (_qspi_ready) return true;
 
 #if defined(OTA_QSPI_RAK3401_RADIO_BUS_HANDOFF)
@@ -518,7 +512,7 @@ bool OtaStoreQspiNrf52::ensureFlash() {
   // successful RDSR prove WIP clear, every failure path must retain power and
   // hold CS# high instead of sending B9 or cutting the flash rail.
   _memory_operation_pending = true;
-  wake_qspi_flash_before_activate(pins);
+  mesh::nrf52::wakeQspiFlashBeforeActivate(pins);
   configure_qspi_gpio(pins);
   nrf_qspi_pins_set(NRF_QSPI, &pins);
 
@@ -613,7 +607,16 @@ bool OtaStoreQspiNrf52::ensureFlash() {
 }
 
 void OtaStoreQspiNrf52::releaseFlash() {
-  if (_qspi_awake && !_memory_operation_pending) {
+#if defined(OTA_RAK15002_SD_STORE)
+  // The failed-acquire path must not touch somebody else's live controller,
+  // chip select or supply. No callback may forcibly overwrite this claim.
+  if (rak4631_spi_owner() != RakSharedSpiOwner::Nor) return;
+#endif
+  bool send_power_down = _qspi_awake && !_memory_operation_pending;
+#if defined(RAK4631_COMBINED_ETHERNET) || defined(OTA_RAK15002_SD_STORE)
+  send_power_down = send_power_down && !rak4631_ethernet_owns_spi();
+#endif
+  if (send_power_down) {
     // The repeater can remain idle for hours after a capacity/status probe or
     // a completed checkpoint. Put the NOR into deep power-down before
     // releasing the nRF QSPI peripheral instead of leaving both active for
@@ -632,7 +635,14 @@ void OtaStoreQspiNrf52::releaseFlash() {
   // disabling the peripheral. Trigger it after every successful ENABLE, even
   // when wake or JEDEC identification failed before _qspi_ready was set.
   if (_qspi_active) {
-    if (_memory_operation_pending) {
+#if defined(RAK4631_COMBINED_ETHERNET) || defined(OTA_RAK15002_SD_STORE)
+    // Also release the QSPI pin assignments after a successful operation so
+    // the Ethernet SPIM can safely acquire the same pads at an idle handoff.
+    const bool disconnect_pins = true;
+#else
+    const bool disconnect_pins = _memory_operation_pending;
+#endif
+    if (disconnect_pins) {
       // QSPI owns pin direction while enabled. Preload and configure CS# high
       // before releasing the peripheral so an unresolved NOR operation cannot
       // see a floating or asserted chip select during the handoff.
@@ -645,7 +655,7 @@ void OtaStoreQspiNrf52::releaseFlash() {
     nrf_qspi_task_trigger(NRF_QSPI, NRF_QSPI_TASK_DEACTIVATE);
     nrf_qspi_disable(NRF_QSPI);
     nrf_qspi_event_clear(NRF_QSPI, NRF_QSPI_EVENT_READY);
-    if (_memory_operation_pending) {
+    if (disconnect_pins) {
 #if defined(OTA_QSPI_RAK3401_RADIO_BUS_HANDOFF)
       disconnect_qspi_pins();
 #else
@@ -673,6 +683,11 @@ void OtaStoreQspiNrf52::releaseFlash() {
     release_rak3401_radio_bus();
     _shared_radio_bus_acquired = false;
   }
+#endif
+#if defined(OTA_RAK15002_SD_STORE)
+  // An uncertain program/erase retains exclusive ownership until a later
+  // successful status poll proves the NOR idle; never hand its nets to SD.
+  if (!_memory_operation_pending) rak4631_release_spi(RakSharedSpiOwner::Nor);
 #endif
 }
 

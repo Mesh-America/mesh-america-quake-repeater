@@ -203,7 +203,7 @@ static void check_failclosed_load_and_exact_format() {
       assert(fixture.fs.files.at("/usb_wdg") == image(1));
       assert(mesh::usbLoggingStatus().persistence_ready);
     } else {
-      assert(reply.find("not durable") != std::string::npos);
+      assert(reply == "Error: save unconfirmed; reboot may differ");
       assert(!mesh::usbLoggingStatus().persistence_ready);
     }
   }
@@ -236,8 +236,14 @@ static void check_backup_and_volatile_storage() {
   assert(mesh::usbLoggingStatus().watchdog_auto && !mesh::usbLoggingStatus().persistence_ready);
   assert(!fixture.run(0) && !fixture.run(Policy::MAX_MS));
   assert(recovery_calls.empty() && fixture.fs.write_opens == 0);
-  assert(fixture.command("set usb.watchdog on").find("not durable") != std::string::npos);
-  assert(fixture.fs.write_opens == 0); // Explicit repair cannot bless RAM storage.
+  const auto before = fixture.fs.files;
+  assert(fixture.command("set usb.watchdog on")
+      == "Error: save unconfirmed; reboot may differ");
+  assert(fixture.fs.files == before && fixture.fs.write_opens == 0
+      && fixture.fs.writes == 0 && fixture.fs.renames == 0 && fixture.fs.removes == 0);
+  // Explicit repair cannot bless RAM storage or authorize automatic actions.
+  assert(!fixture.run(Policy::MAX_MS + Policy::EARLY_RECOVERY_MS));
+  assert(recovery_calls.empty() && probe_calls == 0 && fixture.fs.write_opens == 0);
   mesh::loadUsbLoggingWatchdog(nullptr);
   assert(!mesh::usbLoggingStatus().persistence_ready);
   assert(!mesh::isUsbLoggingWatchdogArmed());
@@ -278,38 +284,94 @@ static void check_cli_is_strict_bounded_and_transactional() {
 }
 
 static void check_failed_setter_and_readback_are_not_success() {
-  for (unsigned fault = 0; fault != 5; ++fault) {
-    Fixture fixture(0, 3, 7, 9);
-    const auto old = fixture.fs.files.at("/usb_wdg");
-    switch (fault) {
-      case 0: fixture.fs.fail_write = true; break;
-      case 1: fixture.fs.fail_open = "/usb_wdg.tmp"; break;
-      case 2:
-        fixture.fs.fail_rename_from = "/usb_wdg.tmp";
-        fixture.fs.fail_rename_to = "/usb_wdg";
-        break;
-      case 3: fixture.fs.corrupt_final_image = true; break;
-      case 4: fixture.fs.fail_final_readback = true; break;
+  unsigned scenarios = 0;
+  for (bool initially_on : {false, true}) {
+    const uint8_t previous_mode = initially_on ? 1 : 0;
+    const uint8_t candidate_mode = initially_on ? 0 : 1;
+    const char* command = initially_on ? "set usb.watchdog off" : "set usb.watchdog on";
+    const char* healthy_reply = initially_on ? "OK - USB watchdog off (saved)"
+                                            : "OK - USB watchdog on (saved)";
+    { // Healthy setters retain their exact ACK and survive a fresh load.
+      Fixture healthy(previous_mode, 3, 7, 9);
+      assert(healthy.command(command) == healthy_reply);
+      assert(healthy.fs.files.at("/usb_wdg") == image(candidate_mode, 3, 7, 9));
+      assert(healthy.fs.write_opens == 1);
+      healthy.reload();
+      const auto status = mesh::usbLoggingStatus();
+      assert(status.watchdog_enabled == !initially_on);
+      assert(!status.watchdog_auto && status.persistence_ready);
+      assert(status.backoff_step == 3 && status.recovery_count == 7 && status.reboot_count == 9);
+      assert(healthy.fs.write_opens == 1); // Reload itself never writes.
+      ++scenarios;
     }
-    assert(fixture.command("set usb.watchdog on").find("not durable; unchanged") != std::string::npos);
-    const auto status = mesh::usbLoggingStatus();
-    assert(!status.watchdog_enabled && !status.watchdog_auto && !status.persistence_ready);
-    assert(status.backoff_step == 3 && status.recovery_count == 7 && status.reboot_count == 9);
-    if (fault <= 2) assert(fixture.fs.files.at("/usb_wdg") == old);
-    const auto writes = fixture.fs.write_opens;
-    assert(!fixture.run(0) && !fixture.run(Policy::MAX_MS));
-    assert(recovery_calls.empty() && fixture.fs.write_opens == writes);
-    fixture.fs.fail_write = false;
-    fixture.fs.fail_open.clear();
-    fixture.fs.fail_rename_from.clear();
-    fixture.fs.fail_rename_to.clear();
-    fixture.fs.corrupt_final_image = false;
-    fixture.fs.fail_final_readback = false;
-    assert(fixture.command("set usb.watchdog on") == "OK - USB watchdog on (saved)");
-    assert(fixture.fs.write_opens == writes + 1); // Manual retry, not automatic.
-    assert(fixture.fs.files.at("/usb_wdg") == image(1, 3, 7, 9));
-    assert(mesh::usbLoggingStatus().persistence_ready && mesh::usbLoggingStatus().watchdog_enabled);
+    for (unsigned fault = 0; fault != 5; ++fault) {
+      Fixture fixture(previous_mode, 3, 7, 9);
+      const auto old = fixture.fs.files.at("/usb_wdg");
+      switch (fault) {
+        case 0: fixture.fs.fail_write = true; break;
+        case 1: fixture.fs.fail_open = "/usb_wdg.tmp"; break;
+        case 2:
+          fixture.fs.fail_rename_from = "/usb_wdg.tmp";
+          fixture.fs.fail_rename_to = "/usb_wdg";
+          break;
+        case 3: fixture.fs.corrupt_final_image = true; break;
+        case 4: fixture.fs.fail_final_readback = true; break;
+      }
+      const auto reply = fixture.command(command);
+      assert(reply == "Error: save unconfirmed; reboot may differ");
+      assert(reply.find("unchanged") == std::string::npos && reply.find("OK") == std::string::npos);
+      const auto status = mesh::usbLoggingStatus();
+      assert(status.watchdog_enabled == initially_on);
+      assert(!status.watchdog_auto && !status.persistence_ready);
+      assert(status.backoff_step == 3 && status.recovery_count == 7 && status.reboot_count == 9);
+      if (fault <= 2) assert(fixture.fs.files.at("/usb_wdg") == old);
+      if (fault == 4) {
+        // Final readback cannot distinguish failed publication from a complete
+        // candidate which is already durable. Do not claim disk rollback.
+        assert(fixture.fs.files.at("/usb_wdg") == image(candidate_mode, 3, 7, 9));
+      }
+      const auto writes = fixture.fs.write_opens;
+      assert(!fixture.run(0) && !fixture.run(Policy::MAX_MS));
+      assert(recovery_calls.empty() && probe_calls == 0 && fixture.fs.write_opens == writes);
+      fixture.fs.fail_write = false;
+      fixture.fs.fail_open.clear();
+      fixture.fs.fail_rename_from.clear();
+      fixture.fs.fail_rename_to.clear();
+      fixture.fs.corrupt_final_image = false;
+      fixture.fs.fail_final_readback = false;
+      // Merely clearing the fault cannot restore persistence authorization.
+      assert(!fixture.run(Policy::MAX_MS + Policy::EARLY_RECOVERY_MS));
+      assert(recovery_calls.empty() && probe_calls == 0 && fixture.fs.write_opens == writes);
+      assert(!mesh::usbLoggingStatus().persistence_ready);
+      assert(fixture.command(command) == healthy_reply);
+      assert(fixture.fs.write_opens == writes + 1); // Explicit repair only.
+      assert(fixture.fs.files.at("/usb_wdg") == image(candidate_mode, 3, 7, 9));
+      assert(mesh::usbLoggingStatus().persistence_ready);
+      assert(mesh::usbLoggingStatus().watchdog_enabled == !initially_on);
+      ++scenarios;
+    }
+    { // Independently reboot before retry: the failed setter may be durable.
+      Fixture fixture(previous_mode, 3, 7, 9);
+      fixture.fs.fail_final_readback = true;
+      assert(fixture.command(command) == "Error: save unconfirmed; reboot may differ");
+      assert(mesh::usbLoggingStatus().watchdog_enabled == initially_on);
+      assert(!mesh::usbLoggingStatus().persistence_ready);
+      const auto writes = fixture.fs.write_opens;
+      assert(!fixture.run(0) && !fixture.run(Policy::MAX_MS));
+      assert(recovery_calls.empty() && probe_calls == 0 && fixture.fs.write_opens == writes);
+      fixture.fs.fail_final_readback = false;
+      fixture.reload();
+      const auto reboot = mesh::usbLoggingStatus();
+      assert(reboot.watchdog_enabled == !initially_on);
+      assert(!reboot.watchdog_auto && reboot.persistence_ready);
+      assert(reboot.backoff_step == 3 && reboot.recovery_count == 7 && reboot.reboot_count == 9);
+      assert(fixture.fs.files.at("/usb_wdg") == image(candidate_mode, 3, 7, 9));
+      assert(fixture.fs.write_opens == writes); // No retry was needed to publish.
+      ++scenarios;
+    }
   }
+  assert(scenarios == 14);
+  puts("14 USB watchdog setter durability scenarios passed");
 }
 
 static void check_stages_durable_backoff_and_saturation() {
@@ -464,6 +526,124 @@ static void check_real_progress_not_probe_or_purge_and_master_reenable() {
   assert(recovery_calls.size() == attempts);
   assert(!fixture.run(restart + Policy::EARLY_RECOVERY_MS));
   assert(recovery_calls.size() == attempts + 1);
+}
+
+static void check_cancelled_stall_requires_progress_and_restarts_full_recovery() {
+  unsigned scenarios = 0;
+#if defined(ENABLE_OTA)
+  const unsigned veto_kinds = 2;
+#else
+  const unsigned veto_kinds = 1;
+#endif
+  for (uint32_t origin : {0U, UINT32_MAX - Policy::BASE_MS / 2}) {
+    for (unsigned veto = 0; veto < veto_kinds; ++veto) {
+      for (bool completes_after_cancel : {false, true}) {
+        Fixture fixture(1, 0, 0, 0, origin);
+#if defined(ENABLE_OTA)
+        mesh::ota::OtaContext ota;
+        if (veto == 1) mesh::ota::test_ota_context = &ota;
+#endif
+        observed = {true, true, true, true, 7};
+        assert(!fixture.run(0));
+        assert(!fixture.run(Policy::STALL_OBSERVE_MS));
+        assert(mesh::usbLoggingStatus().stalled);
+        assert(!fixture.run(Policy::EARLY_RECOVERY_MS));
+        assert(!fixture.run(Policy::EARLY_RECOVERY_MS + Policy::RECOVERY_GRACE_MS));
+        assert((recovery_calls == std::vector<uint8_t>{1, 2}));
+        // Backend cleanup can remove demand without completing a USB TX.
+        observed.pending = false;
+        assert(!fixture.run(Policy::EARLY_RECOVERY_MS + Policy::RECOVERY_GRACE_MS + 1));
+        assert(mesh::usbLoggingStatus().stalled && mesh::usbLoggingStatus().stage == 2);
+        fixture.fs.after_final_rename = [&] {
+#if defined(ENABLE_OTA)
+          if (veto == 1) ota.apply_pending = true;
+          else
+#endif
+          fixture.safe = false;
+        };
+        const uint32_t cancelled_at = Policy::BASE_MS;
+        assert(!fixture.run(cancelled_at));
+        auto status = mesh::usbLoggingStatus();
+        assert(status.persistence_ready && status.backoff_step == 1 && status.stage == 0);
+        assert(status.reboot_count == 1 && status.recovery_count == 2);
+        assert(status.stalled && !status.logger_active);
+        assert(status.last_event.action == Event::REBOOT_CANCELLED
+            && status.last_event.reasons == Event::TX_STALLED && !status.last_event.persisted);
+        auto request = status.last_event;
+        request.action = Event::REBOOT_REQUESTED;
+        --request.sequence;
+        request.persisted = true;
+        assert(fixture.fs.files.at("/usb_wdg") == image(1, 1, 2, 1, &request));
+        const auto writes = fixture.fs.write_opens;
+        assert(!fixture.run(cancelled_at + 1));
+        assert(fixture.fs.write_opens == writes); // Still unsafe: cancellation remains pending.
+        assert(!mesh::usbLoggingStatus().last_event.persisted);
+        fixture.fs.after_final_rename = {};
+        fixture.safe = true;
+#if defined(ENABLE_OTA)
+        ota.apply_pending = false;
+#endif
+        assert(!fixture.run(cancelled_at + 2));
+        assert(mesh::usbLoggingStatus().last_event.persisted);
+        assert(fixture.fs.files.at("/usb_wdg") == current_image(1, 1, 2, 1));
+        assert(fixture.fs.write_opens == writes + 1);
+        assert(!fixture.run(cancelled_at + 1000));
+        status = mesh::usbLoggingStatus();
+        assert(status.stalled && status.stage == 0 && status.inactive_seconds == 1
+            && "cancelled purge must remain faulty without TX completion");
+        assert(status.backoff_step == 1 && !status.logger_active);
+        assert(!observed.pending && observed.tx_progress == 7);
+
+        if (completes_after_cancel) {
+          // Unlike a purge, a downstream completion is genuine health evidence.
+          const uint32_t healthy_at = cancelled_at + 1001;
+          ++observed.tx_progress;
+          assert(!fixture.run(healthy_at));
+          status = mesh::usbLoggingStatus();
+          assert(!status.stalled && status.stage == 0 && status.inactive_seconds == 0);
+          assert(status.logger_active && status.backoff_step == 1);
+          assert(!fixture.run(healthy_at + Policy::HEALTHY_RESET_MS - 1));
+          assert(mesh::usbLoggingStatus().backoff_step == 1);
+          assert(!fixture.run(healthy_at + Policy::HEALTHY_RESET_MS));
+          assert(mesh::usbLoggingStatus().backoff_step == 0);
+          assert((recovery_calls == std::vector<uint8_t>{1, 2}));
+          assert(fixture.fs.files.at("/usb_wdg") == current_image(1, 0, 2, 1));
+        } else {
+          assert(!fixture.run(cancelled_at + Policy::EARLY_RECOVERY_MS - 1));
+          assert((recovery_calls == std::vector<uint8_t>{1, 2}));
+          assert(!fixture.run(cancelled_at + Policy::EARLY_RECOVERY_MS));
+          assert((recovery_calls == std::vector<uint8_t>{1, 2, 1}));
+          assert(mesh::usbLoggingStatus().stage == 1);
+          assert(!fixture.run(cancelled_at + Policy::EARLY_RECOVERY_MS + Policy::RECOVERY_GRACE_MS - 1));
+          assert(recovery_calls.size() == 3);
+          assert(!fixture.run(cancelled_at + Policy::EARLY_RECOVERY_MS + Policy::RECOVERY_GRACE_MS));
+          assert((recovery_calls == std::vector<uint8_t>{1, 2, 1, 2}));
+          assert(mesh::usbLoggingStatus().stage == 2);
+          assert(!fixture.run(cancelled_at + Policy::HEALTHY_RESET_MS));
+          status = mesh::usbLoggingStatus();
+          assert(status.stalled && !status.logger_active && status.backoff_step == 1
+              && status.recovery_count == 4 && status.reboot_count == 1
+              && "purged stalled TX must not reset its durable retry tier as healthy");
+          assert(!observed.pending && observed.tx_progress == 7);
+          const uint32_t retry_at = cancelled_at + Policy::intervalMs(1);
+          assert(!fixture.run(retry_at - 1));
+          assert(fixture.run(retry_at));
+          status = mesh::usbLoggingStatus();
+          assert(status.stage == 3 && status.backoff_step == 2
+              && status.recovery_count == 4 && status.reboot_count == 2);
+          assert(status.last_event.action == Event::REBOOT_REQUESTED
+              && status.last_event.reasons == Event::TX_STALLED && status.last_event.persisted);
+          assert(fixture.fs.files.at("/usb_wdg") == current_image(1, 2, 4, 2));
+        }
+#if defined(ENABLE_OTA)
+        mesh::ota::test_ota_context = nullptr;
+#endif
+        ++scenarios;
+      }
+    }
+  }
+  assert(scenarios == 4 * veto_kinds);
+  std::printf("%u cancelled-stall recovery timelines passed\n", scenarios);
 }
 
 static void check_healthy_reset_is_continuous_safe_and_saved_once() {
@@ -1122,6 +1302,7 @@ int main() {
   check_ownership_deferred_and_no_work_when_inactive();
   check_reboot_commit_failure_and_postcommit_veto();
   check_real_progress_not_probe_or_purge_and_master_reenable();
+  check_cancelled_stall_requires_progress_and_restarts_full_recovery();
   check_healthy_reset_is_continuous_safe_and_saved_once();
   check_auto_promotion_continuity_and_failed_write();
   check_auto_seen_reader_usb_only_and_probe_is_not_health();

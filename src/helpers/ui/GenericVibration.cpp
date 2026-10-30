@@ -8,6 +8,7 @@ void GenericVibration::begin() {
 }
 
 void GenericVibration::trigger() {
+  if (_quiet) return;
   duration = millis();
   digitalWrite(PIN_VIBRATION, HIGH);
 }
@@ -33,6 +34,11 @@ bool GenericVibration::isVibrating() {
 void GenericVibration::stop() {
   duration = 0;
   digitalWrite(PIN_VIBRATION, LOW);
+}
+
+void GenericVibration::pulse(bool on) {
+  stop();
+  if (on && !_quiet) digitalWrite(PIN_VIBRATION, HIGH);
 }
 
 #endif // ifdef PIN_VIBRATION

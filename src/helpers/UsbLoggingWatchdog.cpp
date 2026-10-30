@@ -262,6 +262,13 @@ UsbLoggingStatus usbLoggingStatus() {
 
 bool isUsbLoggingWatchdogArmed() {
   if (isUsbLoggingTransportRecoveryPending()) return true;
+#if defined(NRF52_PLATFORM)
+  // nRF52 only waits for the next interrupt; its RTC/USB/radio wake sources
+  // keep the loop and elapsed-millis watchdog deadlines running. A saved On
+  // policy or confirmed Auto reader is not continuous CPU work. Keep actual
+  // detach/reattach work awake above without spinning between policy ticks.
+  return false;
+#else
   // This is only an awake/service hint, never reset authorization. Keep a
   // previously durable policy awake if publication is busy; falling back to
   // an unavailable snapshot here could allow sleep to restart its deadline.
@@ -272,6 +279,7 @@ bool isUsbLoggingWatchdogArmed() {
   const bool ready = (flags & (1U | 2U | 256U)) == (1U | 2U | 256U);
   return ready && ((flags & 4U)
       || ((flags & 512U) && (flags & 1024U) && (busy || stage < 2)));
+#endif
 }
 
 void loadUsbLoggingWatchdog(FILESYSTEM* fs, bool durable, uint32_t (*epoch_seconds)()) {
@@ -387,7 +395,7 @@ bool handleUsbLoggingWatchdogCommand(const char* command, char* reply,
   Config candidate = config;
   candidate.mode = mode;
   if (!saveConfig(candidate, true)) {
-    snprintf(reply, capacity, "Error: USB watchdog state not durable; unchanged");
+    snprintf(reply, capacity, "Error: save unconfirmed; reboot may differ");
   } else {
     config = candidate;
     if (config.last_event.sequence) config.last_event.persisted = true;

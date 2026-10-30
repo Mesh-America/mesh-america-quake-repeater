@@ -85,11 +85,18 @@ nav:
           - host_cli_service.md
       - Radio, networking, and power:
           - radio_profiles.md
+          - radio_presets.md
+          - fleet_management.md
+          - room_services.md
           - carrier_wave.md
           - espnow_bridge_setup.md
+          - rs232_bridge_setup.md
+          - udp_bridge_setup.md
           - WiFi.md
           - flood_filtering.md
           - gps_tracking.md
+          - companion_lost_reply.md
+          - sensor_tracker.md
           - nrf52_power_management.md
       - CLI and protocol reference:
           - cli_commands.md
@@ -127,8 +134,8 @@ extra_css:
   - _stylesheets/notification_builder.css?v=20261006-channel9
   - https://unpkg.com/leaflet@1.9.4/dist/leaflet.css
   - _stylesheets/extra.css
-  - _stylesheets/firmware_picker.css?v=20261001-feedback-1
-  - _stylesheets/telemetry_decoder.css
+  - _stylesheets/firmware_picker.css?v=20261013-pick-first-1
+  - _stylesheets/telemetry_decoder.css?v=20261022-noise-history
   - _stylesheets/management_decoder.css
   - _stylesheets/filter_tool.css
   - _stylesheets/preset_test.css?v=20260923-2
@@ -138,8 +145,8 @@ extra_javascript:
   - _javascript/hosted_doc_links.js?v=20261007-1
   - _javascript/notification_builder.js?v=20261006-channel9
   - https://unpkg.com/leaflet@1.9.4/dist/leaflet.js
-  - _javascript/firmware_picker.js?v=20261006-simplify-1
-  - _javascript/telemetry_decoder.js?v=20261007-hosted-form
+  - _javascript/firmware_picker.js?v=20261023-reduced-sensors-default
+  - _javascript/telemetry_decoder.js?v=20261022-noise-history
   - _javascript/management_decoder.js
   - _javascript/filter_tool.js?v=20261002-hashbytes-2plus
   - _javascript/preset_test.js?v=20260923-2

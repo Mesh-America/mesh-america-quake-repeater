@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <string>
 
 #include <helpers/CLICommandUtils.h>
@@ -25,6 +26,48 @@ TEST(ContactListOrder, SortsEachGroupByNewestAdvertisement) {
 TEST(CLICommandUtils, LabelsInboundDirectRouteAsRouted) {
   EXPECT_STREQ("ROUTED", mesh::cli::terminalInboundRouteLabel(true));
   EXPECT_STREQ("FLOOD", mesh::cli::terminalInboundRouteLabel(false));
+}
+
+TEST(CLICommandUtils, FormatErrorKeepsMessagePercentCharactersLiteral) {
+  char reply[160];
+  mesh::cli::formatError(reply, sizeof(reply), "use 50%-150%; literal %s %n %%");
+  EXPECT_STREQ("Error: use 50%-150%; literal %s %n %%", reply);
+  mesh::cli::formatError(reply, sizeof(reply), "");
+  EXPECT_STREQ("Error: ", reply);
+}
+
+TEST(CLICommandUtils, FormatErrorTruncatesAtEveryCapacityWithoutTouchingGuards) {
+  const char* message = "reference 50%-150% of reading; retain %s literally";
+  const std::string expected = std::string("Error: ") + message;
+  std::array<char, 160> storage;
+  for (size_t capacity = 0; capacity <= expected.size() + 2; ++capacity) {
+    SCOPED_TRACE(capacity);
+    storage.fill('@');
+    char* reply = storage.data() + 1;
+    mesh::cli::formatError(reply, capacity, message);
+    EXPECT_EQ('@', storage.front());
+    EXPECT_EQ(std::string(storage.size() - 1 - capacity, '@'),
+              std::string(reply + capacity, storage.size() - 1 - capacity));
+    if (capacity == 0) continue;
+    const size_t length = expected.size() < capacity ? expected.size() : capacity - 1;
+    EXPECT_EQ(expected.substr(0, length), std::string(reply));
+    EXPECT_EQ('\0', reply[length]);
+  }
+  // snprintf also permits a null destination when the capacity is zero.
+  mesh::cli::formatError(nullptr, 0, message);
+}
+
+TEST(CLICommandUtils, FormatErrorHonorsFull160ByteReplyBoundary) {
+  const std::string message = std::string(180, 'x') + "%n";
+  const std::string expected = std::string("Error: ") + message;
+  std::array<char, 162> storage;
+  storage.fill('@');
+  char* reply = storage.data() + 1;
+  mesh::cli::formatError(reply, 160, message.c_str());
+  EXPECT_EQ(expected.substr(0, 159), std::string(reply));
+  EXPECT_EQ('\0', reply[159]);
+  EXPECT_EQ('@', storage.front());
+  EXPECT_EQ('@', storage.back());
 }
 
 TEST(TerminalDisplayFilter, UsesQuietDefaultsWithEmergencyVisible) {
@@ -393,6 +436,11 @@ TEST(CLICommandUtils, MasksTerminalPasswordInput) {
   const char* wifi = "set wifi.pwd secret phrase";
   EXPECT_STREQ("secret phrase", mesh::cli::terminalPasswordInput(wifi));
   EXPECT_EQ(nullptr, mesh::cli::terminalPasswordInput("set wifi.pwd "));
+  EXPECT_FALSE(mesh::cli::shouldMaskTerminalInput("set mt.channel 1 mt-longfast "));
+  EXPECT_FALSE(mesh::cli::shouldMaskTerminalInput("get mt.channel 1"));
+  EXPECT_TRUE(mesh::cli::shouldMaskTerminalInput("set mt.channel 1 mt-longfast a"));
+  EXPECT_STREQ("secret", mesh::cli::terminalPasswordInput("SET MT.CHANNEL 1 mt-Team secret"));
+  EXPECT_STREQ("AQ==", mesh::cli::terminalPasswordInput("set mt.channel 1 mt-longfast AQ=="));
 }
 
 TEST(CLICommandUtils, BackspaceErasesAsciiAndUtf8Characters) {

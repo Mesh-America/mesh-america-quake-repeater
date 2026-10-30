@@ -42,7 +42,7 @@ public:
 #if defined(LORA_TX_BOOST_PIN) || defined(P_LORA_TX_LED)
   void onBeforeTransmit() override {
   #if defined(P_LORA_TX_LED)
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
   #endif
   #if defined(LORA_TX_BOOST_PIN)
     digitalWrite(LORA_TX_BOOST_PIN, LOW);
@@ -59,6 +59,14 @@ public:
   }
 #endif
 
+  bool supportsBatteryCalibration() const override {
+#ifdef PIN_VBAT_READ
+    return true;
+#else
+    return false;
+#endif
+  }
+
   uint16_t getBattMilliVolts() override {
   #ifdef PIN_VBAT_READ
     analogReadResolution(10);
@@ -68,7 +76,7 @@ public:
     }
     raw = raw / 8;
 
-    return ((5.78 * raw) / 1024.0) * 1000;
+    return calibrateBatteryMillivolts(((5.78 * raw) / 1024.0) * 1000);
   #else
     return 0;  // not supported
   #endif

@@ -5,6 +5,8 @@
 #include "IdentityStore.h"
 #include "AtomicFileWriter.h"
 #include "PersistentStoreFormat.h"
+#include "CLICommandUtils.h"
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -142,6 +144,35 @@ bool setConfiguredCutoff(uint16_t mv) {
   return save(saved_bootlock, mv, empty_mv, full_mv, adc_permille, profile);
 }
 
+static bool setAdcPermille(uint16_t adc, char* reply, size_t reply_capacity) {
+  const bool saved = save(saved_bootlock, saved_cutoff, empty_mv, full_mv,
+                          adc, profile);
+  if (!saved)
+    mesh::cli::formatError(reply, reply_capacity, "multiplier could not be saved");
+  else
+    snprintf(reply, reply_capacity, "OK - ADC multiplier %u.%03u saved",
+             (unsigned)(adc / 1000), (unsigned)(adc % 1000));
+  return saved;
+}
+
+bool setConfiguredAdcMultiplier(float multiplier, char* reply,
+                               size_t reply_capacity) {
+  if (!reply || reply_capacity == 0) return false;
+  // The policy stores thousandths. Quantize once at its typed boundary rather
+  // than formatting a CLI command and parsing those same digits again.
+  if (!isfinite(multiplier) || multiplier < 0.0f || multiplier > 10.0f) {
+    mesh::cli::formatError(reply, reply_capacity, "multiplier 0 or 0.500-1.500");
+    return false;
+  }
+  uint16_t adc = static_cast<uint16_t>(multiplier * 1000.0f + 0.5f);
+  if (adc == 0) adc = 1000;
+  if (adc < 500 || adc > 1500) {
+    mesh::cli::formatError(reply, reply_capacity, "multiplier 0 or 0.500-1.500");
+    return false;
+  }
+  return setAdcPermille(adc, reply, reply_capacity);
+}
+
 static bool matchKey(const char* command, const char* key, bool set) {
   const char* prefix = set ? "set " : "get ";
   if (strncmp(command, prefix, 4) != 0) return false;
@@ -204,7 +235,7 @@ bool handleVoltagePolicyCommand(const char* command, char* reply,
   const int key = commandKey(command, set);
   if (key < 0) return false;
   if (!supported) {
-    snprintf(reply, reply_capacity, "Error: voltage policy unsupported");
+    mesh::cli::formatError(reply, reply_capacity, "voltage policy unsupported");
     return true;
   }
   const char* value = command + 4 + strlen(KEYS[key]);
@@ -239,11 +270,11 @@ bool handleVoltagePolicyCommand(const char* command, char* reply,
       next = LI_ION; boot = board_bootlock; low = 0; empty = 3000; full = 4200;
     } else if (strcmp(value, "custom") == 0) next = CUSTOM;
     else {
-      snprintf(reply, reply_capacity, "Error: profile liion|lifepo4|custom");
+      mesh::cli::formatError(reply, reply_capacity, "profile liion|lifepo4|custom");
       return true;
     }
     if (!save(boot, low, empty, full, adc_permille, next))
-      snprintf(reply, reply_capacity, "Error: battery profile could not be saved");
+      mesh::cli::formatError(reply, reply_capacity, "battery profile could not be saved");
     else if (next == LIFEPO4)
       snprintf(reply, reply_capacity,
                "OK - lifepo4 saved; reboot. "
@@ -256,11 +287,8 @@ bool handleVoltagePolicyCommand(const char* command, char* reply,
   if (key == 5) {
     uint16_t adc;
     if (!parseAdcPermille(value, adc))
-      snprintf(reply, reply_capacity, "Error: multiplier 0 or 0.500-1.500");
-    else if (!save(saved_bootlock, saved_cutoff, empty_mv, full_mv, adc, profile))
-      snprintf(reply, reply_capacity, "Error: multiplier could not be saved");
-    else snprintf(reply, reply_capacity, "OK - ADC multiplier %u.%03u saved",
-                  (unsigned)(adc / 1000), (unsigned)(adc % 1000));
+      mesh::cli::formatError(reply, reply_capacity, "multiplier 0 or 0.500-1.500");
+    else setAdcPermille(adc, reply, reply_capacity);
     return true;
   }
 
@@ -273,19 +301,19 @@ bool handleVoltagePolicyCommand(const char* command, char* reply,
              KEYS[key], (key == 1 || (key == 0 && boot_off_allowed)) ? "off|" : "",
              (unsigned)minimum);
   } else if (key == 0 && saved_cutoff != 0 && (mv == 0 || mv < saved_cutoff)) {
-    snprintf(reply, reply_capacity, "Error: bootlock must be at least cutoff");
+    mesh::cli::formatError(reply, reply_capacity, "bootlock must be at least cutoff");
   } else if (key == 1 && mv != 0 && (saved_bootlock == 0 || mv > saved_bootlock)) {
-    snprintf(reply, reply_capacity, "Error: cutoff must not exceed bootlock");
+    mesh::cli::formatError(reply, reply_capacity, "cutoff must not exceed bootlock");
   } else if ((key == 3 && mv + 100 > full_mv)
       || (key == 4 && mv < empty_mv + 100)) {
-    snprintf(reply, reply_capacity, "Error: full must exceed empty by 100 mV");
+    mesh::cli::formatError(reply, reply_capacity, "full must exceed empty by 100 mV");
   } else {
     const bool ok = save(key == 0 ? mv : saved_bootlock,
                          key == 1 ? mv : saved_cutoff,
                          key == 3 ? mv : empty_mv,
                          key == 4 ? mv : full_mv,
                          adc_permille, key >= 3 ? CUSTOM : profile);
-    if (!ok) snprintf(reply, reply_capacity, "Error: voltage setting could not be saved");
+    if (!ok) mesh::cli::formatError(reply, reply_capacity, "voltage setting could not be saved");
     else snprintf(reply, reply_capacity, "OK - %s %s%s%s", KEYS[key], value,
                   key == 0 ? "; reboot required" : " (saved)",
                   mv != 0 && mv < MIN_CONFIGURED_MV

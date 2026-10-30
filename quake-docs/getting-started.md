@@ -1,6 +1,6 @@
 # Get started
 
-You need a [supported repeater](hardware.md) (a RAK3401, or a RAK4631 on a RAK19003 as in the RAK10703 kit, which is an alpha), ideally with a RAK12027 (Omron D7S) sensor fitted, and a computer with a USB cable and a Chromium-based browser (Chrome, Edge or similar).
+You need a [supported repeater](hardware.md) (a RAK3401, or a RAK4631 on a RAK19003 as in the RAK10703 kit, or on a RAK19007), ideally with a RAK12027 (Omron D7S) sensor fitted, and a computer with a USB cable and a Chromium-based browser (Chrome, Edge or similar).
 
 ## 1. Flash the firmware
 
@@ -13,7 +13,7 @@ Open the [Quake Repeater flasher](https://apps.meshamerica.com/quake-repeater/),
 
 Updates can also be sent over the air (Bluetooth or LoRa) once a repeater is running the firmware: see [Update over the air](ota-updates.md).
 
-A freshly flashed repeater is named `Quake Repeater` until you rename it. `ver` shows the firmware, for example `Quake Repeater v1.17.1.6`.
+A freshly flashed repeater is named `Quake Repeater` until you rename it. `ver` shows the firmware, for example `Quake Repeater v1.18.0.1`.
 
 ## 2. Set the clock
 

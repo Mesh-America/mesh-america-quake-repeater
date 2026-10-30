@@ -12,6 +12,14 @@ public:
   T1000eBoard() : NRF52Board("T1000E_OTA") {}
   void begin();
 
+  bool supportsBatteryCalibration() const override {
+#ifdef BATTERY_PIN
+    return true;
+#else
+    return false;
+#endif
+  }
+
   uint16_t getBattMilliVolts() override {
   #ifdef BATTERY_PIN
    #ifdef PIN_3V3_EN
@@ -28,7 +36,7 @@ public:
     analogReference(AR_DEFAULT);  // put back to default
     analogReadResolution(10);
 
-    return volts * 1000;
+    return calibrateBatteryMillivolts(volts * 1000);
   #else
     return 0;
   #endif
@@ -73,7 +81,7 @@ public:
     #endif
     // set led on and wait for button release before poweroff
     #ifdef LED_PIN
-    digitalWrite(LED_PIN, HIGH);
+    if (mesh::leds::enabled()) digitalWrite(LED_PIN, HIGH);
     #endif
     #ifdef BUTTON_PIN
     while(digitalRead(BUTTON_PIN));
