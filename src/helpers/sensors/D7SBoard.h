@@ -12,7 +12,9 @@
 // enable can be pulled low; see docs/d7s-integration.md for what is and is not verified.
 //
 // A RAK4631 on a RAK19003 (the RAK10703 kit) does not need this: the sensor goes in slot C
-// there, its INT2 is on IO4, and IO2 stays driven high to keep the sensor powered.
+// there, its INT2 is on IO4, and IO2 stays driven high to keep the sensor powered. Keymind's default
+// RAK4631 `gps-only` peripheral mode would cut that rail when no GPS runs, so the quake RAK4631 image
+// defines MESHAMERICA_QUAKE_HOLD_SENSOR_RAIL to hold it (see WisBlockSharedPowerPolicy.h).
 inline void d7sBoardOnConfirmed() {
 #if defined(RAK_3401) && defined(PIN_3V3_EN)
   pinMode(PIN_3V3_EN, INPUT_PULLUP);
