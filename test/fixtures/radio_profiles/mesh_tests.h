@@ -625,7 +625,22 @@ TEST_F(DualProfileTest, CancelledRadioRetryDoesNotWaitForBusyHardware) {
   EXPECT_TRUE(radio.transmissions.empty());
 }
 
+TEST_F(DualProfileTest, DefaultCrossOffQueuesOnlyTheOriginWithoutConsultingCrossFilter) {
+  EXPECT_EQ(mesh::RadioCrossMode::Off, radio.config.cross);
+  EXPECT_FALSE(radio.config.canCross());
+  node.flood_attempts = 0;
+  ASSERT_NE(nullptr, queue());
+  ASSERT_EQ(1, manager.getOutboundTotal());
+  EXPECT_EQ(0, manager.getOutboundByIdx(0)->radio_profile);
+  EXPECT_EQ(0U, node.cross_filter_calls);
+  tick(); ASSERT_TRUE(radio.sending);
+  radio.complete = true; tick();
+  EXPECT_EQ((std::vector<uint8_t>{0}), radio.transmissions);
+  EXPECT_EQ(40, manager.getFreeCount());
+}
+
 TEST_F(DualProfileTest, CrossFilterKeepsPrimaryTransmissionAndAvoidsCopyAllocation) {
+  radio.config.cross = mesh::RadioCrossMode::Auto;
   node.cross_filter_allows = false;
   ASSERT_NE(nullptr, queue());
   ASSERT_EQ(1, manager.getOutboundTotal());
@@ -737,6 +752,7 @@ TEST(RadioProfiles, SlowerProfileDeterminesOrderAndFasterReceiveWindow) {
 }
 
 TEST_F(DualProfileTest, TransmitsIdenticalMessageOnBothProfilesOnce) {
+  radio.config.cross = mesh::RadioCrossMode::Auto;
   node.flood_attempts = 0;
   ASSERT_NE(nullptr, queue());
   ASSERT_EQ(2, manager.getOutboundTotal());
@@ -1071,6 +1087,7 @@ TEST_F(DualProfileTest, ExplicitCrossAllowsReceiveOnlyTemporaryOtaOnPrimary) {
 }
 
 TEST_F(DualProfileTest, BusyPrimaryDoesNotBlockSecondaryQueue) {
+  radio.config.cross = mesh::RadioCrossMode::Auto;
   node.flood_attempts = 0;
   radio.busy_profile = 0;
   ASSERT_NE(nullptr, queue());
@@ -1107,6 +1124,7 @@ TEST_F(DualProfileTest, AirtimeBudgetWaitDoesNotPinReceiverToQueuedTransmitProfi
 }
 
 TEST_F(DualProfileTest, DirectRetriesKeepSeparateCodingRatesAndEchoOwnership) {
+  radio.config.cross = mesh::RadioCrossMode::Auto;
   node.direct_attempts = 2;
   radio.config.secondary.params.cr = 7;
   const uint8_t route[] = {0x11, 0x22};
@@ -1261,6 +1279,7 @@ TEST_F(DualProfileTest, ExpiredFinalFloodEchoCannotReserveKeyOnReplacementChanne
 }
 
 TEST_F(DualProfileTest, EchoOnOneProfileDoesNotCancelOtherProfileRetry) {
+  radio.config.cross = mesh::RadioCrossMode::Auto;
   ASSERT_NE(nullptr, queue());
   tick(); radio.complete = true; tick();
   radio.complete = true; tick();

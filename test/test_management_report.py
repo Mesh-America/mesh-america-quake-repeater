@@ -18,6 +18,18 @@ spec = importlib.util.spec_from_file_location("management", ROOT / "tools/manage
 report = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(report)
 
+# Audited old snapshot fallback: the real libc conversion accepts a malformed
+# numeric prefix as a valid-looking MGR2 version. Keep a negative runtime
+# control so the snapshot regression proves it detects that bug.
+LEGACY_VERSION_FALLBACK = r'''if (!(valid & FIRMWARE)) {
+    unsigned major = 0, minor = 0, patch = 0, pre = 0;
+    const char* version = callbacks.getFirmwareVer(); if (*version == 'v') ++version;
+    const int n = sscanf(version, "%u.%u.%u.%u", &major, &minor, &patch, &pre);
+    if (n >= 3 && major <= 255 && minor <= 255 && patch <= 255 && pre <= 255) {
+      write32(p + 28, major << 24 | minor << 16 | patch << 8 | pre); valid |= FIRMWARE;
+    }
+  }'''
+
 
 class ManagementTests(unittest.TestCase):
     @classmethod
@@ -62,7 +74,8 @@ class ManagementTests(unittest.TestCase):
         # Compile the unchanged production runtime and transaction writer with
         # a memory filesystem/radio in place of the hardware-facing headers.
         fixture = ROOT / "test/fixtures/management"
-        for name in ("ManagementReporter.cpp", "ManagementReporter.h", "FileRead.h", "ContactFileTransaction.h", "PersistentStoreFormat.h"):
+        for name in ("ManagementReporter.cpp", "ManagementReporter.h", "FileRead.h", "FilePresence.h",
+                     "ContactFileTransaction.h", "PersistentStoreFormat.h"):
             shutil.copyfile(ROOT / "src/helpers" / name, Path(cls.work.name) / name)
         for name in ("CommonCLI.h", "Mesh.h"):
             shutil.copyfile(fixture / name, Path(cls.work.name) / name)
@@ -76,6 +89,17 @@ class ManagementTests(unittest.TestCase):
         runtime_cmd += [str(cls.crypto / p) for p in sources] + ["-o", str(runtime)]
         subprocess.run(runtime_cmd, check=True, capture_output=True, text=True)
         cls.runtime = runtime
+        runtime_source = Path(cls.work.name) / "ManagementReporter.cpp"
+        runtime_text = runtime_source.read_text(encoding="ascii")
+        fallback = extract_braced(runtime_text, "if (!(valid & FIRMWARE))")
+        legacy_source = Path(cls.work.name) / "ManagementReporter-legacy.cpp"
+        legacy_source.write_text(runtime_text.replace(fallback, LEGACY_VERSION_FALLBACK, 1),
+                                 encoding="ascii")
+        cls.legacy_runtime = Path(cls.work.name) / "runtime-legacy-version"
+        legacy_cmd = list(runtime_cmd)
+        legacy_cmd[legacy_cmd.index(str(runtime_source))] = str(legacy_source)
+        legacy_cmd[-1] = str(cls.legacy_runtime)
+        subprocess.run(legacy_cmd, check=True, capture_output=True, text=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -244,6 +268,47 @@ class ManagementTests(unittest.TestCase):
                 self.assertNotIn("Traceback", errors.getvalue())
                 password_prompt.assert_not_called()
 
+    def test_cli_rejects_deep_mqtt_jsonl_before_password_prompt(self):
+        path = Path(self.work.name) / "cli-deep-jsonl.json"
+        deep = '{"metadata":' * 10000 + "0" + "}" * 10000
+        for text in ("{}\n" + deep, deep + "\n{}"):
+            path.write_text(text, encoding="ascii")
+            output, errors = io.StringIO(), io.StringIO()
+            with mock.patch.object(report.getpass, "getpass") as password_prompt, \
+                    mock.patch.object(sys, "argv", ["report.py", str(path), "--mqtt"]), \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                with self.assertRaises(SystemExit) as failure:
+                    report.main()
+            self.assertEqual(failure.exception.code, 2)
+            self.assertEqual(output.getvalue(), "")
+            self.assertIn("nested too deeply", errors.getvalue())
+            self.assertNotIn("Traceback", errors.getvalue())
+            password_prompt.assert_not_called()
+
+    def test_input_json_depth_limit_is_explicit_and_checks_before_decoding(self):
+        limit = report.MAX_JSON_DEPTH
+        for opening, closing in (("[", "]"), ('{"metadata":', "}")):
+            with self.subTest(opening=opening):
+                value = report._load_input_json(opening * limit + "0" + closing * limit)
+                for _ in range(limit):
+                    value = value[0] if isinstance(value, list) else value["metadata"]
+                self.assertEqual(value, 0)
+                text = opening * (limit + 1) + "0" + closing * (limit + 1)
+                with mock.patch.object(report.json, "loads") as decoder:
+                    with self.assertRaisesRegex(ValueError, "nested too deeply"):
+                        report._load_input_json(text)
+                    decoder.assert_not_called()
+
+    def test_input_json_depth_ignores_string_brackets_and_escaped_quotes(self):
+        text = 'brackets [{]} and quote " and backslash \\ ' * 1000
+        document = {"metadata": text, "raw": "\\"}
+        self.assertEqual(report._load_input_json(json.dumps(document)), document)
+        # An escaped backslash before a closing quote must not hide the next
+        # actual container, including when the following record exceeds depth.
+        deep = "[" * report.MAX_JSON_DEPTH + "0" + "]" * report.MAX_JSON_DEPTH
+        with self.assertRaisesRegex(ValueError, "nested too deeply"):
+            report._load_input_json("[" + json.dumps("\\") + "," + deep + "]")
+
     def test_interoperable_full_report(self):
         decoded = report.decode_report(list(reversed(self.pages)), "management test password")
         self.assertEqual(decoded["sequence"], 42)
@@ -395,6 +460,20 @@ process.stdin.on('end', async () => {
 
     def test_runtime_storage_scheduling_rollover_and_failures(self):
         subprocess.run([str(self.runtime)], check=True)
+
+    def test_production_snapshot_versions_are_bounded_and_release_compatible(self):
+        result = subprocess.run([str(self.runtime), "versions"], capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS production MGR2 firmware version snapshots", result.stdout)
+
+    def test_previous_snapshot_parser_reports_malformed_input_as_a_valid_version(self):
+        result = subprocess.run([str(self.legacy_runtime), "version-malformed"], capture_output=True,
+                                text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("version v1.2.3garbage: expected valid=0", result.stderr)
+        self.assertIn("got valid=1", result.stderr)
+        self.assertIn("Assertion", result.stderr)
 
     def test_actual_legacy_route_adoption_persistence_and_precedence(self):
         source = (ROOT / "src/helpers/CommonCLI_Management.cpp").read_text(encoding="utf-8")

@@ -1,4 +1,5 @@
 #include "target.h"
+#include <helpers/radiolib/TunableRadioHal.h>
 
 #include <Arduino.h>
 #include <helpers/ArduinoHelpers.h>
@@ -10,9 +11,11 @@
 T1Board board;
 
 #if defined(P_LORA_SCLK)
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
+static TunableRadioHal radio_hal(SPI);
+RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #else
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+static TunableRadioHal radio_hal(SPI, 8000000, true);
+RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #endif
 
 WRAPPER_CLASS radio_driver(radio, board);

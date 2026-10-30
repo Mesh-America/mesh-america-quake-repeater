@@ -10,19 +10,84 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class NimbleCompanionTests(unittest.TestCase):
     def test_identity_security_and_data_path_under_sanitizers(self):
+        self.run_adapter("-DCONFIG_BT_NIMBLE_MAX_CONNECTIONS=1",
+                         "-DCONFIG_BT_NIMBLE_MAX_BONDS=15",
+                         "-DCONFIG_BT_NIMBLE_MAX_CCCDS=30",
+                         "-DCONFIG_BT_NIMBLE_ROLE_CENTRAL_DISABLED=1",
+                         "-DCONFIG_BT_NIMBLE_ROLE_OBSERVER_DISABLED=1")
+
+    def test_lab15_interval_real_adapter_under_sanitizers(self):
+        self.run_adapter("-DMESH_HIL_BLE_BENCH=1", "-DMESH_HIL_BLE_INTERVAL_MS=15")
+
+    def test_lab7_interval_real_adapter_under_sanitizers(self):
+        self.run_adapter("-DMESH_HIL_BLE_BENCH=1", "-DMESH_HIL_BLE_INTERVAL_MS=7")
+
+    def test_lab60_interval_real_adapter_under_sanitizers(self):
+        self.run_adapter("-DMESH_HIL_BLE_BENCH=1", "-DMESH_HIL_BLE_INTERVAL_MS=60")
+
+    def test_interval_override_requires_lab_and_is_bounded(self):
+        invalid = (
+            ("-DMESH_HIL_BLE_INTERVAL_MS=15",),
+            ("-DMESH_HIL_BLE_BENCH=0", "-DMESH_HIL_BLE_INTERVAL_MS=15"),
+            ("-DMESH_HIL_BLE_BENCH=2", "-DMESH_HIL_BLE_INTERVAL_MS=15"),
+            ("-DMESH_HIL_BLE_BENCH=1", "-DMESH_HIL_BLE_INTERVAL_MS=6"),
+            ("-DMESH_HIL_BLE_BENCH=1", "-DMESH_HIL_BLE_INTERVAL_MS=61"),
+        )
+        for flags in invalid:
+            with self.subTest(flags=flags):
+                result = subprocess.run([
+                    "c++", "-std=c++17", "-fsyntax-only", "-DMESH_USE_NIMBLE_ARDUINO=1", *flags,
+                    "-I", str(ROOT / "test/fixtures/nimble_companion/mocks"),
+                    "-I", str(ROOT / "src"),
+                    str(ROOT / "src/helpers/esp32/SerialBLEInterface.cpp"),
+                ], text=True, capture_output=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("MESH_HIL_BLE_INTERVAL_MS", result.stderr)
+
+    def test_actual_preprocessor_policy_modern_legacy_bluedroid_and_overrides(self):
+        source = (ROOT / "src/helpers/esp32/SerialBLEInterface.cpp").read_text()
+        start = source.index("#if defined(MESH_HIL_BLE_INTERVAL_MS)")
+        section = source[start:source.index("\nbool SerialBLEInterface::isReadBusy()", start)]
+        transports = (("-DMESH_USE_NIMBLE_ARDUINO=1", 7),
+                      ("-DCONFIG_NIMBLE_ENABLED=1", 60),
+                      ("-DCONFIG_BLUEDROID_ENABLED=1", 60))
+        for transport, default in transports:
+            cases = [((), default)] + [(("-DMESH_HIL_BLE_BENCH=1",
+                f"-DMESH_HIL_BLE_INTERVAL_MS={interval}"), interval) for interval in (7, 15, 60)]
+            for flags, expected in cases:
+                with self.subTest(transport=transport, flags=flags):
+                    result = subprocess.run(["c++", "-std=c++17", "-x", "c++", "-fsyntax-only",
+                        transport, *flags, "-"], input=section +
+                        f'\nstatic_assert(BLE_WRITE_MIN_INTERVAL == {expected}, "wrong transport pacing");\n',
+                        text=True, capture_output=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+            for flags in (("-DMESH_HIL_BLE_INTERVAL_MS=15",),
+                          ("-DMESH_HIL_BLE_BENCH=0", "-DMESH_HIL_BLE_INTERVAL_MS=15"),
+                          ("-DMESH_HIL_BLE_BENCH=2", "-DMESH_HIL_BLE_INTERVAL_MS=15"),
+                          ("-DMESH_HIL_BLE_BENCH=1", "-DMESH_HIL_BLE_INTERVAL_MS=6"),
+                          ("-DMESH_HIL_BLE_BENCH=1", "-DMESH_HIL_BLE_INTERVAL_MS=61")):
+                with self.subTest(transport=transport, invalid=flags):
+                    result = subprocess.run(["c++", "-std=c++17", "-x", "c++", "-fsyntax-only",
+                        transport, *flags, "-"], input=section, text=True,
+                        capture_output=True, timeout=30)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("MESH_HIL_BLE_INTERVAL_MS", result.stderr)
+
+    def run_adapter(self, *flags):
         with tempfile.TemporaryDirectory(prefix="meshcore-nimble-") as temp:
             binary = Path(temp) / "nimble-companion"
             result = subprocess.run([
                 "c++", "-std=c++17", "-g", "-fsanitize=address,undefined",
                 "-DMESH_USE_NIMBLE_ARDUINO=1",
+                *flags,
                 "-I", str(ROOT / "test/fixtures/nimble_companion/mocks"),
                 "-I", str(ROOT / "src"),
                 str(ROOT / "src/helpers/esp32/SerialBLEInterface.cpp"),
                 str(ROOT / "test/fixtures/nimble_companion/test_nimble_companion.cpp"),
                 "-o", str(binary),
-            ], text=True, capture_output=True)
+            ], text=True, capture_output=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
-            result = subprocess.run([str(binary)], text=True, capture_output=True)
+            result = subprocess.run([str(binary)], text=True, capture_output=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
 
 

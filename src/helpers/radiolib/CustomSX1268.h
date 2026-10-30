@@ -1,6 +1,8 @@
 #pragma once
 
 #include <RadioLib.h>
+#include <math.h>
+#include "SX126xMorseRssi.h"
 
 #ifndef SX126X_TX_BUSY_TIMEOUT_MS
 #define SX126X_TX_BUSY_TIMEOUT_MS 1000UL
@@ -14,6 +16,23 @@ class CustomSX1268 : public SX1268 {
 
   public:
     CustomSX1268(Module *mod) : SX1268(mod) { }
+    int16_t setProfileProtocol(uint8_t syncWord) {
+      // This driver has no owned fast packet cache. Apply the complete
+      // RadioLib packet tuple, including its normal-IQ register workaround.
+      int16_t status = SX1268::setSyncWord(syncWord);
+      if (status == RADIOLIB_ERR_NONE) status = SX1268::setCRC(1);
+      if (status == RADIOLIB_ERR_NONE) status = SX1268::explicitHeader();
+      if (status == RADIOLIB_ERR_NONE) status = SX1268::invertIQ(false);
+      return status;
+    }
+    int16_t setMorseFastRssi() {
+      return setSX126xMorseRssiWindow(this);
+    }
+    float getMorseRssi() {
+      uint8_t raw = 0;
+      const int16_t status = this->getMod()->SPIreadStream(RADIOLIB_SX126X_CMD_GET_RSSI_INST, &raw, 1);
+      return status == RADIOLIB_ERR_NONE ? raw * -0.5f : NAN;
+    }
 
   #ifdef RP2040_PLATFORM
     bool std_init(SPIClassRP2040* spi = NULL)
@@ -105,10 +124,15 @@ class CustomSX1268 : public SX1268 {
     }
 
     int16_t startReceive() override {
-      return SX1268::startReceive(
+      const int16_t status = SX1268::startReceive(
           RADIOLIB_SX126X_RX_TIMEOUT_INF,
           RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
           RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+      if (status == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
+      return status;
     }
 
     bool isReceiving() {

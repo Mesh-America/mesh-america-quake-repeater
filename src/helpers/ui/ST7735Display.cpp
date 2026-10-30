@@ -5,6 +5,26 @@
 #endif
 #include <TFT_eSPI.h>
 
+#ifdef MESHCORE_TRACKER_DISPLAY_AUTODETECT
+extern const char meshcore_capability_display_autodetect_tracker[] =
+    "meshcore.capability.display.autodetect.tracker.v1";
+#endif
+
+// Most ST7735 recipes keep the original RGB565 canvas. RAM-constrained
+// targets can retain the complete UI in RGB332 and expand only one scanline
+// while sending it to the panel; the panel still receives RGB565 pixels.
+#ifndef ST7735_BUFFER_COLOR_DEPTH
+  #define ST7735_BUFFER_COLOR_DEPTH 16
+#endif
+static_assert(ST7735_BUFFER_COLOR_DEPTH == 8 || ST7735_BUFFER_COLOR_DEPTH == 16,
+              "ST7735_BUFFER_COLOR_DEPTH must be 8 or 16");
+#if ST7735_BUFFER_COLOR_DEPTH == 8
+// Bind the separate sprite/allocator allowance to the actual dependency. The
+// framebuffer itself is 160*80+1 bytes (including TFT_eSPI's sentinel pixel).
+static_assert(sizeof(TFT_eSprite) + 2 * 16 <= 1024,
+              "Increase the ST7735 sprite-object runtime RAM allowance");
+#endif
+
 #if defined(NRF52_PLATFORM)
   #include <nrf_gpio.h>
 #endif
@@ -433,6 +453,10 @@ bool ST7735Display::i2c_probe(TwoWire& wire, uint8_t addr) {
   #define PIN_TFT_LEDA_CTL_ACTIVE  HIGH
 #endif
 
+#ifdef MESHCORE_TRACKER_DISPLAY_AUTODETECT
+  #include "WirelessTrackerDisplayProbe.h"
+#endif
+
 // Dark colors reduce panel current on the PowerSaving builds.
 ColorVal UIColor::window_bkg = ST77XX_BLACK;
 ColorVal UIColor::title_bkg = ST77XX_BLACK;
@@ -445,28 +469,65 @@ ColorVal UIColor::popup_txt = ST77XX_WHITE;
 ColorVal UIColor::corp_blue = ST77XX_BLUE;
 
 bool ST7735Display::begin() {
+#ifdef MESHCORE_TRACKER_DISPLAY_AUTODETECT
+  bool probePowerClaimed = false;
+  if (!_probeComplete) {
+    if (_peripher_power) {
+      _peripher_power->claim();
+      probePowerClaimed = true;
+    }
+    delay(100);
+    const volatile char* capability = meshcore_capability_display_autodetect_tracker;
+    (void)*capability;
+    _probeComplete = true;
+    _present = mesh::ui::wireless_tracker::probe();
+    if (!_present) {
+      if (probePowerClaimed) _peripher_power->release();
+      return false;
+    }
+  }
+  if (!_present) return false;
+#endif
   if (!sprite) {
     // alloc offscreen canvas
     sprite = new TFT_eSprite(&lcd);
     if (!sprite) {
       mesh::usbLoggingPort().println("ST7735Display: failed to alloc canvas");
+#ifdef MESHCORE_TRACKER_DISPLAY_AUTODETECT
+      mesh::ui::wireless_tracker::parkAbsentPanel();
+      if (probePowerClaimed) _peripher_power->release();
+#endif
       return false;
     }
+    sprite->setColorDepth(ST7735_BUFFER_COLOR_DEPTH);
     if (!sprite->createSprite(160, 80)) {
       mesh::usbLoggingPort().println(
           "ST7735Display: failed to alloc canvas pixels");
       delete sprite;
       sprite = NULL;
+#ifdef MESHCORE_TRACKER_DISPLAY_AUTODETECT
+      mesh::ui::wireless_tracker::parkAbsentPanel();
+      if (probePowerClaimed) _peripher_power->release();
+#endif
       return false;
     }
     sprite->fillScreen(ST77XX_BLACK);
     sprite->setTextColor(curr_color = ST77XX_WHITE);
   }
 
-  if (!spriteReady()) return false;
+  if (!spriteReady()) {
+#ifdef MESHCORE_TRACKER_DISPLAY_AUTODETECT
+    if (probePowerClaimed) _peripher_power->release();
+#endif
+    return false;
+  }
 
   if (!_isOn) {
+#ifdef MESHCORE_TRACKER_DISPLAY_AUTODETECT
+    if (_peripher_power && !probePowerClaimed) _peripher_power->claim();
+#else
     if (_peripher_power) _peripher_power->claim();
+#endif
 
     delay(100); // allow the peripheral rail to stabilize
     pinMode(PIN_TFT_RST, OUTPUT);
@@ -581,6 +642,12 @@ void ST7735Display::turnOff() {
     // Now turn off the backlight
     digitalWrite(PIN_TFT_LEDA_CTL, !PIN_TFT_LEDA_CTL_ACTIVE);
 
+    // DISPOFF only blanks the panel. GPS can retain the T096's shared rail,
+    // and some boards never gate it: stop the controller oscillator/converter
+    // too. Let Sleep In settle before releasing the pins or removing power.
+    sendCommand(ST77XX_SLPIN);
+    delay(5);
+
     // Prevent back-powering to save 2.8 mA. Keep the SPI object initialized:
     // begin() restores these GPIO directions explicitly on the next wake, and
     // retaining the peripheral avoids an unchecked nrfx uninit/reinit cycle.
@@ -663,6 +730,25 @@ void ST7735Display::endFrame() {
   set_CS(LOW);
   _spi->beginTransaction(_spiSettings);
   uint16_t x, y;
+#if ST7735_BUFFER_COLOR_DEPTH == 8
+  const uint8_t* pixels = static_cast<const uint8_t*>(sprite->getPointer());
+  // This bounded stack buffer replaces a second full-size canvas. Explicit
+  // wire bytes preserve the panel's high-byte-first order on every MCU.
+  uint8_t scanline[160 * 2];
+  for (y = 0; y < 80; y++, pixels += 160) {
+    for (x = 0; x < 160; ++x) {
+      const uint16_t color = lcd.color8to16(pixels[x]);
+      scanline[2 * x] = static_cast<uint8_t>(color >> 8);
+      scanline[2 * x + 1] = static_cast<uint8_t>(color);
+    }
+    setAddrWindow(0, y, 160, 1);
+#ifdef ESP_PLATFORM
+    _spi->transferBytes(scanline, NULL, sizeof(scanline));
+#else
+    _spi->transfer(scanline, NULL, sizeof(scanline));
+#endif
+  }
+#else
   uint16_t* pixels = (uint16_t *) ((TFT_eSprite *) sprite)->getPointer();
   for (y = 0; y < 80; y++, pixels += 160) {
     setAddrWindow(0, y, 160, 1);
@@ -672,6 +758,7 @@ void ST7735Display::endFrame() {
     _spi->transfer(pixels, NULL, 2 * 160);
 #endif
   }
+#endif
 
   _spi->endTransaction();
   set_CS(HIGH);

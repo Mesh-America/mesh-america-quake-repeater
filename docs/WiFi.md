@@ -102,6 +102,32 @@ best effort rather than durable storage. Each enabled slot publishes
 independently, so one failed broker does not intentionally stop the other
 slots.
 
+## Automatic network outage power saving
+
+ESP32 MQTT firmware uses one shared outage timer for MQTT and NTP. If no broker
+demonstrates a working connection for five minutes, the MQTT worker stops its
+clients and NTP request before suspending background WiFi. Saved WiFi and broker
+settings remain enabled. Failed requests, a WiFi association, and NTP replies
+alone do not restart the outage timer or keep a failed MQTT uplink awake.
+
+After 30 minutes, the firmware opens a recovery window lasting up to two
+minutes. A broker acknowledgment or a connection that stays up for 30 seconds
+returns the node to normal operation. Otherwise WiFi is suspended for another
+30 minutes. An explicit management request can ask for an earlier probe.
+Automatic NTP requests have a 15-second timeout; failed requests wait 30 minutes
+instead of repeatedly running a blocking server search. Successful NTP retains
+the daily refresh schedule.
+
+Active browser administration, setup/OTA access points, connected Companion
+clients, and an attached WiFi OTA seeder protect their network access. An idle
+WebConfig listener does not prevent the cooldown. An enabled SNMP agent keeps a
+working LAN connection available. ESP-NOW keeps its radio and channel; only the
+failed infrastructure connection is suspended. LoRa continues operating, and
+when CPU power saving is enabled, its normal sleep eligibility returns after
+background WiFi shuts down. USB console and logging sleep rules still apply
+separately. This policy does not automatically turn off working services or
+expire an active setup access point.
+
 See [MQTT_IMPLEMENTATION.md](https://github.com/mikecarper/MeshCore/blob/keymindCascade/MQTT_IMPLEMENTATION.md) for the complete preset
 list, custom broker configuration, topic formats, authentication, diagnostics,
 and memory limits.
@@ -122,16 +148,46 @@ The bootstrap uses ES5 syntax and Promise-based loading, including on Android
 Most full-size ESP32 MQTT observer builds have the shared WebConfig portal. On a
 fresh device with no saved SSID:
 
-1. Join the open `MeshCore-Setup-XXXX` access point.
+1. Join `MeshCore-Setup-XXXX` with the node's admin password (factory default
+   `password`). A display's WiFi QR code uses the hotspot's current credential.
 2. If the captive page does not open, browse to `http://192.168.4.1/`.
 3. Enter WiFi, radio, identity, and MQTT settings.
 4. Select **Save & Reboot**.
 5. After reboot, check `get wifi.status` and `get mqtt.status`.
 
-The setup AP is unauthenticated unless the firmware was built with
-`WEBCONFIG_AP_PASSWORD`. It uses plain HTTP, so provision it in a trusted
-location. When WebConfig is running on the normal LAN, repeater and room-server
-builds require the node's admin password.
+ESP32 management uses one saved admin password for WebConfig login, browser
+firmware uploads, and setup WiFi. Choose 8–15 printable ASCII characters so the
+hotspot can use it for WPA2. Other valid admin passwords (1–15 UTF-8 bytes,
+without CR or LF) leave the hotspot open and require an HTTP admin login.
+There is no separate setup WiFi password. A protected first-time setup AP with
+no saved SSID retains its provisioning flow; recovery with a saved SSID requires
+the existing admin login. Deliberately passwordless images retain their local
+no-password policy. The portal uses plain HTTP, so use a trusted network.
+
+Changing the password ends existing browser sessions after the save succeeds.
+The submitting page keeps the save result and tries the new password once,
+then asks you to sign in if needed. A partial save shows which settings failed
+and does not reboot. If the setup hotspot restarts, reconnect with the new
+password when it is eligible for WPA2. An unconfirmed password save keeps the
+previous runtime password active, but the saved state after reboot may differ;
+read the reported error before retrying.
+
+Credentials for other systems or different permissions remain separate:
+
+| Credential | Why it does not become the node admin password |
+|---|---|
+| Router WiFi and MQTT broker login | These are issued by the network or broker, which may serve many devices. |
+| Bluetooth pairing PIN | BLE pairing requires its numeric PIN format. |
+| Guest and room passwords | Members and guests should not receive node administration access. |
+| Channel, bridge, fleet and alert keys | These are shared with peers or recipients and have their own protocol requirements. |
+| SNMP community and management-report credentials | Monitoring systems receive these credentials; they should not also receive the node admin password. |
+
+Admin login limits apply on both LAN and recovery AP: five failures lock the
+failing address for 30 seconds after its fifth failure. All addresses also share
+a budget of six failures, refilling one allowance every 6 seconds; while empty,
+even correct credentials receive HTTP 429. A success clears only its own
+address's count. The [room browser](room_services.md#local-wi-fi-chat-on-esp32)
+uses a separate password budget; a WebConfig session does not bypass it.
 
 On an expanded FULL profile with no saved SSID, this automatic setup AP has an
 absolute 30-minute window. Browser activity or a phone left associated with the
@@ -406,9 +462,11 @@ of running both. On a WiFi-selected boot, the LoRa layout accepts
 accepts `min|max` for the saved WiFi setting, while ESP-NOW + BLE requires
 `min`. Device power saving remains independent of this modem policy.
 
-WiFi companions do not have the repeater/room-server admin CLI password model,
-so their LAN WebConfig page is intentionally unauthenticated. Use them only on
-a trusted LAN.
+ESP32 WiFi Companions also have a saved admin password for LAN WebConfig and
+browser OTA, initially `password`. Their `get password` command reports status
+without revealing it. The credential is stored in NVS alongside the WiFi
+settings and survives a filesystem erase. Use `password <new_password>` through
+an available administrative connection to change it.
 
 The WebConfig **Advanced** card exposes device power saving on WiFi Companion,
 repeater, and room-server builds. It also exposes RX power saving on radio chips
@@ -460,9 +518,12 @@ motatool serve --dir ./motas --tcp <repeater-ip>:5001 -v
 
 The TCP connection supplies `.mota` files for the node to advertise and relay
 over LoRa; it is not a raw `.bin` uploader. `start ota` continues to provide the
-direct browser uploader on HTTP port 80. A FULL role without WebConfig but with
-browser OTA support can use the `MeshCore-OTA` access point raised by
-`start ota`; its seeder address is `192.168.4.1:5001`.
+direct browser uploader on HTTP port 80. Sign in with HTTP Basic username
+`admin` and the node's current admin password. A FULL role without WebConfig
+but with browser OTA support can use the `MeshCore-OTA` access point raised by
+`start ota`; its seeder address is `192.168.4.1:5001`. The runtime OTA hotspot
+uses the same WPA2 eligibility rule as setup WiFi. Temporary partition migration
+and recovery applications retain their own documented access policy.
 
 For browser uploads from an existing 1.17.1.8 ESP32 node, see the
 [1.17.1.9 WiFi upgrade guide](upgrading_1.17.1.8_to_1.17.1.9.md).
@@ -474,6 +535,10 @@ Only one external folder link can be active. A TCP client is rejected while
 removes the TCP folder. Port 5001 has no login layer, so expose it only on a
 trusted LAN or temporary setup network. Firmware target and hash checks still
 apply at the receiving node, along with its configured signature/trust policy.
+
+The HTTP admin login does not protect trusted TCP consoles or delegated remote
+CLI access. Those administrative paths can change the node's admin password;
+limit them to trusted users and networks.
 
 When the shared seeder is running, `get wifi.status` appends its live state:
 
@@ -670,6 +735,77 @@ MQTT observer targets normally limit ESP32 WiFi transmit power to 11 dBm unless
 the board configuration overrides `MQTT_WIFI_TX_POWER`. This setting affects
 WiFi only, not LoRa transmit power.
 
+## Companion WiFi compatibility settings
+
+ESP32 WiFi Companions, including Full Companion, provide two independent,
+saved compatibility controls. Defaults remain `bgn` and `normal`; neither
+setting changes the running connection until a reboot. They are available
+through the USB terminal, framed Companion CLI over USB/BLE/TCP, and the
+browser command terminal where included.
+
+```text
+get wifi.protocol
+set wifi.protocol bg
+reboot
+```
+
+`wifi.protocol bgn` permits ordinary 802.11b/g/n. `bg` excludes 802.11n for
+access-point compatibility testing; it does not change LoRa or radio2.
+B/G-only is rejected when it conflicts with a primary ESP-NOW radio or an
+active long-range ESP-NOW owner. The temporary setup AP retains its existing
+B/G/N compatibility policy.
+
+The separate WiFi-only boot skips Bluetooth controller/host initialization,
+not merely advertising. USB and LoRa remain available; existing Bluetooth
+names, PINs and bonds are not erased. Enable and configure WiFi first, and
+retain USB access when testing an unreliable WLAN:
+
+```text
+set wifi.enabled 1
+set wifi.mode wifi-only
+set wifi.powersave none
+reboot
+get wifi.status
+```
+
+Saving `none` while a WiFi-only reboot is pending queues it for that boot;
+it never disables modem sleep while the current Bluetooth stack is active.
+`get wifi.status` reports the connection, SSID, IP and RSSI (dBm), followed by
+saved/boot/live radio settings in the same bounded reply:
+
+```text
+> connected ssid=MyWiFi ip=192.168.11.102 rssi=-74
+protocol=bgn/bgn/0x07 mode=normal ps=min coex=yes ota=5001:listen
+```
+
+`protocol` lists **saved / boot-selected / live SDK bitmap** (`0x03` = B/G,
+`0x07` = B/G/N). For example, `protocol=bg/bgn/0x07` shows a B/G-only change
+waiting for reboot. `mode` shows one value when saved and boot choices match,
+or **saved / boot-selected** when they differ, such as `wifi-only/normal`.
+`ps` is the live modem-sleep mode; `coex` indicates whether Bluetooth
+coexistence is required. `ota` is `off`, `<port>:listen`, or `<port>:client`.
+`n/a` means the SDK could not read that value; it does not claim the radio is
+off. IP and RSSI are omitted when not applicable. Individual getters remain
+available, but no separate detailed-status command is needed.
+
+Test B/G-only and WiFi-only separately to identify which change helps. A
+successful local test does not establish compatibility with an unavailable AP.
+Turning WiFi off/on, or using `set bluetooth off`, is not equivalent to a true
+WiFi-only reboot. During that boot, Bluetooth cannot be re-enabled until
+`wifi.mode normal` is saved and the device is rebooted.
+
+To restore the usual Cascade combination:
+
+```text
+set wifi.mode normal
+set wifi.protocol bgn
+set wifi.powersave min
+reboot
+```
+
+The SenseCAP Indicator's existing exclusive `companion.transport wifi|ble`
+selector remains authoritative; it does not expose `wifi.mode`.
+
 ## Recognizing the wrong firmware
 
 `get wifi.status`, `get wifi.ssid`, `get wifi.powersave`, and `get wifi.cli`
@@ -708,6 +844,20 @@ get mqtt1.diag
 get mqtt2.diag
 ```
 
+For a connection that works initially but later stops reporting, inspect each
+configured slot's `pub_ack` count in `get mqttN.diag`. Accepted publishes are
+not proof of delivery: a QoS 1 publish is confirmed only when the broker
+acknowledges it. A quiet radio channel alone is not a failed MQTT connection.
+
+The shared MQTT bridge recovers failed transports on its owning task, including
+errors without a subsequent disconnect callback and connection attempts that
+never finish. It also watches accepted QoS 1 publishes for missing broker
+acknowledgments. Recovery retains the existing broker configuration, memory
+admission and reconnect backoff; it does not reboot the node or cycle WiFi.
+See the [MQTT recovery regression](test-results/mqtt_tls_v4_regression.md#long-running-mqtt-recovery)
+for the deadlines, test coverage and hardware limitations. Older preview images
+do not gain these changes until their firmware is updated.
+
 Common causes are:
 
 - no saved SSID or a changed password;
@@ -719,8 +869,9 @@ Common causes are:
 - the wrong firmware role or an older compact-CLI build without WebConfig.
 
 For a WiFi companion, find its station IP in the router, connect the client to
-TCP port 5000, and use the open `MeshCore-Setup-XXXX` AP at
-`http://192.168.4.1/` if it cannot join the saved network. Current firmware
+TCP port 5000, and use the `MeshCore-Setup-XXXX` AP at
+`http://192.168.4.1/` if it cannot join the saved network. The hotspot uses the
+admin password when eligible for WPA2, as described above. Current firmware
 uses standard b/g/n for the setup AP, including ESP-NOW-capable targets.
 A running LR mesh conflicts with a conventional access point; current firmware
 refuses that AP startup and defers LR startup while an AP is active. A primary

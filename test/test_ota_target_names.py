@@ -7,12 +7,14 @@ import sys
 import tempfile
 import unittest
 import zlib
+from collections import Counter
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "tools" / "mota"), str(ROOT / "scripts")]
 import gen_targets
+from test_serial_wifi_sessions import SANITIZER_FLAGS
 
 HEADER = ROOT / "src" / "helpers" / "ota" / "OtaTargets.h"
 HARNESS = ROOT / "test" / "fixtures" / "ota_target_names" / "test.cpp"
@@ -28,26 +30,50 @@ class OtaTargetNameTest(unittest.TestCase):
     def compile_and_lookup(self, flags, ids, header=None):
         with tempfile.TemporaryDirectory() as temp_dir:
             executable = Path(temp_dir) / "target_names"
-            if header is not None:
-                alternate = Path(temp_dir) / "helpers/ota"
-                alternate.mkdir(parents=True)
-                (alternate / "OtaTargets.h").write_text(header, encoding="utf-8")
-                (alternate / "tinf").mkdir()
-                (alternate / "tinf/tinf.h").write_text(
-                    (ROOT / "src/helpers/ota/tinf/tinf.h").read_text(), encoding="utf-8")
+            # Keep production SHA-256 and tinf implementations. Instrument
+            # only their call boundaries to assert candidate filtering,
+            # one decode per chunk, one bounded allocation and cleanup.
+            header = self.text if header is None else header
+            rows = [(int(target, 16), name) for target, name in re.findall(
+                r'\{ 0x([0-9a-fA-F]{8}), "([^"]+)" \},', header)]
+            fingerprints = Counter(target & 255 for target, _ in rows)
+            instrumented = header.replace("mesh::Utils::sha256(", "target_name_sha256(")
+            instrumented = instrumented.replace("tinf_uncompress_exact(", "target_name_uncompress_exact(")
+            instrumented = instrumented.replace("malloc(DECODE_CHUNK_BYTES)", "target_name_malloc(DECODE_CHUNK_BYTES)")
+            instrumented = instrumented.replace("free(bytes)", "target_name_free(bytes)")
+            alternate = Path(temp_dir) / "helpers/ota"
+            alternate.mkdir(parents=True)
+            (alternate / "OtaTargets.h").write_text(instrumented, encoding="ascii")
+            (alternate / "tinf").mkdir()
+            (alternate / "tinf/tinf.h").write_text(
+                (ROOT / "src/helpers/ota/tinf/tinf.h").read_text(), encoding="utf-8")
+            candidates = [Path(os.environ["MESHCORE_CRYPTO_DIR"])] if os.environ.get("MESHCORE_CRYPTO_DIR") else []
+            candidates += sorted((ROOT / ".pio/libdeps").glob("*/Crypto"))
+            crypto = next((path for path in candidates if (path / "SHA256.cpp").is_file()), None)
+            self.assertIsNotNone(crypto, "Install rweather/Crypto or set MESHCORE_CRYPTO_DIR (no hash mock fallback)")
             decoder = Path(temp_dir) / "tinf.o"
-            subprocess.run([
+            built = subprocess.run([
                 os.environ.get("CC") or shutil.which("cc") or "gcc",
-                "-Os", "-DMESHCORE_TINF_IMPLEMENTATION=1", "-c",
+                "-Os", *SANITIZER_FLAGS, "-DMESHCORE_TINF_IMPLEMENTATION=1", "-c",
                 str(ROOT / "src/helpers/ota/tinf/tinflate.c"), "-o", str(decoder),
-            ], check=True)
-            subprocess.run([
-                "c++", "-std=c++11", "-O2", "-Wall", "-Wextra", "-Werror",
-                *flags, f"-I{temp_dir}", f"-I{ROOT / 'src'}", str(HARNESS), str(decoder), "-o", str(executable),
-            ], check=True)
+            ], capture_output=True, text=True, timeout=60)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            built = subprocess.run([
+                os.environ.get("CXX") or shutil.which("g++") or "c++",
+                "-std=c++17", "-O1", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-DHOST_BUILD",
+                "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections", *SANITIZER_FLAGS,
+                *flags, f"-DOTA_TEST_TARGET_COUNT={len(rows)}", f"-I{temp_dir}", f"-I{ROOT / 'src'}", f"-I{crypto}",
+                "-isystem", str(ROOT / "test/mocks"),
+                str(HARNESS), str(ROOT / "src/Utils.cpp"),
+                *[str(crypto / name) for name in ("SHA256.cpp", "Hash.cpp", "Crypto.cpp",
+                                                "AES128.cpp", "AESCommon.cpp", "BlockCipher.cpp")],
+                str(decoder), "-o", str(executable),
+            ], capture_output=True, text=True, timeout=60)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             result = subprocess.run(
-                [str(executable)], input="\n".join(f"{target:08x}" for target in ids),
-                text=True, capture_output=True, check=True)
+                [str(executable)], input="\n".join(f"{target:08x} {fingerprints[target & 255]}" for target in ids),
+                text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             return result.stdout.splitlines()
 
     def test_generator_reproduces_checked_in_header_and_all_ids(self):
@@ -91,9 +117,113 @@ class OtaTargetNameTest(unittest.TestCase):
     def test_cpp_standard_and_compact_match_all_names(self):
         ids = [target for target, _ in self.rows] + [0, 0xffffffff]
         expected = [name for _, name in self.rows] + ["?", "?"]
-        for flags in ([], ["-DOTA_TARGET_NAME_FRONT_CODED=1"]):
+        for flags in ([], ["-DOTA_TARGET_NAME_FRONT_CODED=1"],
+                      ["-DOTA_TARGET_NAME_FRONT_CODED=1", "-DOTA_RAK15002_SD_STORE=1", "-DCOMPANION_RADIO_FULL=1"]):
             with self.subTest(flags=flags):
                 self.assertEqual(self.compile_and_lookup(flags, ids), expected)
+
+    def test_rak_full_lookup_fails_closed_without_heap_and_keeps_every_name(self):
+        flags = ["-DOTA_TARGET_NAME_FRONT_CODED=1", "-DOTA_RAK15002_SD_STORE=1", "-DCOMPANION_RADIO_FULL=1"]
+        data, offsets, lengths, firsts = gen_targets.grouped_name_chunks(
+            self.rows, gen_targets.RAK_FULL_NAME_DECODE_CHUNK_SIZE)
+        ordinary = gen_targets.compressed_name_chunks(self.rows)
+        self.assertGreater(len(ordinary[0]) - len(data), 1500)
+        self.assertLessEqual(max(lengths), 4096)
+        self.assertEqual(firsts[-1], len(self.rows))
+        self.assertEqual(offsets[-1], len(data))
+        self.assertEqual(self.compile_and_lookup(flags + ["-DOTA_TEST_MALLOC_FAIL=1"],
+                                                [self.rows[0][0], 0]), ["?", "?"])
+
+    def grouped_roundtrip(self, rows, chunk_size=4096):
+        data, offsets, lengths, firsts = gen_targets.grouped_name_chunks(rows, chunk_size)
+        names = []
+        for group, length in enumerate(lengths):
+            raw = zlib.decompress(data[offsets[group]:offsets[group + 1]], -15)
+            self.assertEqual(len(raw), length)
+            self.assertLessEqual(length, chunk_size)
+            count, dictionary_bytes = raw[0], int.from_bytes(raw[1:3], "little")
+            dictionary_end = 3 + dictionary_bytes
+            dictionary = raw[3:dictionary_end].split(b"\0")
+            self.assertEqual(dictionary[-1], b"")
+            self.assertEqual(len(dictionary) - 1, count)
+            position, previous, row = dictionary_end, b"", firsts[group]
+            while row < firsts[group + 1]:
+                prefix = raw[position]
+                self.assertLessEqual(prefix, len(previous))
+                end = raw.index(0, position + 1)
+                previous = previous[:prefix] + raw[position + 1:end]
+                aliases = raw[end + 1]
+                self.assertGreater(aliases, 0)
+                position = end + 2
+                for index in raw[position:position + aliases]:
+                    self.assertLess(index, count)
+                    names.append((previous + dictionary[index]).decode("utf-8"))
+                position += aliases; row += aliases
+            self.assertEqual(row, firsts[group + 1])
+            self.assertEqual(position, len(raw))
+        self.assertEqual(names, [name for _, name in rows])
+        return data, lengths
+
+    def test_rak_full_grouped_roles_keep_all_names_in_same_scratch_and_save_flash(self):
+        data, lengths = self.grouped_roundtrip(self.rows)
+        previous = gen_targets.compressed_name_chunks(self.rows, 4096)
+        self.assertGreater(len(previous[0]) - len(data), 1000)
+        self.assertLessEqual(max(lengths), 4096)
+        # Unusual/legacy names stay complete; larger future inventories restart
+        # board prefixes and carry a complete suffix dictionary in each chunk.
+        future = gen_targets.target_rows(
+            [f"board_{i:04d}_{role}" for i in range(700)
+             for role in ("repeater", "companion_radio_usb", "room_server")]
+            + ["legacy_without_role", "odd_BOARD_repeatr", "case_Companion_ble"])
+        _, chunks = self.grouped_roundtrip(future)
+        self.assertGreater(len(chunks), 1)
+
+    def test_grouped_decoder_rejects_bad_dictionary_prefix_count_and_role_index(self):
+        from zopfli_compress import raw_deflate_compress
+        rows = gen_targets.target_rows(["hello"])
+        header = gen_targets.generate_header(rows)
+        data, offsets, lengths, firsts = gen_targets.grouped_name_chunks(rows)
+        raw = zlib.decompress(data, -15)
+        invalid = []
+        for offset, value in ((0, 0), (1, 255), (3, 88), (4, 255), (-2, 0), (-1, 255)):
+            changed = bytearray(raw); changed[offset] = value; invalid.append(bytes(changed))
+        invalid.append(raw[:-1])
+        for changed in invalid:
+            stream = raw_deflate_compress(changed, numiterations=1000)
+            altered = re.sub(
+                r"(static const uint8_t NAMES\[\] = \{).*?(\n  \};)",
+                lambda match: match[1] + "\n    " + ", ".join(f"0x{byte:02x}" for byte in stream) + "," + match[2],
+                header, count=1, flags=re.S)
+            altered = re.sub(
+                r"(static const uint16_t OFFSETS\[\] = \{).*?(\n  \};)",
+                lambda match: match[1] + f"\n    0, {len(stream)}," + match[2], altered, count=1, flags=re.S)
+            altered = re.sub(
+                r"(static const uint16_t RAW_LENGTHS\[\] = \{).*?(\n  \};)",
+                lambda match: match[1] + f"\n    {len(changed)}," + match[2], altered, count=1, flags=re.S)
+            with self.subTest(raw=changed.hex()):
+                flags = ["-DOTA_TARGET_NAME_FRONT_CODED=1", "-DOTA_RAK15002_SD_STORE=1", "-DCOMPANION_RADIO_FULL=1"]
+                self.assertEqual(self.compile_and_lookup(flags, [rows[0][0]], altered), ["?"])
+
+    def test_rak_full_fingerprint_collisions_verify_the_entire_target_id(self):
+        flags = ["-DOTA_TARGET_NAME_FRONT_CODED=1", "-DOTA_RAK15002_SD_STORE=1", "-DCOMPANION_RADIO_FULL=1"]
+        known = {target for target, _ in self.rows}
+        buckets = Counter(target & 255 for target in known)
+        self.assertGreater(max(buckets.values()), 1)
+        # Preserve every real target's low-byte fingerprint while changing
+        # another ID byte. No filtered candidate may be accepted by itself.
+        unknown = {target ^ 0x100 for target in known} - known
+        # Also cover every bucket, including buckets containing no targets.
+        unknown.update(0xa5a50000 | fingerprint for fingerprint in range(256))
+        unknown.difference_update(known)
+        self.assertGreater(len(unknown), len(self.rows))
+        self.assertEqual(self.compile_and_lookup(flags, sorted(unknown)), ["?"] * len(unknown))
+
+    def test_rak_full_index_keeps_one_byte_per_target_without_changing_names(self):
+        encoded = re.search(r"static const uint8_t FINGERPRINTS\[\] = \{(.*?)\n  \};", self.text, re.S)
+        self.assertIsNotNone(encoded)
+        fingerprints = [int(value, 16) for value in re.findall(r"0x([0-9a-f]{2})", encoded[1])]
+        self.assertEqual(fingerprints, [target & 255 for target, _ in self.rows])
+        self.assertGreater(4 * len(self.rows) - len(fingerprints), 2000)
 
     def test_table_disabled_preserves_optional_local_name(self):
         local_id, local_name = self.rows[0]
@@ -109,7 +239,8 @@ class OtaTargetNameTest(unittest.TestCase):
 
     def test_cpp_decoder_fails_closed_on_invalid_records_and_trailing_bytes(self):
         from zopfli_compress import raw_deflate_compress
-        rows = [(1, "hello")]
+        rows = gen_targets.target_rows(["hello"])
+        target = rows[0][0]
         header = gen_targets.generate_header(rows)
         original, _, _, _ = gen_targets.compressed_name_chunks(rows)
         invalid = [
@@ -128,14 +259,17 @@ class OtaTargetNameTest(unittest.TestCase):
                 lambda match: match[1] + f"\n    0, {len(stream)}," + match[2],
                 altered, flags=re.S)
             with self.subTest(stream=stream.hex()):
-                self.assertEqual(self.compile_and_lookup(
-                    ["-DOTA_TARGET_NAME_FRONT_CODED=1"], [1], altered), ["?"])
+                for flags in (["-DOTA_TARGET_NAME_FRONT_CODED=1"],
+                              ["-DOTA_TARGET_NAME_FRONT_CODED=1", "-DOTA_RAK15002_SD_STORE=1", "-DCOMPANION_RADIO_FULL=1"]):
+                    self.assertEqual(self.compile_and_lookup(flags, [target], altered), ["?"])
 
     def test_generator_rejects_unencodable_names(self):
         for name in ("x\0y", "x" * 256):
             with self.subTest(name=name):
                 with self.assertRaises(ValueError):
                     gen_targets.compressed_name_chunks([(1, name)])
+                with self.assertRaises(ValueError):
+                    gen_targets.grouped_name_chunks([(1, name)])
 
 
 if __name__ == "__main__":

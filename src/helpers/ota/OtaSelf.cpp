@@ -198,6 +198,11 @@ static uint32_t parse_fw_version(const char* s) {
 }
 
 bool ota_serve_self(OtaContext& c, uint32_t fw_version) {
+#if defined(RAK4631_COMBINED_ETHERNET)
+  // Also cover diagnostic `ota dev serve self`, which bypasses the public
+  // default-self-serve gate. Ethernet owns the alternative RAM workspace.
+  if (rak4631_ethernet_owns_spi()) return false;
+#endif
   // Derive our version from the build string when the caller didn't supply one, so the mOTA we advertise
   // carries a real version (was hard-coded 0 -> peers saw "v0.0.0"). A dev build with no dotted number
   // still reads 0 - the self-describing EndF identity (docs) is the durable fix for that.
@@ -223,11 +228,10 @@ bool ota_serve_self(OtaContext& c, uint32_t fw_version) {
   c.serve_self_leaves = (uint8_t*)malloc((size_t)bc * 4);
   size_t proof_size = (size_t)bc * 4;
 #if MESHCORE_OTA_DEVICE_DEFLATE
-  // Proof generation and transport encoding use this buffer at different
-  // times. Small nRF52 images can have <2 KiB of leaves: keep enough room for
-  // a whole encoded block without allocating a second input/output buffer.
-  // Receiver-only/Companion diagnostic raw exports retain the old allocation.
-  if (proof_size < BS) proof_size = BS;
+  // Streaming proofs no longer need a copy of the leaf table. This buffer
+  // holds only one encoded DATA block, regardless of the firmware's size.
+  // Receiver-only/Companion diagnostic raw exports retain their allocation.
+  proof_size = BS;
 #endif
   c.serve_self_proof  = (uint8_t*)malloc(proof_size);
   if (!c.serve_self_leaves || !c.serve_self_proof) {

@@ -5,18 +5,21 @@
 // companion builds. The UI removes MQTT controls when no bridge is present.
 //
 // Two modes:
-//  - SETUP: open SoftAP + captive portal, raised automatically on first boot
+//  - SETUP: admin-password SoftAP + captive portal, raised on first boot
 //    when no WiFi is configured (wifi_ssid empty), or manually via
 //    `start webconfig ap`. A credential save joins in AP+STA mode, reports the
 //    assigned LAN IP, then reboots; the AP auto-stops after an idle timeout.
+//    Legacy short/non-ASCII admin credentials use open WiFi plus HTTP login.
 //  - LAN: bound to an existing or portal-owned STA connection. Infrastructure
-//    roles require the node admin password; companions use their trusted LAN.
+//    roles use the committed node admin password. Explicit legacy passwordless
+//    configurations retain their local no-password policy.
 //
 // Concurrency model: AsyncWebServer handlers run on the async_tcp task and
 // must never touch the CLI, prefs persistence, or the radio. Config writes
 // and browser-terminal commands are marshaled to tick() - called from
 // MyMesh::loop() on the Arduino loop task - and run through the existing CLI
-// handlers there. Prefs-struct reads and request state are guarded by _mux.
+// handlers there. Request state is guarded by _mux; authentication uses the
+// separately published committed credential generation, never temporary prefs.
 //
 // The master switch and standalone WiFi credentials use independent NVS
 // namespaces, so role-specific prefs-file layouts remain untouched.
@@ -33,8 +36,11 @@
 #include <helpers/CompanionWiFiStatus.h>
 #include <helpers/WebConfigBatch.h>
 #include <helpers/TerminalSession.h>
+#include <helpers/RoomWebMailbox.h>
 #include <helpers/WiFiPowerSave.h>
 #include <helpers/WiFiReconnectPolicy.h>
+#include <helpers/WebConfigLoginThrottle.h>
+#include <helpers/WiFiNetworkPowerPolicy.h>
 #include <helpers/ui/DisplayBuildFlags.h>
 
 class AsyncWebServer;
@@ -91,6 +97,7 @@ public:
     CAP_ESPNOW_CHANNEL = 1UL << 15,
     CAP_BLUETOOTH_MAC = 1UL << 16,
     CAP_BLUETOOTH_STEALTH = 1UL << 17,
+    CAP_LOST_REPLY = 1UL << 18,
     CAP_DELAYS = CAP_RX_DELAY | CAP_TX_DELAY,
   };
 
@@ -102,6 +109,7 @@ public:
     char bluetooth_name[32];       // empty = transport's default device name
     char bluetooth_mac[24];        // empty = chipset factory address
     bool bluetooth_stealth;        // independent of the address policy
+    uint8_t lost_reply;            // 0=off, 1=no, 2=yes (Companion only)
     char admin_password[32];       // empty = trusted LAN/no login prompt
     double lat;
     double lon;
@@ -122,6 +130,11 @@ public:
     uint32_t rx_ps_rx_us;
     uint32_t rx_ps_sleep_us;
     uint8_t power_saving;
+    uint16_t cpu_freq_mhz;         // 0 = automatic device policy
+    uint16_t cpu_actual_mhz;
+    uint8_t cpu_supported_mask;   // bits 0/1/2 = 80/160/240 MHz
+    bool display_rotation_supported;
+    uint16_t display_rotation_degrees;
     bool mqtt_enabled;
     uint8_t repeat;
     uint16_t advert_interval;
@@ -161,6 +174,18 @@ public:
     virtual void buildStatsJson(char* buf, size_t buf_size) = 0;
     // Teardown finished (server + DNS freed, WiFi mode restored).
     virtual void onWebConfigStopped() {}
+    virtual bool supportsRoomService() const { return false; }
+    // The role owns its page resource. Keeping it out of this shared server
+    // lets repeaters/companions omit the Room UI without disabling a feature.
+    virtual const uint8_t* roomPageGzip(size_t& length) const {
+      length = 0;
+      return nullptr;
+    }
+    // Input may be parsed in place. Authentication, storage and radio work
+    // happen only on tick(), never on async_tcp.
+    virtual void processRoomRequest(const uint8_t* token, uint32_t sequence,
+                                    char* request, char* response, size_t capacity) {}
+    virtual bool roomRequestAuthenticated() const { return false; }
   };
 
   // mqtt_prefs is an MQTTPrefs* on WITH_MQTT_BRIDGE builds and NULL otherwise.
@@ -173,7 +198,7 @@ public:
                   bool standalone_wifi = false);
   ~WebConfigServer();
 
-  // Infrastructure roles refresh this from the actual MQTT worker state.
+  // Infrastructure roles refresh this from actual MQTT/UDP station owners.
   // A compiled-in but stopped/unconfigured bridge cannot reconnect WiFi.
   // Companion runtimes retain their own station ownership. Loop task only.
   void updateWiFiOwnership(bool owns_wifi) {
@@ -185,6 +210,10 @@ public:
     _setup_reconnect_in_progress = false;
     _setup_reconnect_deadline = 0;
   }
+  // A station-only owner may reclaim an idle automatic recovery AP. Explicit
+  // setup APs and active browser/OTA work keep their link until released.
+  // Returns true when that owner may manage STA. Loop task only.
+  bool prepareStationOwner();
 
   // For the device display: true while a setup-mode portal is active.
   // Fills the AP SSID and portal IP; either buffer may be NULL to just poll.
@@ -243,6 +272,12 @@ public:
   bool stopForOTA(char reply[]);
   void tick(uint32_t now);             // call every loop iteration
 
+  // A listening LAN portal is not itself a reason to keep a failed background
+  // network awake. Explicit starts and real browser activity get a bounded
+  // window; AP setup and in-flight work retain the radio until they complete.
+  void requestNetworkAccess();
+  bool isNetworkForegroundActive(uint32_t now) const;
+
   Mode mode() const { return _mode; }
   bool isRunning() const { return _mode != MODE_OFF; }
   bool isStopping() const { return _stopping; }
@@ -300,6 +335,7 @@ private:
   bool _keep_wifi_on_stop = false;
   bool _was_setup_ap = false;
   bool _initial_setup = false;
+  bool _setup_provisioning_privilege = false;
   uint32_t _setup_started_at = 0;
   uint32_t _connect_deadline = 0;
   char _wifi_ssid[32] = {0};
@@ -312,6 +348,10 @@ private:
   // sends the password with the rest, so it never needed the memory.
   bool _admin_pwd_set = false;
   char _ap_ssid[33] = {0};
+  uint32_t _ap_auth_generation = 0;
+  uint32_t _ap_rekey_generation = 0;
+  uint32_t _ap_rekey_after = 0;
+  uint32_t _ap_rekey_deadline = 0;
   WiFiReconnectPolicy::Tracker _wifi_reconnect_tracker;
   bool _retry_saved_wifi_in_setup = false;
   bool _setup_reconnect_in_progress = false;
@@ -332,19 +372,28 @@ private:
   bool _batch_reboot = false;
   bool _batch_reboot_armed = false;
   bool _batch_all_ok = true;
+  bool _batch_started = false;
   char _batch_reqid[24] = {0};
+  uint32_t _batch_auth_generation = 0;
+  char _batch_owner_token[33] = {0};
+  bool _batch_reauth_required = false;
+  bool _batch_reauth_delivered = false;
+  uint32_t _batch_reauth_until = 0;
   bool _standalone_wifi_dirty = false;
   bool _setup_wifi_handoff_pending = false;
   uint32_t _setup_wifi_handoff_deadline = 0;
   char _setup_wifi_handoff_ip[16] = {0};
   BatchEntry _batch[MAX_BATCH];
   WebTerminalStream* _terminal = NULL;
+  mesh::RoomWebMailbox* _room_mailbox = NULL;
 
-  // LAN-mode session (single slot; new login evicts the old session)
+  // Browser login session, bound to the committed credential generation.
+  // One slot: a new login evicts the old session in LAN or recovery AP mode.
   char _session_token[33] = {0};
   uint32_t _session_last_seen = 0;
-  uint8_t _login_fails = 0;
-  uint32_t _login_lock_until = 0;
+  uint32_t _session_generation = 0;
+  uint32_t _terminal_auth_generation = 0;
+  WebConfigLoginThrottle::Tracker _login_throttle;
 
   // Once set (via /api/portal/exit), OS captive probes get native "success"
   // replies so the phone's sign-in sheet can be dismissed without dropping the
@@ -357,6 +406,7 @@ private:
   uint32_t _diag_last = 0;
 
   volatile uint32_t _last_activity = 0;
+  volatile uint32_t _network_activity_until = 0;
   uint32_t _reboot_at = 0;         // 0 = none scheduled
   uint32_t _stop_warn_at = 0;
   bool _stop_warned = false;
@@ -368,6 +418,8 @@ private:
   bool _board_cmds_probed = false;
 
   void createServer();
+  void noteNetworkActivity();
+  void refreshNetworkPowerHold(uint32_t now);
   bool beginSavedStation(uint32_t now);
   void registerRoutes();
   typedef void (WebConfigServer::*RequestHandler)(AsyncWebServerRequest*);
@@ -378,11 +430,20 @@ private:
   void drainBatch(uint32_t now);
   void probeBoardCommands();
   void serviceTerminal(uint32_t now);
+  void serviceRoom(uint32_t now);
   void closeTerminal();
   void serviceSetupWiFiHandoff(uint32_t now);
+  void serviceSetupPassword(uint32_t now);
   void finishBatch(uint32_t now);
   void finalizeTeardown();
+  void initializeManagementPassword();
+  void clearSessionLocked();
   bool checkAuth(AsyncWebServerRequest* req);
+  bool checkAuthLocked(AsyncWebServerRequest* req, uint32_t* generation = nullptr);
+  bool resultReceiptAllowedLocked(AsyncWebServerRequest* req, const char* reqid,
+                                  BatchKind kind, uint32_t now);
+  void beginBatchAuthorizationLocked(uint32_t generation);
+  void cancelStaleBatchLocked(uint32_t now);
   static void collectBody(AsyncWebServerRequest* req, uint8_t* data, size_t len,
                           size_t index, size_t total);
 
@@ -404,6 +465,9 @@ private:
   void handlePresets(AsyncWebServerRequest* req);
   void handleReboot(AsyncWebServerRequest* req);
   void handlePortalExit(AsyncWebServerRequest* req);
+  void handleRoomPage(AsyncWebServerRequest* req);
+  void handleRoomPost(AsyncWebServerRequest* req);
+  void handleRoomResult(AsyncWebServerRequest* req);
   void handleNotFound(AsyncWebServerRequest* req);
 };
 

@@ -117,4 +117,30 @@ for target in heltec_tracker_v1_1_repeater_observer_mqtt \
   fi
 done
 
+# The exact Full TLora Room recipes keep their complete 32-post bank and
+# maximum source geometry while moving cold bytes to real RTC SLOW storage.
+for full in 0 1; do
+  ESP32_FULL_BUILD=$full
+  for target in LilyGo_TLora_V2_1_1_6_room_server \
+                LilyGo_TLora_V2_1_1_6_room_server_ \
+                LilyGo_TLora_V2_1_1_6_room_server_observer_mqtt \
+                LilyGo_TLora_V2_1_1_6_room_server_observer_mqtt_ \
+                LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_ \
+                LilyGo_TLora_V2_1_1_6_companion_radio_usb \
+                Heltec_v4_room_server; do
+    PIO_ENV_PLATFORM_BY_NAME[$target]=ESP32_PLATFORM
+    PIO_ENV_FULL_BUILD_BY_NAME[$target]=1
+    PLATFORMIO_BUILD_FLAGS=""
+    PLATFORMIO_BUILD_UNFLAGS=""
+    apply_esp32_full_size_profile "$target"
+    expected=0
+    if [ "$full" = 1 ] && [[ "${target,,}" == lilygo_tlora_v2_1_1_6_room_server* ]]; then expected=1; fi
+    for flag in ROOM_POSTS_RTC_SLOW_STORAGE OTA_BOUNDED_SOURCE_PROOFS; do
+      found=0
+      [[ " $PLATFORMIO_BUILD_FLAGS " == *" -D$flag=1 "* ]] && found=1
+      [ "$found" = "$expected" ] || fail "$target Full=$full wrong $flag policy"
+    done
+  done
+done
+
 echo "test_release_ota_policy: OK"

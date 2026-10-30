@@ -35,13 +35,14 @@ class ESPNowRuntimeTests(unittest.TestCase):
         for name in ("logRx", "logTx"):
             start = implementation.index("void MyMesh::" + name + "(")
             start = implementation.index("#ifdef WITH_MQTT_BRIDGE\n", start)
-            end = implementation.index("  if (_logging)", start)
+            # Keep the complete bridge guards, stopping before file logging's guard.
+            end = implementation.index("#if MESH_ENABLE_PACKET_FILE_LOGGING\n", start)
             routing[name] = implementation[start:end]
         service_start = implementation.index("#if defined(WITH_ESPNOW_BRIDGE)",
                                              implementation.index("MyMesh::servicePostMeshLoop()"))
         service_end = implementation.index("  if (next_flood_advert", service_start)
         pending_start = implementation.index("#if defined(WITH_BRIDGE)",
-                                             implementation.index("bool MyMesh::hasPendingWork()"))
+                                             implementation.index("mesh::powerdiag::Mask MyMesh::pendingWorkReason()"))
         pending_end = implementation.index("  if (radio_driver.isWatchdogObserving()", pending_start)
         commands = "\n".join(extract_braced(cli, signature) for signature in (
             "void CommonCLI::handleSetCmd(", "void CommonCLI::handleGetCmd("))

@@ -82,6 +82,13 @@ struct Canvas {
   void reset() { std::fill(pixels.begin(),pixels.end(),0); }
 };
 Canvas* Canvas::active=nullptr;
+// This fixture exercises direct panel geometry; the full buffered T-Deck
+// renderer and its PSRAM canvas run in test_tdeck_display_cooperation.py.
+class TDeckCanvas : public Canvas {
+public:
+  int16_t getCursorX() const { return x; }
+  int16_t getCursorY() const { return y; }
+};
 struct ST7789Spi : Canvas { template<class... T> ST7789Spi(T...) {} };
 struct Adafruit_ST7789 : Canvas { template<class... T> Adafruit_ST7789(T...) {} };
 struct GxEPD2_150_BN { static const int WIDTH=200,HEIGHT=200; template<class... T> GxEPD2_150_BN(T...) {} };

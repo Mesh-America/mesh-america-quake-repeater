@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from test_replay_reset_integration import extract_braced
@@ -50,6 +51,7 @@ COMMON_QUERY_EXCEPTIONS = {
     'bridge.running': 'Live bridge state; set bridge.enabled controls intent',
     'espnow.running': 'Live ESP-NOW bridge state; set espnow.enabled controls intent',
     'rs232.running': 'Live UART bridge state; set rs232.enabled controls intent',
+    'rs232.status': 'Live heartbeat, negotiated standby and UART owner diagnostics',
     'bridge.type': 'Build-selected bridge transport',
     'password': 'Written by the password command, not set password',
     'public.key': 'Derived from identity; written through set prv.key',
@@ -58,6 +60,7 @@ COMMON_QUERY_EXCEPTIONS = {
     'pwrmgt.source': 'Measured power source',
     'pwrmgt.support': 'Hardware power-management capabilities',
     'radio.rxps.config': 'Detailed view of set radio.rxps',
+    'radio.rxps.status': 'Live radio status for set radio.rxps',
     'role': 'Build-selected firmware role',
     'rxps.wd': 'Runtime RX power-saving recovery counters',
     'wifi.pwd': 'Setter is in the observer or standalone-WiFi delegate',
@@ -83,6 +86,7 @@ class CLISettingsContractTest(unittest.TestCase):
             'minimal': [],
             'nrf52_gps_sd': ['NRF52_PLATFORM', 'ENV_INCLUDE_GPS', 'OTA_SD_STORE', 'NRF52_POWER_MANAGEMENT'],
             'esp32_web': ['ESP_PLATFORM', 'ESP32_PLATFORM', 'ADMIN_PASSWORD', 'MESH_USB_LOGGING_AVAILABLE'],
+            'esp32_g3': ['ESP_PLATFORM', 'ESP32_PLATFORM', 'STATION_G3_ESP32'],
             'esp32_mqtt': ['ESP_PLATFORM', 'ESP32_PLATFORM', 'WITH_MQTT_BRIDGE', 'WITH_BRIDGE',
                            'WITH_MQTT_NEIGHBORS', 'MESH_USB_LOGGING_AVAILABLE'],
             'esp32_mqtt_espnow': ['ESP_PLATFORM', 'ESP32_PLATFORM', 'WITH_MQTT_BRIDGE',
@@ -182,7 +186,10 @@ class CLISettingsContractTest(unittest.TestCase):
                 'recent.repeaters',       # Discovery/cache query
             }),
             ('simple_room_server', 'MyMesh.cpp', {'acl'}),
-            ('simple_sensor', 'SensorMesh.cpp', {'acl'}),
+            ('simple_sensor', 'SensorMesh.cpp', {
+                'acl',
+                'tracker',  # Aggregate status; set tracker.<key> changes settings
+            }),
         ):
             text = (ROOT/'examples'/role/filename).read_text(encoding='utf-8')
             sets, gets = full_command_keys(text)
@@ -197,8 +204,10 @@ class CLISettingsContractTest(unittest.TestCase):
         shared = extract_braced(companion, 'static bool isCompanionRadioPrefsCommand(')
         sets |= {k for verb, k in re.findall(r'"(get|set) ([\w.]+) ?"', shared) if verb == 'set'}
         self.assertEqual(gets - sets, {
+            'bootloader.ver',                        # Installed bootloader identity
             'contact.cache', 'contact.cache.timing',  # Contact-storage diagnostics
             'display.wifi',                          # Connection/display status
+            'wifi.tcp',                              # Read-only app listener/traffic diagnostic
               'dm.held',                               # Read-only pending-DM count
             'flash.health',                          # Read-only flash health diagnostics
             'key.backup.transport',                  # Identity-backup transport capability
@@ -225,38 +234,47 @@ class CLISettingsContractTest(unittest.TestCase):
         compiler = shutil.which('g++') or shutil.which('clang++')
         self.assertIsNotNone(compiler, 'Host C++ compiler required')
         source = COMMON.read_text(encoding='utf-8')
-        setter, getter = methods(source, 'void CommonCLI::handle')
+        original = '\n'.join(methods(source, 'void CommonCLI::handle'))
         keys = ['radio', 'freq', 'af', 'dutycycle', 'int.thresh', 'cad', 'radio.rxgain',
                 'tx', 'rxdelay', 'agc.reset.interval', 'multi.acks', 'txdelay', 'direct.txdelay',
                 'flood.max', 'flood.max.advert', 'flood.max.unscoped']
-        # Preserve the actual conditions and bodies. The only excluded branches
-        # are unrelated settings needing board-specific dependencies.
-        set_blocks = [extract_braced(setter, 'if (strncmp(config, "path.hash.mode", 14)')]
-        get_blocks = [extract_braced(getter, 'if (configKeyEquals(config, "path.hash.mode"))')]
-        set_blocks.append(extract_braced(setter, 'if (strcmp(config, "extra.sf") == 0 ||'))
-        get_blocks.append(extract_braced(getter, 'if (strcmp(config, "extra.sf") == 0)'))
-        for key in keys:
-            block = extract_braced(setter, f'if (memcmp(config, "{key} ", {len(key)+1}) == 0)')
-            # A feature guard immediately before this closing brace controls
-            # the following else-if arm, which is not part of this fixture.
-            block = re.sub(r'\n#if[^\n]*\n\s*}$', '\n}', block)
-            set_blocks.append(block)
-            get_blocks.append(extract_braced(getter, f'if (configKeyEquals(config, "{key}"))'))
         dispatch = ' else '.join(extract_braced(source, f'if (memcmp(command, "{verb} ", 4) == 0)')
                                  for verb in ('get', 'set'))
-        fixture = (ROOT/'test/fixtures/cli_settings/main.cpp').read_text(encoding='utf-8')
-        fixture = fixture.replace('@SET@', ' else '.join(set_blocks))
-        fixture = fixture.replace('@GET@', ' else '.join(get_blocks))
-        fixture = fixture.replace('@DISPATCH@', dispatch)
-        fixture = fixture.replace('@KEY_EQUALS@', extract_braced(source, 'static bool configKeyEquals('))
+        template = (ROOT/'test/fixtures/cli_settings/main.cpp').read_text(encoding='utf-8')
         with tempfile.TemporaryDirectory() as directory:
             cpp, exe = Path(directory)/'test.cpp', Path(directory)/'test.exe'
-            cpp.write_text(fixture, encoding='utf-8')
-            for macros in ([], ['-DUSE_LR2021=1']):
+            for macros in ([], ['-DUSE_LR2021=1'], ['-DSTATION_G3_ESP32=1'],
+                           ['-DSTATION_G3_ESP32=1', '-DUSE_LR2021=1']):
                 with self.subTest(macros=macros):
-                    subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror', *macros,
-                                    '-I', str(ROOT/'src'), str(cpp), '-o', str(exe)], check=True)
-                    subprocess.run([str(exe)], check=True)
+                    # Resolve complete, balanced production methods first. A
+                    # following board-only else-if can own the closing brace
+                    # of extra.sf (or any selected arm). Extracting that arm
+                    # before preprocessing would retain its unmatched #if.
+                    result = subprocess.run(
+                        [compiler, '-E', '-P', '-x', 'c++', *macros, '-'],
+                        input=original, text=True, capture_output=True, check=True)
+                    setter, getter = methods(result.stdout, 'void CommonCLI::handle')
+                    # Keep the actual active conditions and bodies. Only
+                    # unrelated settings needing hardware dependencies are
+                    # omitted; board delegation has its own real G3 suite.
+                    set_blocks = [extract_braced(setter, 'if (strncmp(config, "path.hash.mode", 14)')]
+                    get_blocks = [extract_braced(getter, 'if (configKeyEquals(config, "path.hash.mode"))')]
+                    set_blocks.append(extract_braced(setter, 'if (strcmp(config, "extra.sf") == 0 ||'))
+                    get_blocks.append(extract_braced(getter, 'if (strcmp(config, "extra.sf") == 0)'))
+                    for key in keys:
+                        set_blocks.append(extract_braced(setter, f'if (memcmp(config, "{key} ", {len(key)+1}) == 0)'))
+                        get_blocks.append(extract_braced(getter, f'if (configKeyEquals(config, "{key}"))'))
+                    fixture = template.replace('@SET@', ' else '.join(set_blocks))
+                    fixture = fixture.replace('@GET@', ' else '.join(get_blocks))
+                    fixture = fixture.replace('@DISPATCH@', dispatch)
+                    fixture = fixture.replace('@KEY_EQUALS@', extract_braced(source, 'static bool configKeyEquals('))
+                    cpp.write_text(fixture, encoding='utf-8')
+                    sanitizers = (['-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                                   '-fno-pie', '-no-pie'] if sys.platform.startswith('linux') else [])
+                    subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                                    *sanitizers, *macros, '-I', str(ROOT/'src'), str(cpp),
+                                    '-o', str(exe)], check=True, timeout=60)
+                    subprocess.run([str(exe)], check=True, timeout=15)
 
 
 if __name__ == '__main__':

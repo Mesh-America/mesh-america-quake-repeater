@@ -119,7 +119,14 @@ class CompanionWiFiNtpIntegrationTests(unittest.TestCase):
         self.assertIn("_ntp_sync_pending = true", initialize)
         self.assertIn("_ntp_reconnect_latch.consumeIfConnected", task_loop)
         self.assertIn("_ntp_sync_pending = true", task_loop)
-        self.assertIn("syncTimeWithNTP();", task_loop)
+        self.assertIn("serviceBackgroundNtp(static_cast<uint32_t>(now));", task_loop)
+        self.assertNotIn("syncTimeWithNTP();", task_loop)
+        background = mqtt[
+            mqtt.index("void MQTTBridge::serviceBackgroundNtp(") :
+            mqtt.index("void MQTTBridge::mqttTaskLoop()")
+        ]
+        self.assertIn("pollNtpRefresh(now);", background)
+        self.assertIn("refreshNTP();", background)
         self.assertIn("_last_ntp_sync = millis();", sync)
         self.assertIn(
             "fresh_ntp ? 0 : mqttNtpRetryAt(_last_ntp_sync)", sync
@@ -152,7 +159,8 @@ class CompanionWiFiNtpIntegrationTests(unittest.TestCase):
             implementation.index("ContactInfo* BaseChatMesh::allocateContactSlot")
         ]
         self.assertIn("latest != 0 && latest != UINT32_MAX", bootstrap)
-        self.assertIn("contact_floor > getRTCClock()->getCurrentTime()", bootstrap)
+        self.assertIn("const uint32_t current_time = getRTCClock()->getCurrentTime();", bootstrap)
+        self.assertIn("contact_floor > current_time", bootstrap)
 
 
 if __name__ == "__main__":

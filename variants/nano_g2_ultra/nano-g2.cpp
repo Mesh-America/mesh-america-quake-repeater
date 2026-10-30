@@ -7,7 +7,7 @@
 
 void NanoG2Ultra::begin()
 {
-  NRF52Board::begin();
+  NRF52BoardDCDC::begin();
 
   // set user button
   pinMode(PIN_BUTTON1, INPUT);
@@ -37,6 +37,6 @@ uint16_t NanoG2Ultra::getBattMilliVolts()
   adcvalue = analogRead(PIN_VBAT_READ);
   // Convert the raw value to compensated mv, taking the resistor-
   // divider into account (providing the actual LIPO voltage)
-  return (uint16_t)((float)adcvalue * REAL_VBAT_MV_PER_LSB);
+  return calibrateBatteryMillivolts((uint16_t)((float)adcvalue * REAL_VBAT_MV_PER_LSB));
 }
 #endif

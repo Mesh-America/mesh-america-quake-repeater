@@ -2,6 +2,7 @@
 from itertools import product
 from pathlib import Path
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -18,6 +19,22 @@ HARNESS = r'''
 #include <string>
 #include <vector>
 #include <Identity.h>
+#include <helpers/CompanionPowerDiagnostics.h>
+
+// Keep the production diagnostics delegate in the command path. Identity
+// requests must not consult board power state or trigger a hardware query.
+struct IdentityBoard {
+ bool hasUsbPowerDetect(){assert(false);return false;}
+ bool isUsbPowered(){assert(false);return false;}
+ bool hasSolarChargerDetect(){assert(false);return false;}
+ bool isSolarChargerActive(){assert(false);return false;}
+ uint16_t getBattMilliVolts(){assert(false);return 0;}
+ bool isExternalPowered(){assert(false);return false;}
+ bool isChargerActive(){assert(false);return false;}
+ bool supportsPowerManagement(){assert(false);return false;}
+ uint16_t getBootVoltage(){assert(false);return 0;}
+ bool getSystemWatchdogRunning(bool&){assert(false);return false;}
+} board;
 
 namespace mesh {
 @HEX_CHARS@
@@ -35,6 +52,9 @@ public:
 struct MyMesh {
  mesh::LocalIdentity self_id;
  unsigned fallback_calls=0;
+ // Routing commands have their own production-method tests. This identity
+ // harness exercises fall-through to the shared read-only key query.
+ bool handleTrafficRoutingCommand(const char*,char*,size_t){return false;}
  bool handleLocalControlCommand(const char*,char*,size_t);
 };
 @COMMAND@
@@ -180,7 +200,13 @@ class CompanionIdentityCliTests(unittest.TestCase):
         terminal = method(source, 'void MyMesh::handleTerminalCommand(')
         self.assertIn('handleLocalControlCommand(command, local_reply, sizeof(local_reply))', terminal)
         self.assertIn('terminalOutput().printf("  -> %s\\r\\n", local_reply);', terminal)
-        self.assertIn('terminalOutput().print("  get public.key\\r\\n");', terminal)
+        help_branch = method(terminal, 'else if (strcmp(command, "help") == 0)')
+        self.assertIn('#include "CompanionHelp.inc"', help_branch)
+        self.assertIn('mesh::companion::writePackedCompanionHelp(output);', help_branch)
+        help_fragments = (ROOT / 'examples/companion_radio/CompanionHelp.inc').read_text()
+        self.assertIn('"  get public.key\\r\\n"', help_fragments)
+        packed_help = (ROOT / 'examples/companion_radio/CompanionHelpPacked.cpp').read_text()
+        self.assertIn('#include "CompanionHelp.inc"', packed_help)
         shared = method(source, 'bool MyMesh::handleCommand(')
         self.assertIn('if (handleLocalControlCommand(command, reply, reply_capacity)) return true;', shared)
         self.assertIn('return handleCommand(command, 0, reply);',
@@ -200,7 +226,17 @@ class CompanionIdentityCliTests(unittest.TestCase):
                          r'static_cast<size_t>\(1 \+ rlen\)')
         self.assertNotIn('_serial->writeFrame(out_frame, 1 + rlen);', framed)
         local = method(source, 'bool MyMesh::handleLocalControlCommand(')
-        branch = local[:local.index('  if (handleTxRoutingCommand(')]
+        identity_branch = '  if (strcmp(command, "get public.key") == 0)'
+        start = local.index(identity_branch)
+        branch = method(local, identity_branch)
+        # Other commands before this branch may legitimately have board gates
+        # and setters. Check only this read-only branch, while also rejecting
+        # a feature gate which wraps it from outside its own braces.
+        guard_depth = 0
+        for directive in re.findall(
+                r'^\s*#\s*(if|ifdef|ifndef|endif)\b', local[:start], re.MULTILINE):
+            guard_depth += -1 if directive == 'endif' else 1
+        self.assertEqual(guard_depth, 0, 'Public-key query has an enclosing feature gate')
         self.assertIn('strcmp(command, "get public.key") == 0', branch)
         self.assertNotIn('#if', branch)  # Not gated by private export or logging.
         self.assertNotIn('prv_key', branch)

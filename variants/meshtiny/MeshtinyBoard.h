@@ -9,17 +9,24 @@ protected:
   uint8_t btn_prev_state;
 
 public:
-  MeshtinyBoard() : NRF52Board("Meshtiny OTA") {}
+  MeshtinyBoard() : NRF52Board("Meshtiny_OTA") {}
   void begin();
 
 #if defined(P_LORA_TX_LED)
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
   }
   void onAfterTransmit() override {
     digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED off
   }
 #endif
+
+  bool supportsBatteryCalibration() const override { return true; }
 
   uint16_t getBattMilliVolts() override {
     int adcvalue = 0;
@@ -27,12 +34,12 @@ public:
     analogReference(AR_INTERNAL_3_0);
     delay(10);
     adcvalue = analogRead(PIN_VBAT_READ);
-    return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096;
+    return calibrateBatteryMillivolts((adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096);
   }
 
   const char *getManufacturerName() const override { return "Meshtiny"; }
 
-  void reboot() override { NVIC_SystemReset(); }
+  void reboot() override { NRF52Board::reboot(); }
 
   void shutdownPeripherals() override {
     NRF52Board::shutdownPeripherals();

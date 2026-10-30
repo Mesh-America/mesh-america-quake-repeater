@@ -1,6 +1,7 @@
 #include "FakeFilesystem.h"
 #include <array>
 #include <helpers/LazyPersistence.h>
+#include <helpers/PowerSavingDiagnostics.h>
 #define FILESYSTEM FakeFilesystem
 namespace mesh { struct Utils {
   static void toHex(char* dest, const uint8_t* src, int length) {
@@ -8,6 +9,9 @@ namespace mesh { struct Utils {
     dest[2*length]=0;
   }
 }; }
+// Advert jobs are tested with Morse idle; actual Morse deferral is covered by
+// test_morse_loop_policy.py and the production role-loop extraction fixtures.
+namespace mesh { template<class Radio> bool morseTimingActive(const Radio*) { return false; } }
 struct ContactInfo {};
 class MyMesh;
 using DataStoreHost = MyMesh;
@@ -23,6 +27,7 @@ public:
   bool contact_pending=false;
   unsigned contact_passes=0;
 #include "advert_state.h"
+#include "contact_recovery.h"
   explicit DataStore(FakeFilesystem& fs):_fs(&fs) {}
   File openRead(FakeFilesystem* fs,const char* path){return fs->open(path);}
   void cancelContactWrite(){}
@@ -62,6 +67,7 @@ class MyMesh {
 public:
   DataStore* _store;
   Clock* _ms;
+  RadioDriver* _radio=&radio_driver;
   bool _advert_write_next=true;
   unsigned long dirty_contacts_expiry=0;
   uint8_t dirty_contacts_failures=0;
@@ -77,15 +83,19 @@ public:
   DelayedReplies _delayed_replies;
   bool putBlobByKey(const uint8_t[],int,const uint8_t[],int);
   void servicePersistence();
+  void onContactCacheFlushed();
   bool flushContactsBeforeReboot();
   bool hasPendingWork() const;
+  mesh::powerdiag::Mask pendingWorkReason() const;
   bool canRecoverUsbLogging() const;
   bool isDualRadioActive() const{return false;}
+  bool canIdleDualRadio() const{return true;}
   bool hasOutbound() const{return false;}
   bool isAnyTempRadioActive() const{return false;}
   bool hasPendingOtaApply() const{return false;}
   bool hasPendingReqs() const{return false;}
   bool hasQueuedWorkDue() const{return false;}
+  bool getNextNoiseFloorWakeDelay(uint32_t&) const{return false;}
   bool hasRetryWorkDue() const{return false;}
   bool millisHasNowPassed(uint32_t when) const{return _ms->now>=when;}
   bool isContactWriteDue() const{return _store->contact_pending;}
@@ -261,9 +271,12 @@ void failuresAndLifecycle() {
   enqueue(store,k,b);until(store,fs,Stage::Write);assert(fs.handles==1);
   store.begin();assert(fs.handles==0 && !store.hasPendingAdvertWrites());
   enqueue(store,k,b);until(store,fs,Stage::Write);fs.fail_format=true;
+  store._contact_recovery=DataStore::ContactStorageUnavailable;
   assert(!store.formatFileSystem());assert(fs.handles==0 && get(store,k)==b);
+  assert(store.contactsAreVolatile());
   fs.fail_format=false;drain(store,fs);enqueue(store,k,blob(2));
   assert(store.formatFileSystem());assert(!store.hasPendingAdvertWrites() && get(store,k).empty());
+  assert(!store.contactsAreVolatile() && !store.contactRecoveryPending());
   // Reboot and identity-import paths use the real MyMesh durability gate.
   Clock clock;MyMesh mesh{&store,&clock};enqueue(store,k,b);
   assert(mesh.flushContactsBeforeReboot());assert(get(store,k)==b && fs.handles==0);
@@ -289,6 +302,9 @@ void pendingWorkAndRecovery() {
   FakeFilesystem fs;DataStore store(fs);Clock clock;MyMesh mesh{&store,&clock};
   const auto k=key(1);const auto b=blob(1);
   assert(!mesh.hasPendingWork() && mesh.canRecoverUsbLogging());
+  store._contact_recovery=DataStore::ContactRecoveryPending;
+  assert(mesh.hasPendingWork());
+  store._contact_recovery=0;
   enqueue(store,k,b);
   assert(mesh.hasPendingWork() && !mesh.canRecoverUsbLogging());
   fs.fail_open=true;

@@ -17,6 +17,13 @@ inline bool handleCarrierWaveCommand(Radio* radio, const char* command,
   if (!secondary && !(length == 2 && !strncmp(text, "cw", 2))) return false;
   const char* name = secondary ? "cw2" : "cw";
   const char* args = cli::skipRecentRepeaterSpaces(text + length);
+  // The shared maintenance guard also excludes packet work during Morse RX.
+  // It is not evidence that the transmitter is emitting a continuous carrier.
+  if (radio && !*args && (radio->isMorseRxActive() || radio->isMorseTxActive())) {
+    snprintf(reply, capacity, "> Morse %s owns radio; use get morse",
+        radio->isMorseRxActive() ? "RX" : "TX");
+    return true;
+  }
   if (!radio || !radio->supportsCarrierWave()) {
     snprintf(reply, capacity, "Error: CW unsupported on this radio");
     return true;

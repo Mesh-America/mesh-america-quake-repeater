@@ -34,6 +34,8 @@ public:
         return "Seeed Wio E5 mini";
     }
 
+    bool supportsBatteryCalibration() const override { return true; }
+
     uint16_t getBattMilliVolts() override {
         analogReadResolution(12);
         uint32_t raw = 0;
@@ -43,7 +45,7 @@ public:
         // 1.73 * 5 V over eight 12-bit samples is raw * 8650 / 32768.
         // Fixed-point math avoids pulling double-precision helpers into this
         // flash-constrained STM32WL build; the half-divisor rounds to nearest.
-        return (uint16_t)((raw * 8650UL + 16384UL) >> 15);
+        return calibrateBatteryMillivolts((uint16_t)((raw * 8650UL + 16384UL) >> 15));
     }
 };
 

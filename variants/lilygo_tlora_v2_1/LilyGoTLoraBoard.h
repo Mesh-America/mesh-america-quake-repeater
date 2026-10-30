@@ -10,6 +10,8 @@ public:
     return "LILYGO T-LoRa V2.1-1.6";
   }
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
     analogReadResolution(12);
 
@@ -19,7 +21,7 @@ public:
     }
     raw = raw / 8;
 
-    return (2 * raw);
+    return calibrateBatteryMillivolts((2 * raw));
   }
 
   uint32_t getIRQGpio() override {

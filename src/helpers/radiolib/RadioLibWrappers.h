@@ -1,6 +1,10 @@
 #pragma once
 
+#include <Arduino.h>
+
 #include "NoiseFloorEstimator.h"
+#include "../TelemetryHistoryConfig.h"
+#include "../CarrierTools.h"
 
 #include <Mesh.h>
 #include <RadioLib.h>
@@ -8,6 +12,11 @@
 #include "CadTiming.h"
 #include "RadioAirtime.h"
 #include "RXPowerSaving.h"
+#include "HilTxFrequencyGuard.h"
+#include "ESP32RadioTrace.h"
+#if defined(STATION_G3_ESP32)
+#include <StationG3RadioSlot.h>
+#endif
 
 // Fallback RX powersaving timings, only used until setRxPowerSaving() is called
 // (begin() always applies the persisted values). The authoritative defaults live
@@ -28,7 +37,19 @@ struct PacketMillis {
 };
 
 class RadioLibWrapper : public mesh::Radio {
+public:
+  static constexpr bool SupportsRxPowerSaving = false;
 protected:
+  // Mode is owned by this loop, not by the ISR or another wrapper.
+  uint8_t state = 0;
+  uint8_t _interrupt_slot = 0xff;
+  bool _loop_event_pending = false;
+  uint8_t _irq_probe_failures = 0;
+  bool registerInterruptAction();
+  void unregisterInterruptAction();
+  bool hasAssertedRadioInterrupt() const;
+  bool hasPendingRadioInterrupt() const;
+  bool claimRadioInterrupt();
   PhysicalLayer* _radio;
   mesh::MainBoard* _board;
   uint32_t n_recv, n_sent, n_recv_errors;
@@ -40,11 +61,21 @@ protected:
   uint32_t _cad_scan_timeout_override_ms;
   bool _noise_floor_valid;
   bool _noise_floor_secondary_valid = false;
+#if MESH_ENABLE_TELEMETRY_HISTORY
+  uint32_t _nf_published_at[2] = {};
+  uint32_t _nf_published_generation[2] = {};
+  uint8_t _nf_published_valid = 0;
+#endif
   bool _nf_refresh_requested;
   NoiseFloorEstimator _floor_estimator;
   NoiseFloorEstimator _secondary_floor_estimator;
   uint32_t _rx_mode_checked_at = 0;
   uint8_t _rx_mode_failures = 0;
+  // Independent of calibration and watchdog counters: repeated failed starts
+  // must retain their backoff through an AGC reset or radio recovery attempt.
+  uint32_t _rx_retry_at = 0;
+  uint16_t _rx_retry_delay_ms = 0;
+  bool _rx_retry_pending = false;
   unsigned long last_recv_millis;
   unsigned long last_radio_interrupt_millis;  // updated on any ISR event, even CRC errors
   bool _rx_ps_enabled;
@@ -80,6 +111,14 @@ protected:
   mesh::RadioProfiles _profiles;
   uint8_t _active_profile = 0;
   uint16_t _physical_preamble = 0;
+#if MESH_ENABLE_MESHTEXT_WIRE || MESH_ENABLE_ETHERNET_WIRE
+  mesh::RadioProfileProtocol _physical_protocol = mesh::RadioProfileProtocol::MeshCore;
+  // Wire settings are a transaction with the modulation tuple. Unsupported
+  // wrappers decline rather than claiming a profile was applied.
+  virtual bool applyProtocol(mesh::RadioProfileProtocol protocol) {
+    return protocol == mesh::RadioProfileProtocol::MeshCore;
+  }
+#endif
   uint32_t _profile_generation = 0;
   uint32_t _profile_scan_generation[2] = {};
   uint32_t _profile_visit_stamp = 0;
@@ -87,13 +126,95 @@ protected:
   bool _profile_rxps_suspended = false;
   bool _profile_saved_rxps = false;
   bool _profile_refresh_required = false;
+  // A failed parameter transaction left the physical tuple untrusted. Unlike
+  // an ordinary refresh, its FIFO and activity flags cannot identify a packet.
+  bool _profile_repair_required = false;
+#if defined(NRF52_PLATFORM)
+  // Published by the scanner before the final sleep predicates. The late
+  // query uses integers only: floating-point work can leave a stale FPU event.
+  uint32_t _profile_idle_visit_ticks = 0;
+  uint32_t _profile_idle_stamp = 0;
+  uint32_t _profile_idle_switch_us = 0;
+  uint16_t _profile_idle_preamble = 0;
+#endif
+#if defined(ESP32_PLATFORM)
+  // ESP Timer advances by the RTC interval after light sleep. Retain its
+  // full domain as well as the legacy scanner timestamp: a long RX hold or
+  // delayed loop must not resurrect a visit after micros() wraps.
+  uint64_t _esp32_profile_visit_started_us = 0;
+  uint64_t _esp32_profile_idle_stamp_us = 0;
+  uint32_t _esp32_profile_idle_visit_us = 0;
+  uint32_t _esp32_profile_idle_switch_us = 0;
+  uint32_t _esp32_profile_idle_generation[2] = {};
+  uint16_t _esp32_profile_idle_preamble = 0;
+  uint8_t _esp32_profile_idle_profile = 0;
+#endif
+#if defined(MESH_HIL_TX_FREQ_MHZ)
+  bool hilPacketTransmitAllowed() const;
+#endif
+#if MESH_ENABLE_TX_BEACONS
+  // The normal cache is never overwritten by a transmit-only excursion.
+  // Retain ownership through failed TX and restoration retries.
+  bool _beacon_owned = false;
+  bool _beacon_restoring = false;
+  uint8_t _beacon_restore_profile = 0;
+  uint32_t _beacon_restore_at = 0;
+  uint32_t _beacon_cad_timeout = 0;
+#if defined(MESH_HIL_TX_FREQ_MHZ)
+  // Beacon excursions deliberately leave the normal profile cache intact.
+  // Zero revokes TX proof until the complete physical setup has succeeded.
+  float _hil_beacon_tx_frequency_mhz = 0;
+#endif
+  void cacheBeaconRestoreParams();
+#endif
+#if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX
   bool _cw_active = false;
   bool _cw_stopping = false;
   bool _cw_board_tx = false;
   uint8_t _cw_profile = 0, _cw_restore_profile = 0;
   uint32_t _cw_until = 0, _cw_retry_at = 0, _cw_generation = 0;
+#else
+  static constexpr bool _cw_active = false;
+#endif
+#if MESH_ENABLE_CARRIER_TOOLS
+  mesh::MorseTx _morse;
+  bool _morse_owned = false;
+  float _morse_frequency = mesh::MorseTx::DefaultFrequencyMHz;
+  uint8_t _morse_wpm = mesh::MorseTx::DefaultWpm;
+#else
+  static constexpr bool _morse_owned = false;
+#endif
+#if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX
+  uint32_t _morse_generation[2] = {};
+#endif
+  // Allocate the bounded capture only on explicit RX admission. Permanently
+  // reserving 4096 characters would break small nRF52 Companion RAM budgets.
+#if MESH_ENABLE_MORSE_RX
+  mesh::MorseRx* _morse_rx = nullptr;
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  mesh::MorseRssiTrace* _morse_trace = nullptr;
+#endif
+  float _morse_rx_frequency = mesh::MorseTx::DefaultFrequencyMHz;
+  uint32_t _morse_rx_next_sample = 0, _morse_capture_generation = 0;
+  bool _morse_rx_owned = false;
+  uint8_t _morse_rx_read_errors = 0;
+#endif
+#if MESH_ENABLE_MORSE_RX || !defined(STM32_PLATFORM)
+  // Non-STM wrappers retain their native hook declarations for an explicit
+  // RX-disabled build; those hooks may still compile but cannot be admitted.
+  bool _morse_rx_fsk_mode = false;
+#endif
+  // End Morse RX state.
+#if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX
   bool stopCarrierWave();
   bool serviceCarrierWave();
+#endif
+#if MESH_ENABLE_CARRIER_TOOLS
+  bool serviceMorseTx();
+#endif
+#if MESH_ENABLE_MORSE_RX
+  bool serviceMorseRx();
+#endif
   mesh::RadioParamApplyResult tuneProfile(uint8_t profile);
   void serviceProfileScan();
 
@@ -102,9 +223,21 @@ protected:
   // refresh briefly drops to continuous RX, publishes an average, then re-arms
   // the duty cycle.
   bool _nf_calib_active;
+  // Explicit arming distinguishes a legitimate wrapped deadline of zero.
+  bool _nf_window_armed = false;
+  // Only an accepted full block earns the lazy routine cadence. Held rises
+  // and failed/timeout attempts retain a one-minute retry without hot polling.
+  bool _nf_lazy_refresh = false;
+  bool _nf_refresh_attempted = false;
   unsigned long _nf_last_calib;       // millis of last completed/attempted window
   unsigned long _nf_calib_deadline;   // abort window if the batch can't complete
   unsigned long _nf_sample_from;      // no samples before this (RX entry settle)
+  // Append diagnostic state so existing radio hot fields retain their offsets.
+  uint32_t _rx_ps_eff_rx_us = 0;
+  uint32_t _rx_ps_eff_sleep_us = 0;
+  int16_t _rx_ps_last_error = RADIOLIB_ERR_NONE;
+  uint32_t _rx_ps_arm_failures = 0;
+  RxPowerSavingArmRetryState _rx_ps_arm_retry;
   // The T096 SX1262 bench test found RSSI valid and stable by 7 ms after RX
   // entry, including the 500 kHz/SF5 worst-case profile. Retain the
   // conservative 20 ms path for the other radio families.
@@ -140,6 +273,11 @@ protected:
     return estimator.samplesRemaining() * (cycle_us / 1000000.0f);
   }
 
+  #if defined(STATION_G3_ESP32)
+  static bool hasDirectRadioResetPin() {
+    return station_g3::activePins().reset != static_cast<uint8_t>(RADIOLIB_NC);
+  }
+  #else
   static constexpr bool hasDirectRadioResetPin() {
 #if defined(P_LORA_RESET)
     return P_LORA_RESET != RADIOLIB_NC;
@@ -147,6 +285,7 @@ protected:
     return false;
 #endif
   }
+  #endif
   bool prepareRadioHardReset() {
     if (_board->supportsRadioHardReset()) return _board->resetRadio();
     // A direct NRST is pulsed by the RadioLib begin() call that follows.
@@ -159,7 +298,9 @@ protected:
   void idle() override;
   void startRecv() override;
   void rxPsWatchdogCheck();
+  void requestPeriodicNoiseFloorRefresh();
   void requestNoiseFloorRefresh();
+  bool resetAGCIfIdle(bool refresh_floor = true);
   void requestRestartRecv();
   bool isPacketPendingOrReceiving();
   void noiseFloorCalibCheck(unsigned long now);
@@ -179,9 +320,23 @@ protected:
     const float bw = _params_valid ? _cur_bw : static_cast<float>(LORA_BW);
     return cadScanTimeoutMillis(sf, bw);
   }
+#if MESH_ENABLE_TX_BEACONS
+  // A TX-only excursion supplies its own timeout without using the cached
+  // normal RX tuple. Chips with different CAD completion rules override it.
+  virtual int16_t performChannelScanWithTimeout(unsigned long timeout_ms);
+#else
   int16_t performChannelScanWithTimeout(unsigned long timeout_ms);
+#endif
   virtual int startReceiveMode();
+  int startReceivePowerSaving();
   virtual void stopReceiveDutyCycle();
+  virtual int16_t armDutyCycle(RadioLibIrqFlags_t irq_flags, RadioLibIrqFlags_t irq_mask,
+      uint32_t* effective_rx_us, uint32_t* effective_sleep_us) {
+    (void)irq_flags; (void)irq_mask; (void)effective_rx_us; (void)effective_sleep_us;
+    return RADIOLIB_ERR_UNSUPPORTED;
+  }
+  virtual int16_t stopDutyCycleHardware() { return _radio->standby(); }
+  virtual int16_t startContinuousReceive() { return _radio->startReceive(); }
   virtual bool isPacketReady();
   // true while the chip cannot service SPI (RX duty-cycle sleep window, or
   // briefly while processing a command); radios expose this via the BUSY pin
@@ -191,22 +346,74 @@ protected:
   virtual bool radioDeepInit() { return false; }
   virtual bool supportsRadioDeepInit() const { return false; }
   virtual bool applyParams(float freq, float bw, uint8_t sf, uint8_t cr) = 0;
+#if MESH_RADIO_SWITCH_TUNING
+  virtual uint8_t getDriverSwitchFeatures() const { return 0; }
+  virtual uint8_t driverSwitchCapabilities() const { return 0; }
+  virtual void setDriverSwitchFeatures(uint8_t) {}
+#endif
   virtual int16_t applyCachedTxPower(int8_t dbm) {
     return _radio->setOutputPower(dbm);
   }
+#if MESH_ENABLE_TX_BEACONS
+  // External amplifiers override this in antenna dBm. The public capability
+  // still checks the board's explicit limits before consulting this hook.
+  virtual bool checkBeaconOutputPower(float frequency_mhz, int8_t dbm) const;
+#endif
   virtual bool applyRxBoostedGainMode(bool) { return false; }
+#if MESH_ENABLE_CARRIER_TOOLS || !defined(STM32_PLATFORM)
   virtual int16_t enterCarrierWave() { return _radio->transmitDirect(); }
+#endif
+#if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX || !defined(STM32_PLATFORM)
+  virtual bool validateMorseFrequency(float frequency_mhz) const {
+    return isfinite(frequency_mhz) && frequency_mhz >= 150.0f && frequency_mhz <= 960.0f;
+  }
+#endif
+#if MESH_ENABLE_CARRIER_TOOLS || !defined(STM32_PLATFORM)
+  // Configure the oscillator/modem once, before the first mark. Subsequent
+  // marks only re-enter direct TX; in particular SX127x must not rebuild FSK
+  // between dots. The cached LoRa tuple is deliberately left untouched.
+  virtual int16_t prepareMorseCarrier(float frequency_mhz) {
+    if (!_board->prepareRadioFrequency(frequency_mhz)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    int16_t result = _radio->setFrequency(frequency_mhz);
+    if (result == RADIOLIB_ERR_NONE && _dbm_valid) result = applyCachedTxPower(_cur_dbm);
+    return result;
+  }
+  virtual int16_t enterMorseCarrier() { return _radio->transmitDirect(); }
+  virtual int16_t leaveMorseCarrier() { return _radio->standby(); }
+#endif
+#if MESH_ENABLE_MORSE_RX || !defined(STM32_PLATFORM)
+  // Compact integrated-STM builds cannot receive Morse. Do not pin unused
+  // native RX thunks and vtable slots in their already full application slot.
+  virtual float morseReceiverBandwidthKHz() const { return 0.0f; }
+  virtual int16_t prepareMorseReceiver(float frequency_mhz) {
+    (void)frequency_mhz;
+    // A native, fully restorable continuous-RSSI modem hook is required.
+    // LoRa's symbol detector is not a proven CW envelope receiver.
+    return RADIOLIB_ERR_UNKNOWN;
+  }
+  virtual int16_t startMorseReceiver() { return _radio->startReceive(); }
+  virtual float readMorseRssi() { return getCurrentRSSI(); }
+#if MESH_ENABLE_MORSE_RX
+  virtual bool canAllocateMorseReceiver() const;
+#endif
+#endif
   // Native-CW radios keep their modem. Reapply cached power in case a meter
   // sweep failed halfway through; SX127x also rebuilds its LoRa configuration.
+#if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX || !defined(STM32_PLATFORM)
   virtual bool restoreCarrierWaveModem() {
     return !_dbm_valid || applyCachedTxPower(_cur_dbm) == RADIOLIB_ERR_NONE;
   }
+#endif
   // Dual-profile scanning already suspends RXPS. Supported radios can also
   // retain their oscillator across the intervening standby/reconfigure steps.
   // Called only at the safe scan-mode entry/exit boundary, not during a packet.
   virtual void setProfileStandbyWarm(bool) {}
   virtual void beginProfileRetune(bool) {}
   virtual void endProfileRetune(bool) {}
+#if (defined(MC_NRF_RADIO_PROFILE_PRIORITY) && MC_NRF_RADIO_PROFILE_PRIORITY) \
+    || (defined(MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD) && MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD)
+  virtual bool ownsWarmProfileRetune() const { return false; }
+#endif
   // 0 = reconfigure from idle, 1 = resume RX afterwards, 2 = currently busy.
   uint8_t beginReconfigure();
   void endReconfigure(bool resume_rx);
@@ -217,7 +424,7 @@ protected:
   void checkReceiveMode(uint32_t now);
   virtual void doResetAGC();
 
-public:
+protected:
   RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board)
       : _radio(&radio), _board(&board), _noise_floor_valid(false), _nf_refresh_requested(true),
         _rx_ps_enabled(false), _rx_ps_armed(false),
@@ -237,18 +444,91 @@ public:
           _cad_scan_timeout_override_ms = 0;
         }
 
+  // Concrete wrappers detach their callbacks before base destruction. A
+  // protected nonvirtual lifetime rejects deletion through a borrowed base
+  // pointer while releasing any retained, explicitly allocated RX capture.
+  ~RadioLibWrapper() {
+#if MESH_ENABLE_MORSE_RX
+    delete _morse_rx;
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+    delete _morse_trace;
+#endif
+#endif
+  }
+
+public:
   void begin() override;
+#if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX
   mesh::RadioParamApplyResult setCarrierWave(uint8_t profile, uint32_t duration_ms) override;
   bool isCarrierWaveActive() const override { return _cw_active; }
   uint8_t carrierWaveProfile() const override { return _cw_profile; }
   uint32_t carrierWaveRemainingMillis() const override;
+#endif
+#if MESH_ENABLE_CARRIER_TOOLS
+  bool supportsMorseTx() const override;
+  mesh::MorseTxResult startMorseTx(float frequency_mhz, uint8_t wpm, const char* text) override;
+  mesh::MorseTxResult stopMorseTx() override;
+  bool isMorseTxActive() const override { return _morse_owned && _cw_active; }
+  float morseTxFrequency() const override { return _morse_frequency; }
+  uint8_t morseTxWpm() const override { return _morse_wpm; }
+  uint32_t morseTxRemainingMillis() const override { return _morse.remainingMillis(millis()); }
+#endif
+#if MESH_ENABLE_MORSE_RX
+  bool supportsMorseRx() const override { return false; }
+  mesh::MorseRxResult startMorseRx(float frequency_mhz, uint8_t wpm, uint32_t duration_ms) override;
+  mesh::MorseRxResult stopMorseRx() override;
+  bool isMorseRxActive() const override { return _morse_rx_owned && _cw_active; }
+  bool morseRxRecovering() const override { return isMorseRxActive() && _cw_stopping; }
+  bool morseRxLearning() const override { return isMorseRxActive() && _morse_rx && _morse_rx->learning(millis()); }
+  float morseRxFrequency() const override { return _morse_rx_frequency; }
+  float morseRxBandwidthKHz() const override { return morseReceiverBandwidthKHz(); }
+  uint32_t morseRxRemainingMillis() const override { return _morse_rx ? _morse_rx->remainingMillis(millis()) : 0; }
+  uint32_t morseCaptureGeneration() const override { return _morse_capture_generation; }
+  bool morseRxDiagnostics(mesh::MorseRxDiagnostics& out) const override {
+    if (!_morse_rx) { out = {}; return false; }
+    _morse_rx->diagnostics(out);
+    out.read_errors = _morse_rx_read_errors;
+    return true;
+  }
+  size_t morseCaptureLength() const override { return _morse_rx ? _morse_rx->length() : 0; }
+  bool morseCaptureTruncated() const override { return _morse_rx && _morse_rx->truncated(); }
+  const char* morseCaptureText() const override { return _morse_rx ? _morse_rx->text() : ""; }
+  size_t readMorseCapture(size_t offset, char* out, size_t capacity) const override;
+  void clearMorseCapture() override;
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  size_t morseTraceLength() const override { return _morse_trace ? _morse_trace->length() : 0; }
+  uint32_t morseTraceTotal() const override { return _morse_trace ? _morse_trace->total() : 0; }
+  bool morseTraceTruncated() const override { return _morse_trace && _morse_trace->truncated(); }
+  bool readMorseTrace(size_t offset, mesh::MorseRssiTraceEntry& out) const override {
+    return _morse_trace && _morse_trace->read(offset, out);
+  }
+#endif
+#endif
   mesh::RadioProfiles* profiles() override { return &_profiles; }
   const mesh::RadioProfiles* profiles() const override { return &_profiles; }
+#if MESH_RADIO_SWITCH_TUNING
+  mesh::RadioSwitchCapabilities switchTuningCapabilities() const override;
+  mesh::RadioSwitchTuning switchTuning() const override;
+  uint32_t switchSpiHz() const override;
+  bool configureBootSwitchTuning(const mesh::RadioSwitchTuning& tuning) override;
+  mesh::RadioParamApplyResult trySetSwitchTuning(const mesh::RadioSwitchTuning& tuning,
+      bool (*persist)(void*, const mesh::RadioSwitchTuning&) = nullptr,
+      void* context = nullptr) override;
+#endif
   bool validateProfile(const mesh::RadioProfileParams& params) const override;
   uint8_t receiveProfile() const override { return _active_profile; }
   uint32_t receiveProfileGeneration() const override { return _profile_generation; }
   mesh::RadioParamApplyResult prepareTransmitProfile(uint8_t profile) override;
   mesh::RadioParamApplyResult prepareTransmitProfile(uint8_t profile, bool reply_rx_override) override;
+#if MESH_ENABLE_TX_BEACONS
+  bool validateBeaconPower(float frequency_mhz, int8_t power) const override;
+  mesh::RadioParamApplyResult prepareBeaconTransmit(const mesh::RadioProfileParams& params,
+                                                   int8_t power) override;
+  mesh::RadioParamApplyResult restoreBeaconReceive() override;
+  bool isBeaconChannelBusy() override;
+  uint32_t getBeaconAirtime(const mesh::RadioProfileParams& params, int length) override;
+  bool isBeaconRadioOwned() const override { return _beacon_owned; }
+#endif
   mesh::RadioParamApplyResult tryRestoreCodingRate(uint8_t cr) override;
   mesh::RadioParamApplyResult trySetPrimaryParams(const mesh::RadioProfileParams& params,
       bool temporary, const uint32_t* timings = nullptr) override;
@@ -264,6 +544,13 @@ public:
   void onSendFinished() override;
   bool isInRecvMode() const override;
   bool setRxPowerSaving(bool enabled, uint32_t rx_us, uint32_t sleep_us) override;
+  bool supportsRxPowerSaving() const override { return SupportsRxPowerSaving; }
+  RxPowerSavingStatus getRxPowerSavingStatus() const;
+  virtual uint32_t rxPowerSavingTransitionUs() const { return rxPowerSavingDefaultTransitionUs(); }
+  void getRxPowerSavingTimings(uint32_t& rx_us, uint32_t& sleep_us) const {
+    rx_us = _rx_ps_rx_us;
+    sleep_us = _rx_ps_sleep_us;
+  }
   bool isRxPowerSavingContinuousFallback() const override {
     return _rx_ps_enabled && _rx_ps_continuous_fallback;
   }
@@ -314,6 +601,19 @@ public:
     }
     return getNoiseFloorDbm();
   }
+#if MESH_ENABLE_TELEMETRY_HISTORY
+  bool getNoiseFloorReading(uint8_t profile, float& dbm,
+                           uint32_t& published_at_ms) const override {
+    if (profile > 1 || (profile == 1 && !_profiles.enabled())
+        || !(_nf_published_valid & (1U << profile))
+        || _nf_published_generation[profile] != _profiles.generation[profile]
+        || !(profile == 1 ? _noise_floor_secondary_valid : _noise_floor_valid)) return false;
+    dbm = (profile == 1 ? _noise_floor_secondary_centi_dbm : _noise_floor_centi_dbm) / 100.0f;
+    published_at_ms = _nf_published_at[profile];
+    return true;
+  }
+  void requestNoiseFloorMeasurement() override { requestNoiseFloorRefresh(); }
+#endif
   float getNoiseFloorCalibrationSecondsRemaining() const override {
     const float primary = profileNoiseFloorSecondsRemaining(0);
     if (!_profiles.enabled()) return primary;
@@ -339,8 +639,11 @@ public:
     return cadScanTimeoutMillis();
   }
   void resetAGC() override;
+  bool tryResetAGC() override;
+  uint32_t getRecoveryCount() const override { return n_wd_soft + n_wd_hard; }
 
   void loop() override;
+  bool setTrackerSleep(bool sleeping) override;
   bool recoverRadio(bool hard) override;
 
   uint32_t getPacketsRecv() const { return n_recv; }
@@ -351,14 +654,20 @@ public:
   // true while the watchdog is actively watching for BUSY transitions; used by
   // the app's hasPendingWork() to keep the MCU out of light sleep for the window
   bool isWatchdogObserving() const { return _wd_observe_until != 0; }
-  // true while a noise-floor batch needs prompt loop service; the app's
-  // hasPendingWork() keeps the MCU awake for the bounded spaced-sample window.
+  // Full-batch RF ownership for UI and recovery guards. CPU idle between
+  // readings is governed separately by getNoiseFloorWakeDelay().
   bool isCalibratingNoiseFloor() const override {
-    return _nf_calib_active
+    return isInRecvMode() && !_rx_ps_armed && (_nf_calib_active
         || (_nf_refresh_requested
-            && (!_rx_ps_enabled || _rx_ps_continuous_fallback));
+            && (!_rx_ps_enabled || _rx_ps_continuous_fallback)));
   }
-  void resetStats() { n_recv = n_sent = n_recv_errors = 0; }
+  bool getReceiveRetryDelay(uint32_t now, uint32_t& delay_ms) const override;
+  bool getNoiseFloorWakeDelay(uint32_t now, uint32_t& delay_ms) const override;
+  bool getProfileIdleDelay(uint32_t& delay_ms) const override;
+  void resetStats() {
+    n_recv = n_sent = n_recv_errors = _rx_ps_arm_failures = 0;
+    _rx_ps_arm_retry.reset();
+  }
 
   uint8_t getRadioState() const override;
   unsigned long getLastRecvMillis() const override { return last_recv_millis; }

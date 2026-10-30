@@ -21,13 +21,20 @@ public:
   void begin();
 
 #if defined(P_LORA_TX_LED)
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED on
   }
   void onAfterTransmit() override {
     digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED off
   }
 #endif
+
+  bool supportsBatteryCalibration() const override { return true; }
 
   uint16_t getBattMilliVolts() override;
 
@@ -43,7 +50,7 @@ public:
     NRF52Board::shutdownPeripherals();
 
     // set led on and wait for button release before poweroff
-    digitalWrite(PIN_LED, LOW);
+    if (mesh::leds::enabled()) digitalWrite(PIN_LED, LOW);
 #ifdef PIN_USER_BTN
     while(digitalRead(PIN_USER_BTN) == USER_BTN_PRESSED);
 #endif

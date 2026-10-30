@@ -4,13 +4,19 @@
 #include "NRF52VoltagePolicy.h"
 #include "Nrf52BootloaderVersion.h"
 #include "nrf52/SoftDeviceState.h"
+#include "nrf52/SleepCycleState.h"
+#include "nrf52/ShutdownLeds.h"
+#include "nrf52/BluetoothLed.h"
 #include <target.h>
 #include "UserGpioPinPolicy.h"
+#include "PowerSavingDiagnostics.h"
+#include "Nrf52RegulatorPlatform.h"
 
 #include <bluefruit.h>
 #include "ble_gap.h"
 #include "ble_hci.h"
 #include <nrf.h>
+#include <nrf_nvic.h>
 #include <nrf_soc.h>
 #ifdef USE_TINYUSB
 #include <Adafruit_TinyUSB.h>
@@ -24,6 +30,88 @@ static BLEDfu bledfu;
 static uint16_t ota_conn_handle = BLE_CONN_HANDLE_INVALID;
 static bool ota_active = false;
 static bool ota_ble_started = false;
+
+// Intentional reboot paths share the recovery policy's clean-reset marker.
+// Keep this optional for standalone board/library builds without the policy.
+extern "C" void meshRegulatorCleanReset() __attribute__((weak));
+extern "C" void meshRegulatorResumeRecovery() __attribute__((weak));
+
+namespace {
+volatile mesh::power::RecoveryRecord regulator_recovery_record
+    __attribute__((section(".regulator_recovery"), used, aligned(4)));
+static_assert(sizeof(mesh::power::RecoveryRecord) <= 64,
+              "nRF52 regulator recovery exceeds retained allocation");
+uint32_t regulator_reset_reason = 0;
+uint8_t regulator_shutdown_reason = 0;
+}
+
+extern "C" {
+extern uint8_t __regulator_recovery_start__[] __attribute__((weak));
+extern uint8_t __regulator_recovery_end__[] __attribute__((weak));
+}
+
+// Capture before the core's SystemInit constructor applies reset errata and
+// before power management clears GPREGRET2. This also runs on boards without
+// NRF52_POWER_MANAGEMENT; the recovery policy never writes either GPREGRET.
+static void __attribute__((constructor(101))) nrf52_regulator_reset_capture() {
+  regulator_reset_reason = NRF_POWER->RESETREAS;
+  regulator_shutdown_reason = NRF_POWER->GPREGRET2;
+}
+
+namespace mesh { namespace power {
+volatile RecoveryRecord& platformRecoveryRecord() {
+  return regulator_recovery_record;
+}
+
+bool platformRecoverySupported() {
+  return reinterpret_cast<uintptr_t>(__regulator_recovery_start__) == 0x20006050UL
+      && reinterpret_cast<uintptr_t>(__regulator_recovery_end__) == 0x20006090UL
+      && reinterpret_cast<uintptr_t>(&regulator_recovery_record) == 0x20006050UL;
+}
+
+ResetKind platformResetKind() {
+  // RESETREAS is sticky. Boards without power management otherwise retain
+  // wake bits forever and could hide a later real watchdog failure.
+  static bool acknowledged = false;
+  if (!acknowledged) {
+    uint8_t sd_enabled = 0;
+    if (mesh_nrf52::softdeviceIsEnabled(sd_enabled) != NRF_SUCCESS)
+      return ResetKind::Unknown;
+    if (sd_enabled) {
+      if (sd_power_reset_reason_clr(0xFFFFFFFFUL) != NRF_SUCCESS)
+        return ResetKind::Unknown;
+    } else {
+      NRF_POWER->RESETREAS = 0xFFFFFFFFUL;
+    }
+    acknowledged = true;
+  }
+  // A deliberate SYSTEMOFF, reset-pin press, or debugger event never counts
+  // against DCDC, even if another latched reason bit is also present.
+  if (regulator_shutdown_reason == 0x4C  // low voltage
+      || regulator_shutdown_reason == 0x55  // user shutdown
+      || regulator_shutdown_reason == 0x42)  // boot protection
+    return ResetKind::Intentional;
+  const uint32_t reason = regulator_reset_reason;
+  if (reason & POWER_RESETREAS_RESETPIN_Msk) return ResetKind::Intentional;
+#ifdef POWER_RESETREAS_DIF_Msk
+  if (reason & POWER_RESETREAS_DIF_Msk) return ResetKind::Intentional;
+#endif
+  uint32_t wakes = 0;
+#ifdef POWER_RESETREAS_OFF_Msk
+  wakes |= POWER_RESETREAS_OFF_Msk;
+#endif
+#ifdef POWER_RESETREAS_LPCOMP_Msk
+  wakes |= POWER_RESETREAS_LPCOMP_Msk;
+#endif
+#ifdef POWER_RESETREAS_VBUS_Msk
+  wakes |= POWER_RESETREAS_VBUS_Msk;
+#endif
+  if (reason & wakes) return ResetKind::Wake;
+  if (reason & (POWER_RESETREAS_DOG_Msk | POWER_RESETREAS_LOCKUP_Msk
+                | POWER_RESETREAS_SREQ_Msk)) return ResetKind::Crash;
+  return reason == 0 ? ResetKind::Cold : ResetKind::Unknown;
+}
+}} // namespace mesh::power
 
 // A normal internal-flash operation completes in milliseconds. One minute is
 // deliberately generous for other legitimate application work while still
@@ -109,7 +197,7 @@ bool NRF52Board::rebootToUf2Bootloader() {
     NRF_POWER->GPREGRET = DFU_MAGIC_UF2_RESET;
   }
 
-  NVIC_SystemReset();
+  reboot();
   return true;
 }
 
@@ -134,6 +222,50 @@ void NRF52Board::begin() {
     // CC310 TRNG is higher quality and environment-independent vs radio RSSI noise.
     nRFCrypto.begin();
   #endif
+}
+
+void NRF52Board::reboot() {
+  if (meshRegulatorCleanReset) meshRegulatorCleanReset();
+  NVIC_SystemReset();
+}
+
+uint8_t NRF52Board::mcuRegulatorModes() const {
+  return cpu_dcdc_supported
+      ? mesh::power::REGULATOR_DCDC | mesh::power::REGULATOR_LDO : 0;
+}
+
+mesh::power::RegulatorMode NRF52Board::defaultMcuRegulatorMode() const {
+  return cpu_dcdc_supported ? mesh::power::RegulatorMode::Dcdc
+                            : mesh::power::RegulatorMode::Default;
+}
+
+mesh::power::RegulatorMode NRF52Board::activeMcuRegulatorMode() const {
+  return cpu_dcdc_supported ? cpu_regulator_mode
+                            : mesh::power::RegulatorMode::Default;
+}
+
+bool NRF52Board::applyMcuRegulator(mesh::power::RegulatorMode mode) {
+  using mesh::power::RegulatorMode;
+  if (!cpu_dcdc_supported) return false;
+  if (mode == RegulatorMode::Default) mode = defaultMcuRegulatorMode();
+  if (mode != RegulatorMode::Dcdc && mode != RegulatorMode::Ldo) return false;
+
+  uint8_t sd_enabled = 0;
+  if (mesh_nrf52::softdeviceIsEnabled(sd_enabled) != NRF_SUCCESS) return false;
+  const bool dcdc = mode == RegulatorMode::Dcdc;
+  if (sd_enabled) {
+    if (sd_power_dcdc_mode_set(dcdc ? NRF_POWER_DCDC_ENABLE
+                                  : NRF_POWER_DCDC_DISABLE) != NRF_SUCCESS)
+      return false;
+  } else {
+    NRF_POWER->DCDCEN = dcdc ? 1 : 0;
+  }
+  cpu_regulator_mode = mode;
+  return true;
+}
+
+void NRF52Board::applyLedPolicy() {
+  mesh_nrf52::applyBluetoothLedPolicy();
 }
 
 void NRF52Board::loop() {
@@ -161,12 +293,24 @@ void NRF52Board::loop() {
 #endif
 }
 
-#ifdef NRF52_POWER_MANAGEMENT
 uint16_t NRF52Board::calibrateBatteryMillivolts(uint16_t raw_mv) const {
-  return mesh::power::calibratedMillivolts(
-      raw_mv, mesh::power::configuredAdcPermille());
-}
+#ifdef NRF52_POWER_MANAGEMENT
+  if (supportsBatteryCalibration() && mesh::power::voltagePolicySupported()) {
+    return mesh::power::calibratedMillivolts(
+        raw_mv, mesh::power::configuredAdcPermille());
+  }
 #endif
+  return mesh::MainBoard::calibrateBatteryMillivolts(raw_mv);
+}
+
+float NRF52Board::getAdcMultiplier() const {
+#ifdef NRF52_POWER_MANAGEMENT
+  if (supportsBatteryCalibration() && mesh::power::voltagePolicySupported()) {
+    return mesh::power::configuredAdcPermille() / 1000.0f;
+  }
+#endif
+  return mesh::MainBoard::getAdcMultiplier();
+}
 
 #if NRF52_WATCHDOG_TIMEOUT_SECONDS > 0
 static void reloadWatchdogChannels() {
@@ -187,9 +331,15 @@ void NRF52Board::feedWatchdog(bool enabled) {
   // setting is turned off, deliberately stop reloading it; the resulting
   // watchdog reset is the only software-only way to return it to the stopped
   // state. On that next boot the disabled preference prevents it starting.
-  if (!enabled) return;
-
   const bool running = NRF_WDT->RUNSTATUS != 0;
+  if (!enabled) {
+    if (running && !watchdog_disable_reset_pending) {
+      watchdog_disable_reset_pending = true;
+      if (meshRegulatorCleanReset) meshRegulatorCleanReset();
+    }
+    return;
+  }
+
   if (!running) {
     // Keep running during CPU sleep: the flash-driver failure this protects
     // against sleeps in sd_app_evt_wait(). Pause while halted so breakpoints
@@ -203,6 +353,12 @@ void NRF52Board::feedWatchdog(bool enabled) {
   }
 
   reloadWatchdogChannels();
+  if (watchdog_disable_reset_pending) {
+    watchdog_disable_reset_pending = false;
+    // Cancel a planned watchdog-off reset with fresh recovery state. Feed
+    // first so the callback's battery sampling cannot race an imminent expiry.
+    if (meshRegulatorResumeRecovery) meshRegulatorResumeRecovery();
+  }
 #else
   (void)enabled;
 #endif
@@ -212,6 +368,13 @@ void NRF52Board::serviceWatchdog() {
 #if NRF52_WATCHDOG_TIMEOUT_SECONDS > 0
   if (NRF_WDT->RUNSTATUS != 0) reloadWatchdogChannels();
 #endif
+}
+
+bool NRF52Board::getSystemWatchdogRunning(bool& running) const {
+  // Read even if this build's feed policy is disabled: a bootloader can leave
+  // a watchdog running. The query must describe the hardware, not a preference.
+  running = NRF_WDT->RUNSTATUS != 0;
+  return true;
 }
 
 #ifdef NRF52_POWER_MANAGEMENT
@@ -339,6 +502,10 @@ void NRF52Board::initiateShutdown(uint8_t reason) {
 void NRF52Board::enterSystemOff(uint8_t reason) {
   MESH_DEBUG_PRINTLN("PWRMGT: Entering SYSTEMOFF (%s)", getShutdownReasonString(reason));
 
+  // This path can run before BLE begin() during boot voltage protection.
+  // autoConnLed(false) is safe then too and stops future automatic LED writes.
+  Bluefruit.autoConnLed(false);
+
   // Record shutdown reason in GPREGRET2
   uint8_t sd_enabled = 0;
   mesh_nrf52::softdeviceIsEnabled(sd_enabled);
@@ -352,6 +519,7 @@ void NRF52Board::enterSystemOff(uint8_t reason) {
   // Flush serial buffers
   Serial.flush();
   delay(100);
+  mesh_nrf52::turnOffShutdownLeds();
 
   // Enter SYSTEMOFF
   if (sd_enabled) {
@@ -445,29 +613,130 @@ void NRF52Board::armVbusWake() {
 
 void NRF52BoardDCDC::begin() {
   NRF52Board::begin();
-
-  // Enable DC/DC converter for improved power efficiency
-  uint8_t sd_enabled = 0;
-  mesh_nrf52::softdeviceIsEnabled(sd_enabled);
-  if (sd_enabled) {
-    sd_power_dcdc_mode_set(NRF_POWER_DCDC_ENABLE);
-  } else {
-    NRF_POWER->DCDCEN = 1;
-  }
+  // Only boards which explicitly call this method approve the external LC
+  // circuitry. The common startup hook applies saved choices after the
+  // board's battery ADC and filesystem are ready; do not enable DCDC here.
+  cpu_dcdc_supported = true;
 }
 
 bool NRF52Board::isExternalPowered() {
-  // Check if SoftDevice is enabled before using its API
+  mesh_nrf52::SleepCycleSnapshot cycle;
+  if (mesh_nrf52::sleepCycleState().snapshot(cycle))
+    return (cycle.usb_status & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+
+  // Setup and callers outside a prepared loop retain the SDK access policy.
+  // Never reuse a cached value after a SoftDevice transition invalidated it.
   uint8_t sd_enabled = 0;
-  mesh_nrf52::softdeviceIsEnabled(sd_enabled);
+  if (mesh_nrf52::softdeviceIsEnabled(sd_enabled) != NRF_SUCCESS) return false;
 
   if (sd_enabled) {
-    uint32_t usb_status;
-    sd_power_usbregstatus_get(&usb_status);
+    volatile uint32_t status = 0;
+    const uint32_t error = sd_power_usbregstatus_get((uint32_t*)&status);
+    __asm volatile ("" ::: "memory");
+    if (error != NRF_SUCCESS) return false;
+    const uint32_t usb_status = status;
     return (usb_status & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
   } else {
     return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
   }
+}
+
+void NRF52Board::prepareSleepCycle() {
+  auto& state = mesh_nrf52::sleepCycleState();
+  const uint32_t token = state.begin();
+  const auto application_context = []() {
+    return __get_IPSR() == 0 && __get_PRIMASK() == 0
+        && __get_BASEPRI() == 0 && __get_FAULTMASK() == 0
+        // SDK critical regions can mask application IRQs in the NVIC even
+        // while the CPU mask registers are clear. This public field is
+        // volatile: read it afresh before queries and after the forced yield.
+        && nrf_nvic_state.__cr_flag == 0
+        && xTaskGetSchedulerState() == taskSCHEDULER_RUNNING;
+  };
+  if (!application_context()) {
+    state.publish(token, false, 0, NRF_ERROR_INVALID_STATE);
+    return;
+  }
+#ifdef NRF_CRYPTOCELL
+  // The pinned Adafruit CC310 library polls (no-interrupts archive), but can
+  // leave its disabled NVIC IRQ pending. The SDK treats that as application
+  // work forever. Match the core's waitForEvent cleanup only at loop entry;
+  // never clear an enabled IRQ belonging to an interrupt-driven owner.
+  if (NVIC_GetEnableIRQ(CRYPTOCELL_IRQn) == 0)
+    NVIC_ClearPendingIRQ(CRYPTOCELL_IRQn);
+#endif
+  uint8_t sd_enabled = 0;
+  uint32_t error = mesh_nrf52::softdeviceIsEnabled(sd_enabled);
+  uint32_t usb_status = 0;
+  if (error == NRF_SUCCESS) {
+    if (sd_enabled) {
+      volatile uint32_t status = 0;
+      error = sd_power_usbregstatus_get((uint32_t*)&status);
+      __asm volatile ("" ::: "memory");
+      usb_status = status;
+    } else {
+      usb_status = NRF_POWER->USBREGSTATUS;
+    }
+  }
+  if (error == NRF_SUCCESS && sd_enabled && state.current(token)) {
+    // Raw SEV/WFE does not acknowledge the SDK's separate application-IRQ
+    // bookkeeping. First force a real application PendSV while the loop task
+    // remains ready (so the RTOS idle task cannot consume that acknowledgement).
+    // The public SDK contract then makes this one early wait non-blocking.
+    // The pinned S140 6.1.1/7.3.0 forwarding/wait code confirms its private IRQ
+    // sequence cannot wrap back to the last acknowledged value. Do not access
+    // those SDK-private counters or rely on SEV alone to release an SDK wait.
+    taskYIELD();
+    if (!application_context() || (SCB->ICSR & SCB_ICSR_PENDSVSET_Msk)) {
+      error = NRF_ERROR_INVALID_STATE;
+    } else if (state.current(token)) {
+      error = sd_app_evt_wait();
+    }
+  }
+  state.publish(token, sd_enabled != 0, usb_status, error);
+
+  // FreeRTOS yields and the state-query SVC can both leave a stale event.
+  // Clear it only before a complete work/guard pass: at loop entry, or during
+  // explicit profile-idle preparation before all role sleep predicates. A radio
+  // interrupt after that pass begins must remain visible to the late wait.
+  __SEV();
+  __WFE();
+}
+
+bool NRF52Board::canIdleRadioProfile() {
+#if defined(configTICK_RATE_HZ) && configTICK_RATE_HZ == 1024
+  // RTC1 belongs to FreeRTOS. Only observe its periodic wake; never alter its
+  // counter, compare channels, IRQ ownership, or tickless-idle bookkeeping.
+  return __get_IPSR() == 0 && __get_PRIMASK() == 0
+      && __get_BASEPRI() == 0 && __get_FAULTMASK() == 0
+      && nrf_nvic_state.__cr_flag == 0
+      && xTaskGetSchedulerState() == taskSCHEDULER_RUNNING
+      && !(SCB->ICSR & SCB_ICSR_PENDSVSET_Msk)
+      && NRF_RTC1->PRESCALER == 31
+      && (NRF_RTC1->INTENSET & RTC_INTENSET_TICK_Msk) != 0
+      && NVIC_GetEnableIRQ(RTC1_IRQn) != 0;
+#else
+  return false;
+#endif
+}
+
+void NRF52Board::prepareProfileIdleCycle() {
+  if (canIdleRadioProfile()) {
+#if (__FPU_USED == 1)
+    // The disabled FPU IRQ can retain an inexact exception from profile math.
+    // Clear that known source before refreshing the event baseline. An enabled
+    // owner's flags/IRQ belong to its handler, not this polling cleanup.
+    if (NVIC_GetEnableIRQ(FPU_IRQn) == 0) {
+      __set_FPSCR(__get_FPSCR() & ~0x0000009FUL);
+      (void)__get_FPSCR();
+      NVIC_ClearPendingIRQ(FPU_IRQn);
+    }
+#endif
+  }
+  // This also revalidates context and SDK state, acknowledges a real PendSV
+  // when SoftDevice is on, and clears the old ARM event. All role predicates
+  // must run afterward; an interrupt during those checks is never erased.
+  prepareSleepCycle();
 }
 
 bool NRF52Board::isUsbDataConnected() {
@@ -491,7 +760,25 @@ bool NRF52Board::isUsbHostConnected() {
 }
 
 void NRF52Board::sleep(uint32_t secs) {
-  if (isRadioTestActive()) { delay(1); return; }
+  (void)secs;
+  const bool diagnostics = mesh::powerdiag::enabled();
+  auto& state = mesh_nrf52::sleepCycleState();
+  mesh_nrf52::SleepCycleSnapshot cycle;
+  const bool prepared = state.take(cycle);
+  if (isRadioTestActive()) {
+    if (diagnostics) mesh::powerdiag::boardVeto(mesh::powerdiag::Reason::Board, millis(), 2);
+    delay(1);
+    return;
+  }
+  if (!prepared || !state.current(cycle.generation)) {
+    if (diagnostics) {
+      const uint32_t error = state.lastError();
+      if (error != NRF_SUCCESS) mesh::powerdiag::boardError(static_cast<int32_t>(error), millis());
+      else mesh::powerdiag::boardVeto(mesh::powerdiag::Reason::Board, millis(), 3);
+    }
+    delay(1);
+    return;
+  }
   // Clear FPU interrupt flags to avoid insomnia
   // see errata 87 for details https://docs.nordicsemi.com/bundle/errata_nRF52840_Rev3/page/ERR/nRF52840/Rev3/latest/anomaly_840_87.html
   #if (__FPU_USED == 1)
@@ -502,23 +789,27 @@ void NRF52Board::sleep(uint32_t secs) {
 
   // On nRF52, we use event-driven sleep instead of timed sleep
   // The 'secs' parameter is ignored - we wake on any interrupt
-  uint8_t sd_enabled = 0;
-  mesh_nrf52::softdeviceIsEnabled(sd_enabled);
-
-  if (sd_enabled) {
+  if (cycle.softdevice_enabled) {
     // A single call is required here. If an interrupt arrived since the last
     // wait, SoftDevice returns immediately so the main loop can service the
     // flag or BLE queue before sleeping again.
-    sd_app_evt_wait();
+    if (diagnostics) mesh::powerdiag::sleepBegin(micros());
+    const uint32_t error = sd_app_evt_wait();
+    if (diagnostics) {
+      mesh::powerdiag::sleepEnd(micros());
+      if (error != NRF_SUCCESS) mesh::powerdiag::boardError(static_cast<int32_t>(error), millis());
+    }
   } else {
     // SoftDevice is disabled. Match the Adafruit core's race-preserving
     // waitForEvent() sequence: the first WFE sleeps or consumes an already-
     // pending event, then SEV/WFE reliably clears the event register before
     // returning. SEV/WFE/WFE can erase the only GPIO edge that arrived between
     // the caller's predicate and here.
+    if (diagnostics) mesh::powerdiag::sleepBegin(micros());
     __WFE();
     __SEV();
     __WFE();
+    if (diagnostics) mesh::powerdiag::sleepEnd(micros());
   }
 }
 
@@ -556,6 +847,11 @@ float NRF52Board::getMCUTemperature() {
 }
 
 void NRF52Board::shutdownPeripherals() {
+  // Stop Bluefruit's LED owner before setting a final OFF latch. Its timer
+  // stop is queued, so allow the existing shutdown delay to drain a pending
+  // blinky callback before the final write below (also safe before BLE begin).
+  Bluefruit.autoConnLed(false);
+
   // Power off the display if any
 #ifdef DISPLAY_CLASS
   if (display.isOn()) {
@@ -613,10 +909,13 @@ void NRF52Board::shutdownPeripherals() {
   // Flush serial buffers
   Serial.flush();
   delay(100);
+  mesh_nrf52::turnOffShutdownLeds();
 }
 
 void NRF52Board::powerOff() {
   shutdownPeripherals();
+  // Board-specific hooks may signal button release after calling the base.
+  mesh_nrf52::turnOffShutdownLeds();
 
   // Enter SYSTEMOFF
   uint8_t sd_enabled = 0;
@@ -633,6 +932,7 @@ void NRF52Board::enterDeepSleep(uint32_t secs) {
     powerOff(); // Not wake up
   } else {
     shutdownPeripherals();
+    mesh_nrf52::turnOffShutdownLeds();
 
 // Clear FPU interrupt flags to avoid insomnia
 // see errata 87 for details
@@ -680,10 +980,15 @@ bool NRF52Board::startOTAUpdate(const char *id, char reply[], bool force_ap) {
     Bluefruit.configPrphConn(BLE_GATT_ATT_MTU_DEFAULT,
                              BLE_GAP_EVENT_LENGTH_MIN, 2, 1);
 
+    // Even a failed begin can leave SoftDevice enabled partway through SDK
+    // startup. Require a fresh authoritative query before the next sleep.
+    mesh_nrf52::sleepCycleState().invalidate();
+    mesh_nrf52::applyBluetoothLedPolicy();
     if (!Bluefruit.begin(1, 0)) {
       return false;
     }
     ota_ble_started = true;
+    mesh_nrf52::bluetoothLedStarted();
 
     // To be consistent OTA DFU should be added first if it exists
     bledfu.begin();

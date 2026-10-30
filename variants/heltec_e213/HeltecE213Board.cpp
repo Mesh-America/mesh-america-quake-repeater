@@ -1,4 +1,5 @@
 #include "HeltecE213Board.h"
+#include <helpers/ESP32GpioHold.h>
 
 void HeltecE213Board::begin() {
     ESP32Board::begin();
@@ -15,8 +16,8 @@ void HeltecE213Board::begin() {
         startup_reason = BD_STARTUP_RX_PACKET;
       }
 
-      rtc_gpio_hold_dis((gpio_num_t)P_LORA_NSS);
-      rtc_gpio_deinit((gpio_num_t)P_LORA_DIO_1);
+      mesh::esp32::releaseRtcGpioIfSupported((gpio_num_t)P_LORA_NSS);
+      mesh::esp32::deinitRtcGpioIfSupported((gpio_num_t)P_LORA_DIO_1);
     }
   }
 
@@ -32,7 +33,7 @@ void HeltecE213Board::begin() {
 
     digitalWrite(PIN_ADC_CTRL, LOW);
 
-    return (5.42 * (3.3 / 1024.0) * raw) * 1000;
+    return calibrateBatteryMillivolts((5.42 * (3.3 / 1024.0) * raw) * 1000);
   }
 
   const char* HeltecE213Board::getManufacturerName() const {

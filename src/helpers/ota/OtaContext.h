@@ -7,6 +7,7 @@
 #include "OtaDeflate.h"
 #include "OtaStore.h"
 #include "SignerAllowlist.h"
+#include "OtaManifestPolicy.h"
 #include "OtaConfigState.h"
 #include "OtaApply.h"
 #include "OtaFormat.h"
@@ -14,6 +15,9 @@
 #include "OtaSelf.h"          // ota_self_firmware() - prefer self-describing EndF identity at begin()
 #include "OtaSelfServePolicy.h"
 #include "OtaBlInfo.h"        // bootloader OTA-apply capability marker (nRF52); cached after first read
+#if defined(OTA_BOOTLOADER_MIGRATION)
+#include "BootloaderMigration.h"
+#endif
 
 // Storage policy for the mOTA context. A "dynamic" context is created on demand
 // and handed back once idle, so its multi-kilobyte workspace only occupies RAM
@@ -32,6 +36,9 @@
   #include "OtaCacheSdNrf52.h"
 #elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
   #include "OtaStoreAdaptiveNrf52.h"
+  #if defined(OTA_RAK15002_SD_STORE)
+    #include "OtaCacheSdNrf52.h"
+  #endif
 #elif defined(NRF52_PLATFORM) && defined(OTA_QSPI_STORE)
   #include "OtaStoreQspiNrf52.h"
 #elif defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
@@ -41,6 +48,9 @@
   #include "OtaStoreFlashNrf52.h"
 #elif defined(ESP32_PLATFORM) && defined(OTA_FLASH_STORE)
   #include "OtaStoreFlashEsp32.h"
+#endif
+#if defined(OTA_RAK15002_SD_STORE)
+  #include "../nrf52/Rak4631SharedSpi.h"
 #endif
 #if defined(OTA_FOLDER_SERIAL)
   #include "MotaSourceSerial.h"   // relay an external folder served by a host daemon over the USB serial
@@ -113,11 +123,20 @@ struct OtaContext {
   // store object for OtaManager, while folder captures replace it with the
   // host-backed FolderMotaStore for the duration of the pull.
   OtaStoreRam<1> fetch_store;
+#if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+  // An archive is not an installation backend. Source-only boards retain a
+  // separate SD owner for the shared FAT volume without granting SD apply.
+  OtaStoreSdNrf52 sd_archive_store;
+  OtaCacheSdNrf52 sd_cache;
+#endif
 #elif defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
   OtaStoreTowerNrf52 fetch_store;            // SD primary, qualified internal delta fallback
   OtaCacheSdNrf52 sd_cache;                 // always owns the stable SD store
 #elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
   OtaStoreAdaptiveNrf52 fetch_store;
+  #if defined(OTA_RAK15002_SD_STORE)
+    OtaCacheSdNrf52 sd_cache;
+  #endif
 #elif defined(NRF52_PLATFORM) && defined(OTA_QSPI_STORE)
   OtaStoreQspiNrf52 fetch_store;             // persistent raw QSPI staging, full + in-place delta
 #elif defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
@@ -137,6 +156,9 @@ struct OtaContext {
   // store. A failed allocation is reported by the CLI before any write.
   uint8_t* serve_buf = nullptr;
   bool ensureServeBuffer() {
+#if defined(RAK4631_COMBINED_ETHERNET)
+    if (rak4631_ethernet_owns_spi()) return false;
+#endif
     if (!serve_buf) serve_buf = static_cast<uint8_t*>(malloc(OTA_SERVE_BUF_SIZE));
     return serve_buf != nullptr;
   }
@@ -157,8 +179,8 @@ struct OtaContext {
   bool     self_serve_supported = false;
   // flash-backed self-serve: cached merkle leaves (heap, freed on re-serve) + assembled manifest of our
   // own running firmware. The payload is read from flash per block; only the metadata is held in RAM.
-  // serve_self_proof is the proof-gen working buffer (>= block_count*4) - sized to OUR image's block
-  // count (the manager's fixed 4 KiB scratch covers <=1024 blocks, about 2 MiB at the new default).
+  // serve_self_proof is the encoded-DATA output buffer on encoder-enabled
+  // builds. Streaming Merkle proofs need no full copy of the leaf table.
   uint8_t* serve_self_leaves = nullptr;
   uint8_t* serve_self_proof  = nullptr;
 
@@ -221,6 +243,18 @@ struct OtaContext {
   // Apply the COMPLETE fetched .mota (platform dispatch) and arm the slot; sets apply_pending on success
   // so the deferred-reboot path (mesh loop) takes over. Caller ensures the fetch is COMPLETE. Shared by
   // manual `ota applydelta` and the auto-install path.
+#if defined(OTA_BOOTLOADER_MIGRATION)
+  bool embeddedBootloaderIdle() const {
+    const auto state = manager.fetchState();
+    return (state == OtaManager::IDLE || state == OtaManager::COMPLETE || state == OtaManager::FAILED) &&
+        !apply_pending && !bootloader_apply_pending &&
+        !manager.pendingServeJobs() && !manager.pendingManifestJobs()
+#if defined(OTA_SD_STORE)
+        && !sdCacheFetching()
+#endif
+        ;
+  }
+#endif
   bool apply_fetched(char* msg) {
     return apply_fetched_impl(nullptr, false, msg);
   }
@@ -245,6 +279,17 @@ struct OtaContext {
   }
 
   bool apply_fetched_impl(const uint8_t* rescue_base_hash, bool trusted_auto, char* msg) {
+#if defined(OTA_BOOTLOADER_MIGRATION)
+    if (bootloader_migration_pending()) {
+      strcpy(msg, "embedded bootloader update is already armed"); return false;
+    }
+#endif
+    // The armed update owns its store and handoff until deferred reboot.
+    // Re-entering an applier can reset that handoff before a later read fails.
+    if (apply_pending || bootloader_apply_pending) {
+      strcpy(msg, "another update is already armed");
+      return false;
+    }
     if (fetch_to_folder) {
       strncpy(msg, "refused: completed fetch was captured to a folder, not local install storage", 96);
       msg[95] = 0;
@@ -326,7 +371,17 @@ struct OtaContext {
       }
     }
     bool ok;
-#if defined(NRF52_PLATFORM) && (defined(OTA_RAK_AUTO_STORE) || defined(OTA_TOWER_AUTO_STORE))
+#if defined(NRF52_PLATFORM) && defined(OTA_RAK15002_SD_STORE) && defined(OTA_RAK_AUTO_STORE)
+    ok = fetch_store.usesSd()
+        ? ota_apply_mota_nrf52(fetch_store.sdStore(), allow, apply_st, msg)
+        : fetch_store.usesQspi()
+          ? ota_apply_mota_nrf52(fetch_store.externalStore(), allow, apply_st, msg)
+          : fetch_store.usesInternal()
+            ? ota_apply_mota_nrf52(fetch_store.internalStore(), allow, apply_st, msg)
+            : false;
+    if (!fetch_store.usesExternal() && !fetch_store.usesInternal())
+      strncpy(msg, fetch_store.selectionReason(), 96);
+#elif defined(NRF52_PLATFORM) && (defined(OTA_RAK_AUTO_STORE) || defined(OTA_TOWER_AUTO_STORE))
     ok = fetch_store.usesExternal()
         ? ota_apply_mota_nrf52(fetch_store.externalStore(), allow, apply_st, msg)
         : fetch_store.usesInternal()
@@ -363,6 +418,15 @@ struct OtaContext {
 
   bool apply_fetched_bootloader(const uint8_t operator_mid[4],
                                 const uint8_t operator_hash8[8], char* msg) {
+#if defined(OTA_BOOTLOADER_MIGRATION)
+    if (bootloader_migration_pending()) {
+      strcpy(msg, "embedded bootloader update is already armed"); return false;
+    }
+#endif
+    if (apply_pending || bootloader_apply_pending) {
+      strcpy(msg, "another update is already armed");
+      return false;
+    }
 #if defined(NRF52_PLATFORM) && !defined(OTA_SEEDER_ONLY) && \
     (defined(OTA_QSPI_BOOTLOADER_UPDATE) || defined(OTA_INTERNAL_BOOTLOADER_UPDATE) || \
      defined(OTA_SD_BOOTLOADER_UPDATE))
@@ -470,6 +534,12 @@ struct OtaContext {
   bool attach_folder_source(MotaSource* source, FolderLink link, const char* label,
                             char* msg, size_t cap) {
     if (!msg || cap == 0) return false;
+#if defined(RAK4631_COMBINED_ETHERNET)
+    if (rak4631_ethernet_owns_spi()) {
+      snprintf(msg, cap, "ERR turn Ethernet off before attaching an OTA folder");
+      return false;
+    }
+#endif
     if (!source || link == FOLDER_LINK_NONE) {
       strncpy(msg, "ERR invalid folder source", cap);
       msg[cap - 1] = 0;
@@ -564,9 +634,184 @@ struct OtaContext {
     }
   }
 
+#if defined(RAK4631_COMBINED_ETHERNET)
+  // Only the main thread may change ownership. No allocation or SPI access in
+  // the DHCP worker is allowed until prepareRakEthernet() has finished.
+  bool canReleaseRakEthernet() const {
+    const bool own_image = manager.servingPrimaryManifest(serve_self_manifest);
+    return manager.fetchState() == OtaManager::IDLE &&
+        fetch_store.staged_size() == 0u && !apply_pending && !bootloader_apply_pending &&
+        !manager.pendingServeJobs() && !manager.pendingManifestJobs() &&
+        (!serving || own_image) && manager.servedCount() <= (own_image ? 1u : 0u) &&
+        serve_expected == 0u && !folder_active && !_folder_source && !folder_dest &&
+        !disconnected_folder_dest && !fetch_to_folder;
+  }
+
+  void refreshRakStorageCapabilities() {
+    const bool external = !rak4631_ethernet_owns_spi() && fetch_store.usesExternal();
+    manager.set_accept_full(external);
+    manager.set_accept_bootloader(
+        ota_bootloader_self_update_caps_valid(bootloaderUpdateCaps()));
+    manager.set_apply_codec(CODEC_DETOOLS_INPLACE);
+    manager.set_fetch_store(&fetch_store);
+    manager.set_archive_interest(false);
+    self_serve_supported = ota_self_serve_supported(external);
+#if MESHCORE_OTA_DEVICE_DEFLATE
+    manager.set_transport_deflate_encoder(self_serve_supported ? ota_transport_deflate : nullptr);
+#endif
+  }
+
+  void releaseRakIdleServingBuffers() {
+    // The idle preflight admits only our automatic own-image view, never a
+    // manual or folder source. Revoke it before freeing the caller-owned RAM.
+    manager.clear_primary();
+    serving = false;
+    free(serve_self_leaves); free(serve_self_proof);
+    serve_self_leaves = serve_self_proof = nullptr;
+    releaseServeBuffer();
+    serve_expected = 0u;
+  }
+
+  bool prepareRakEthernet(char* error, size_t cap) {
+    if (!error || !cap) return false;
+    error[0] = 0;
+    if (rak4631_ethernet_owns_spi()) {
+      snprintf(error, cap, "ERR Ethernet already owns WisBlock SPI");
+      return false;
+    }
+    if (!canReleaseRakEthernet()) {
+      snprintf(error, cap, "ERR OTA busy; cancel transfer, clear manual serve and detach folder first");
+      return false;
+    }
+    const uint8_t detected = OtaStoreQspiNrf52::autoDetect();
+    uint32_t rak_id = 0, w25_id = 0;
+    OtaStoreQspiNrf52::autoProbeIds(rak_id, w25_id);
+    (void)w25_id;
+    if (detected == 1u || detected == 3u) {
+      snprintf(error, cap, "ERR RAK15001 and Ethernet share chip-select 26; remove RAK15001 first");
+      return false;
+    }
+    if (rak_id != 0u && rak_id != 0xFFFFFFu) {
+      snprintf(error, cap, "ERR unknown SPI device on Ethernet chip-select 26 (%06lX)",
+               (unsigned long)rak_id);
+      return false;
+    }
+    const OtaBlCaps& caps = bootloaderAppCaps();
+    const bool qspi_bootloader = caps.present && (caps.storage_flags & OTA_BL_STORAGE_QSPI);
+    const OtaBootloaderIdentity& identity = bootloaderIdentity();
+    if (rak_storage_choice(0u, qspi_bootloader, identity.present && identity.crc_ok,
+                           identity.device_name, false,
+                           caps.optional_app_storage ==
+                               (OTA_BL_STORAGE_QSPI | OTA_BL_STORAGE_HEADER_W25)) !=
+        RakStorageChoice::Internal) {
+      snprintf(error, cap, "ERR installed bootloader cannot use internal OTA with Ethernet");
+      return false;
+    }
+    if (!fetch_store.resetSelection()) {
+      snprintf(error, cap, "ERR staged OTA data must be cancelled before enabling Ethernet");
+      return false;
+    }
+    releaseRakIdleServingBuffers();
+    rak4631_set_ethernet_spi_owner(true);
+    refreshRakStorageCapabilities();
+    // The policy check above and the adaptive store must agree before the
+    // caller allocates a worker or lets the Ethernet library touch hardware.
+    if (!fetch_store.usesInternal()) {
+      rak4631_set_ethernet_spi_owner(false);
+      fetch_store.resetSelection();
+      refreshRakStorageCapabilities();
+      snprintf(error, cap, "ERR internal OTA selection failed; Ethernet remains off");
+      return false;
+    }
+    return true;
+  }
+
+  bool releaseRakEthernet() {
+    if (!rak4631_ethernet_owns_spi()) return true;
+    // OFF is cooperative. A transfer can start after its first preflight;
+    // keep the safe internal backend pinned and let the main loop retry after
+    // cancellation/completion. The Ethernet worker and SPI are already gone.
+    if (!canReleaseRakEthernet() || !fetch_store.resetSelection()) return false;
+    releaseRakIdleServingBuffers();
+    rak4631_set_ethernet_spi_owner(false);
+    refreshRakStorageCapabilities();
+    return true;
+  }
+#endif
+
+#if defined(OTA_RAK15002_SD_STORE)
+  bool canReleaseRakSdForEthernet() const {
+    const bool own_image = manager.servingPrimaryManifest(serve_self_manifest);
+    return manager.fetchState() == OtaManager::IDLE && fetch_store.staged_size() == 0u &&
+        !apply_pending && !bootloader_apply_pending && !_sd_cache_fetching &&
+        !manager.pendingServeJobs() && !manager.pendingManifestJobs() &&
+        (!serving || own_image) && serve_expected == 0u && !folder_active &&
+        !_folder_source && !folder_dest && !disconnected_folder_dest && !fetch_to_folder;
+  }
+
+  bool prepareRakSdForEthernet() {
+    if (!canReleaseRakSdForEthernet()) return false;
+    if (_sd_cache_source_attached) manager.remove_source(&sd_cache);
+    _sd_cache_source_attached = false;
+    sd_cache.resetMedia();
+    if (!sdStagingStore().releaseBus()) return false;
+#if !defined(OTA_SEEDER_ONLY)
+    if (!fetch_store.resetSelection()) return false;
+    manager.set_accept_full(false);
+#endif
+    manager.clear_primary();
+    serving = false;
+    free(serve_self_leaves); free(serve_self_proof);
+    serve_self_leaves = serve_self_proof = nullptr;
+    releaseServeBuffer();
+    serve_expected = 0;
+    manager.set_archive_interest(false);
+    _sd_cache_init_retry_at = 0;
+    return true;
+  }
+
+  bool releasedRakSdEthernet() {
+    if (!canReleaseRakSdForEthernet()) return false;
+#if !defined(OTA_SEEDER_ONLY)
+    if (!fetch_store.resetSelection()) return false;
+    manager.set_accept_full(false);
+#endif
+    manager.set_archive_interest(true);
+    _sd_cache_init_retry_at = 0;
+    return true; // The next normal main-loop service may probe, never this callback.
+  }
+#endif
+
+#if defined(OTA_RAK15002_SD_STORE) && !defined(OTA_SEEDER_ONLY)
+  // Only actual OTA work may probe the optional card. Boot/status paths leave
+  // the selector untouched, and a selected transfer never changes its medium.
+  bool prepareRakStorage() {
+    const bool usable = fetch_store.selectStorage();
+    const bool external = usable && fetch_store.usesExternal() && !rak4631_ethernet_owns_spi();
+    manager.set_accept_full(external);
+    manager.set_accept_bootloader(ota_bootloader_self_update_caps_valid(bootloaderUpdateCaps()));
+    const bool was_self_serve_supported = self_serve_supported;
+    self_serve_supported = ota_self_serve_supported(external);
+    if (was_self_serve_supported && !self_serve_supported &&
+        manager.servingPrimaryManifest(serve_self_manifest)) {
+      manager.clear_primary();
+      serving = false;
+    }
+#if MESHCORE_OTA_DEVICE_DEFLATE
+    manager.set_transport_deflate_encoder(self_serve_supported ? ota_transport_deflate : nullptr);
+#endif
+    if (!fetch_store.usesSd()) manager.set_archive_interest(false);
+    return usable;
+  }
+#endif
+
 #if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
   OtaStoreSdNrf52& sdStagingStore() {
-#if defined(OTA_TOWER_AUTO_STORE)
+#if defined(OTA_SEEDER_ONLY)
+    return sd_archive_store;
+#elif defined(OTA_TOWER_AUTO_STORE)
+    return fetch_store.sdStore();
+#elif defined(OTA_RAK15002_SD_STORE) && defined(OTA_RAK_AUTO_STORE)
     return fetch_store.sdStore();
 #else
     return fetch_store;
@@ -600,6 +845,12 @@ struct OtaContext {
   // Initialize and attach the persistent source lazily. This lets Mesh::begin finish quickly when no card
   // is inserted, while archive interest is already enabled so early OTA advertisements still get queried.
   bool ensureSdCache() {
+#if defined(OTA_RAK15002_SD_STORE)
+    if (rak4631_ethernet_owns_spi()) return false;
+#if !defined(OTA_SEEDER_ONLY)
+    if (!prepareRakStorage() || !fetch_store.usesSd()) return false;
+#endif
+#endif
     sd_cache.attach(sdStagingStore());
 #if defined(OTA_TOWER_AUTO_STORE)
     if (!prepareTowerStorage() || !fetch_store.usesExternal()) return false;
@@ -655,12 +906,20 @@ struct OtaContext {
     sd_cache.resetMedia();
 #if defined(OTA_TOWER_AUTO_STORE)
     fetch_store.resetSelection();
+#elif defined(OTA_RAK15002_SD_STORE) && !defined(OTA_SEEDER_ONLY)
+    if (!fetch_store.resetSelection()) return;
 #endif
     _sd_cache_init_retry_at = now;
     ensureSdCache();
   }
 
   void serviceSdCache(uint32_t now) {
+#if defined(OTA_RAK15002_SD_STORE)
+    if (rak4631_ethernet_owns_spi()) return;
+#if !defined(OTA_SEEDER_ONLY)
+    if (!prepareRakStorage() || !fetch_store.usesSd()) return;
+#endif
+#endif
 #if defined(OTA_TOWER_AUTO_STORE)
     if (!prepareTowerStorage() || !fetch_store.usesExternal()) {
       if (_sd_cache_source_attached) manager.remove_source(&sd_cache);
@@ -704,7 +963,11 @@ struct OtaContext {
     if (!sd_cache.autoCaptureEnabled() || apply_pending || manager.fetchState() != OtaManager::IDLE ||
         (_sd_cache_next_at && (int32_t)(now - _sd_cache_next_at) < 0)) return;
 
-    for (uint8_t i = 0; i < manager.catalogCount(); i++) {
+    // The index is also the publication limit: do not download containers
+    // that cannot be served. contains() can discover a valid file and grow
+    // the index, so recheck capacity before considering each catalog row.
+    for (uint8_t i = 0; i < manager.catalogCount() &&
+         sd_cache.capturedCount() < OTA_SD_CACHE_MAX; i++) {
       const OtaManager::CatRow* row = manager.catalogRow(i);
       if (!row || row->have_max == 0 || sd_cache.contains(row->mid)) continue;
       if (!manager.catalogReady(row, now)) continue;
@@ -742,6 +1005,11 @@ struct OtaContext {
     target_id = 0;
 #endif
     manager.begin(target_id, send, ctx);
+#if !defined(OTA_SEEDER_ONLY)
+    manager.set_manifest_admission([](void* context, const MotaManifest& manifest) {
+      return ota_manifest_trusted(manifest, static_cast<OtaContext*>(context)->allow);
+    }, this);
+#endif
 #if defined(MOTA_MIGRATION_TARGET_ID)
     // Legacy observer images keep their deployed target identity for serving
     // and diagnostics, but automatically accept one canonical successor image.
@@ -765,7 +1033,11 @@ struct OtaContext {
     manager.set_accept_full(false);
     manager.set_apply_codec(CODEC_DETOOLS_INPLACE);
 #elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
+#if defined(OTA_RAK15002_SD_STORE)
+    manager.set_accept_full(false); // defer optional SD/NOR probing until startup finishes
+#else
     manager.set_accept_full(fetch_store.usesExternal());
+#endif
     manager.set_apply_codec(CODEC_DETOOLS_INPLACE);
 #elif defined(NRF52_PLATFORM) && (defined(OTA_SD_STORE) || defined(OTA_QSPI_STORE))
     manager.set_accept_full(true);
@@ -793,7 +1065,8 @@ struct OtaContext {
     manager.set_accept_bootloader(false);
 #endif
     manager.set_fetch_store(&fetch_store);
-#if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
+#if defined(NRF52_PLATFORM) && (defined(OTA_TOWER_AUTO_STORE) || \
+    (defined(OTA_RAK15002_SD_STORE) && !defined(OTA_SEEDER_ONLY)))
     self_serve_supported = false;
 #elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE) && !defined(OTA_SEEDER_ONLY)
     self_serve_supported = ota_self_serve_supported(fetch_store.usesExternal());

@@ -16,11 +16,84 @@
 
 class CustomLR2021Wrapper : public RadioLibWrapper {
 public:
+  uint8_t regulatorModes() const override { return static_cast<CustomLR2021*>(_radio)->regulatorModes(); }
+  mesh::power::RegulatorMode defaultRegulatorMode() const override {
+    return static_cast<CustomLR2021*>(_radio)->defaultRegulatorMode();
+  }
+  bool configureBootRegulator(mesh::power::RegulatorMode mode) override {
+    return static_cast<CustomLR2021*>(_radio)->configureBootRegulator(mode);
+  }
+  mesh::power::RegulatorMode activeRegulatorMode() const override {
+    return static_cast<CustomLR2021*>(_radio)->activeRegulatorMode();
+  }
+  ~CustomLR2021Wrapper() { unregisterInterruptAction(); }
   CustomLR2021Wrapper(CustomLR2021& radio, mesh::MainBoard& board) : RadioLibWrapper(radio, board) { }
+  bool supportsMorseTx() const override { return true; }
+  bool supportsMorseRx() const override { return MESH_ENABLE_MORSE_RX && supportsRadioDeepInit(); }
+#if MESH_ENABLE_MESHTEXT_WIRE
+  bool supportsMeshtext() const override { return true; }
+#endif
 
-  void powerOff() { _radio->standby(); _radio->sleep(); }
+  void powerOff() {
+    if (isCarrierWaveActive()) setCarrierWave(0, 0);
+    _radio->standby(); _radio->sleep();
+  }
 
 protected:
+#if MESH_ENABLE_MESHTEXT_WIRE
+  bool applyProtocol(mesh::RadioProfileProtocol protocol) override {
+    if (protocol != mesh::RadioProfileProtocol::MeshCore
+        && protocol != mesh::RadioProfileProtocol::Meshtext) return false;
+    const uint8_t sync = protocol == mesh::RadioProfileProtocol::Meshtext ? 0x2b : 0x12;
+    return static_cast<CustomLR2021*>(_radio)->setProfileProtocol(sync) == RADIOLIB_ERR_NONE;
+  }
+#endif
+  int16_t startMorseReceiver() override {
+    return static_cast<CustomLR2021*>(_radio)->LR2021::startReceive(
+        RADIOLIB_LR2021_RX_TIMEOUT_INF, 0, 0, 0);
+  }
+  float readMorseRssi() override {
+    float rssi = NAN;
+    return static_cast<LR2021*>(_radio)->getRssiInst(&rssi) == RADIOLIB_ERR_NONE ? rssi : NAN;
+  }
+  float morseReceiverBandwidthKHz() const override { return 4.8f; }
+  int16_t prepareMorseReceiver(float frequency_mhz) override {
+    if (!supportsRadioDeepInit()) return RADIOLIB_ERR_UNSUPPORTED;
+    if (!_board->prepareRadioFrequency(frequency_mhz)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    _morse_rx_fsk_mode = true;
+    if (!prepareRadioHardReset()) return RADIOLIB_ERR_CHIP_NOT_FOUND;
+    const int16_t status = static_cast<CustomLR2021*>(_radio)->beginMorseReceive(frequency_mhz);
+    const bool finished = _board->finishRadioHardReset();
+    return status == RADIOLIB_ERR_NONE && !finished ? RADIOLIB_ERR_UNKNOWN : status;
+  }
+  bool validateMorseFrequency(float frequency_mhz) const override {
+    return (frequency_mhz >= 150.0f && frequency_mhz <= 1090.0f)
+        || (frequency_mhz >= 1900.0f && frequency_mhz <= 2500.0f);
+  }
+  int16_t prepareMorseCarrier(float frequency_mhz) override {
+    if (!_board->prepareRadioFrequency(frequency_mhz)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    auto* radio = static_cast<CustomLR2021*>(_radio);
+    const int16_t status = radio->setFrequency(frequency_mhz);
+    // Re-evaluate the PA and board power limit at the Morse frequency, not
+    // at the cached packet profile, when crossing LF/HF bands.
+    return status == RADIOLIB_ERR_NONE ? radio->setOutputPower(
+        mesh::clampLoRaTxPower(_dbm_valid ? _cur_dbm : LORA_TX_POWER, frequency_mhz), 304) : status;
+  }
+  int16_t enterMorseCarrier() override {
+    return static_cast<CustomLR2021*>(_radio)->transmitMorseCarrier();
+  }
+  bool restoreCarrierWaveModem() override {
+    if (_morse_rx_fsk_mode) {
+      const bool restored = restoreAfterDeepInit();
+      if (restored) _morse_rx_fsk_mode = false;
+      return restored;
+    }
+    auto* radio = static_cast<CustomLR2021*>(_radio);
+    if (!_board->prepareRadioFrequency(_cur_freq)
+        || radio->setFrequency(_cur_freq) != RADIOLIB_ERR_NONE) return false;
+    return radio->setOutputPower(mesh::clampLoRaTxPower(
+        _dbm_valid ? _cur_dbm : LORA_TX_POWER, _cur_freq)) == RADIOLIB_ERR_NONE;
+  }
   bool applyParams(float freq, float bw, uint8_t sf, uint8_t cr) override {
     CustomLR2021* radio = (CustomLR2021 *)_radio;
     if (!_board->prepareRadioFrequency(freq)) return false;
@@ -45,13 +118,15 @@ protected:
   }
 
   int16_t applyCachedTxPower(int8_t dbm) override {
-    const float frequency = _params_valid
-        ? _cur_freq : ((CustomLR2021 *)_radio)->getFreqMHz();
+    // A TX-only excursion deliberately preserves the normal wrapper cache.
+    // Clamp for the physically selected band, not that normal RX frequency.
+    const float frequency = ((CustomLR2021 *)_radio)->getFreqMHz();
     return _radio->setOutputPower(mesh::clampLoRaTxPower(dbm, frequency));
   }
 
 public:
   bool setCodingRate(uint8_t cr) override {
+    if (isCarrierWaveActive()) return false;
     return ((CustomLR2021 *)_radio)->setCodingRate(cr) == RADIOLIB_ERR_NONE;
   }
 
@@ -105,6 +180,14 @@ protected:
   }
 
   bool applySideDetectorConfig(uint8_t primary_sf, float bw) {
+#if MESH_ENABLE_TX_BEACONS
+    // Saved RX side detectors are not part of an independent TX-only tuple.
+    // Disable them without changing their configuration, then restore the
+    // normal set when the owner's receive-restoration transaction runs.
+    if (isBeaconRadioOwned() && !_beacon_restoring) {
+      return ((CustomLR2021 *)_radio)->setSideDetector(nullptr, 0) == RADIOLIB_ERR_NONE;
+    }
+#endif
     if (_profiles.enabled()) {
       return ((CustomLR2021 *)_radio)->setSideDetector(nullptr, 0) == RADIOLIB_ERR_NONE;
     }
@@ -184,9 +267,8 @@ public:
   }
 
   float getCurrentRSSI() override {
-    float rssi = -110;
-    ((CustomLR2021 *)_radio)->getRssiInst(&rssi);
-    return rssi;
+    float rssi = NAN;
+    return ((CustomLR2021 *)_radio)->getRssiInst(&rssi) == RADIOLIB_ERR_NONE ? rssi : NAN;
   }
 
   void onSendFinished() override {

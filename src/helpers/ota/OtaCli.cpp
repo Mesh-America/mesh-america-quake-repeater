@@ -113,6 +113,7 @@ static const char* fetch_error_word(OtaManager::FetchError error) {
     case OtaManager::FETCH_ERROR_INTEGRITY:        return "integrity check";
     case OtaManager::FETCH_ERROR_MANIFEST_TIMEOUT: return "manifest timeout";
     case OtaManager::FETCH_ERROR_LEAVES_TIMEOUT:   return "leaves timeout";
+    case OtaManager::FETCH_ERROR_RADIO_SESSION:    return "radio session changed";
     default:                                       return "none";
   }
 }
@@ -147,81 +148,10 @@ static bool is_cmd(const char* a, const char* names, const char** rest) {
 // packet so it works as remote-admin over LoRa.
 static bool handle_dev(const char* d, char* reply, OtaContext& c);
 
-bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board) {
-  const auto* active = ota_context_if_active();
-  const float adaptive_pace = active ? active->manager.adaptivePacketSpeed() : OTA_SPEED_DEFAULT;
-  if (handleSpeedCommand(command, reply, 160, adaptive_pace)) return true;
-  const char* a = command + 3;
-  if (*a != 0 && *a != ' ') return false;
-  while (*a == ' ') a++;
-  if (!ota_acquire_context(reply, 160)) return true;
-  OtaContext& c = ota_ctx();
-  c.manager.set_clock(millis());
-  c.manager.set_speed(speedFactor());
-#if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
-  c.prepareTowerStorage();
-#endif
-  const char* rest = a;
-
-  // ---- raw / internal primitives, tucked under `ota dev ...` ----
-  if (is_cmd(a, "dev", &rest)) {
-    return handle_dev(rest, reply, c);
-  }
-
-  // ---- help: list the commands in plain words (aliases in parentheses) ----
-  if (is_cmd(a, "help|?|h", &rest)) {
-#if defined(OTA_SEEDER_ONLY)
-    snprintf(reply, 160,
-      "OTA seeder: status | stats | ls=find images | get <id> folder=capture | cancel | "
-      "announce | folder | config. LoRa install is disabled.");
-#elif defined(NRF52_PLATFORM) && defined(OTA_FLASH_STORE) && !defined(OTA_SD_STORE) && \
-      !defined(OTA_QSPI_STORE)
-#if defined(OTA_INTERNAL_BOOTLOADER_UPDATE)
-    strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash | install | "
-      "bootloader | cancel | announce | self | folder | config | key");
-#else
-    strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash [rescue] | install | rescue install <hash16> | "
-      "cancel | announce | self | folder | config | key");
-#endif
-#elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
-    strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | storage | folder | config | key");
-#elif defined(NRF52_PLATFORM) && defined(OTA_QSPI_STORE)
-#if defined(OTA_QSPI_BOOTLOADER_UPDATE)
-    strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | "
-      "qspi | folder | config | key");
-#else
-    strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | serve | qspi | "
-      "folder | config | key");
-#endif
-#elif defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
-#if defined(OTA_TOWER_AUTO_STORE)
-    strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | "
-      "storage | folder | cache | config | key");
-#else
-#if defined(OTA_SD_BOOTLOADER_UPDATE)
-    strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | "
-      "folder | cache | config | key");
-#else
-    strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | serve | folder | "
-      "cache | config | key");
-#endif
-#endif
-#else
-    snprintf(reply, 160,
-      "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | serve | folder | "
-      "cache | config | key. `ota ls [page]`; folder [validate].");
-#endif
-
-  // ---- inventory dashboard: running fw (self), the one fetch session, serving state ----
-  } else if (*a == 0 || is_cmd(a, "status|st", &rest)) {
+// These explicit call boundaries keep unrelated control/staging buffers out of
+// the target-name decoder call chain. This matters on the fixed 8 KiB nRF52
+// loop stack, especially when listing is entered through a decrypted LoRa CLI.
+static __attribute__((noinline)) bool handle_status(char* reply, OtaContext& c) {
 #if defined(OTA_SEEDER_ONLY)
     uint8_t dig[4]; c.manager.servedDigest(dig);
     char dighx[9]; mesh::Utils::toHex(dighx, dig, 4);
@@ -249,7 +179,9 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
       else
         snprintf(dl, sizeof dl, "%sdownload: %s %u/%u (%u%%) id=%s %us",
                  c.manager.fetched_is_bootloader() ? "bootloader " : "",
-                 state_word(fs), have, tot, pct, midhx, age);
+                 fs == OtaManager::FETCHING && c.manager.directFetchActive() ?
+                     (c.manager.directFetchConfirmed() ? "direct240" : "direct240 probe") : state_word(fs),
+                 have, tot, pct, midhx, age);
     }
     const char* hw = (c.hw_id[0]) ? c.hw_id : "?";
 #if OTA_TARGET_NAME_TABLE && OTA_TARGET_NAME_FRONT_CODED
@@ -268,7 +200,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
         c.fetch_store.usesInternal() ? "internal" : "storage-ERR";
 #elif defined(OTA_RAK_AUTO_STORE)
     const char* bl_state = !bl.present ? "NONE" :
-        c.fetch_store.usesExternal() ? "QSPI" :
+        c.fetch_store.usesSd() ? "SD" : c.fetch_store.usesQspi() ? "QSPI" :
         c.fetch_store.usesInternal() ? "internal" : "storage-ERR";
 #elif defined(OTA_QSPI_STORE)
     const char* bl_state = !bl.present ? "NONE" :
@@ -304,49 +236,11 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
              (unsigned)c.allow.count(), tenv ? tenv : "?");
 #endif
 #endif
+  return true;
+}
 
-  // ---- admin OTA stats: crypto identities (our fw's content-id + body_hash), serving set, live fetch,
-  //      policy - one dense line. The remote-admin CLI path is admin-gated, so this is admin-only over the
-  //      mesh (send it from the app's repeater command screen, or the WiFi/serial OTA console).
-  } else if (is_cmd(a, "stats", &rest)) {
-    // our running fw's merkle content-id (mid) comes from the self serve entry; the EndF body_hash (fw
-    // identity, matched against a delta base) is separate - surface BOTH (only body_hash showed before).
-    const OtaManager::ServeEntry* self = nullptr;
-    for (uint8_t i = 0; i < c.manager.servedCount(); i++) {
-      const OtaManager::ServeEntry* e = c.manager.servedEntry(i);
-      if (e && e->is_self) { self = e; break; }
-    }
-    SelfFwInfo fi; bool sok = ota_self_firmware_for_display(fi);
-    char midhx[9], bodyhx[9], verbuf[20], dighx[9];
-    if (self)            mesh::Utils::toHex(midhx, self->mid, 4);        else strcpy(midhx, "?");
-    if (sok && fi.valid) mesh::Utils::toHex(bodyhx, fi.body_hash, 4);    else strcpy(bodyhx, "?");
-    if (self)            ver_str(verbuf, sizeof verbuf, self->fw_version); else strcpy(verbuf, "v?");
-    uint8_t dig[4]; c.manager.servedDigest(dig); mesh::Utils::toHex(dighx, dig, 4);
-    OtaManager::FetchState fs = c.manager.fetchState();
-    char fbuf[72];
-    if (fs == OtaManager::IDLE) {
-      strcpy(fbuf, "fetch idle");
-    } else {
-      char fmid[9]; mesh::Utils::toHex(fmid, c.manager.fetchManifestId(), 4);
-      unsigned have = (unsigned)c.manager.blocksHave(), tot = (unsigned)c.manager.blocksTotal();
-      unsigned pct = tot ? (unsigned)((uint64_t)have * 100 / tot) : 0;
-      unsigned age = c.session_started_ms ? (unsigned)((millis() - c.session_started_ms) / 1000) : 0;
-      if (fs == OtaManager::FAILED)
-        snprintf(fbuf, sizeof fbuf, "fetch failed:%s %u/%u id=%s",
-                 fetch_error_word(c.manager.fetchError()), have, tot, fmid);
-      else
-        snprintf(fbuf, sizeof fbuf, "fetch %s %u/%u %u%% id=%s %us",
-                 state_short(fs), have, tot, pct, fmid, age);
-    }
-    uint8_t af = c.manager.autofetch();
-    snprintf(reply, 160, "OTA | fw %s id=%s body=%s %ub %uK | serv %u dg=%s | %s | af=%s hops=%u",
-             verbuf, midhx, bodyhx, (unsigned)(self ? self->have_count : 0),
-             (unsigned)((sok ? fi.image_len : 0) / 1024), (unsigned)c.manager.servedCount(), dighx, fbuf,
-             af == OtaManager::AUTOFETCH_ANY ? "any" : af == OtaManager::AUTOFETCH_SIGNED ? "signed" : "off",
-             (unsigned)c.manager.max_hops());
-
-  // ---- what's available around me (catalogued from beacons + OTA_HAVE), best/most-recent first ----
-  } else if (is_cmd(a, "neighbors|nbrs|updates|ls|n", &rest)) {
+static __attribute__((noinline)) bool handle_neighbors(
+    const char* rest, char* reply, OtaContext& c) {
     // Kick a fresh round of catalog queries (async - rows arrive over the next seconds); render what we
     // have now in plain words. The reply buffer is 160 B (serial / one LoRa packet for remote-admin), so
     // the retained protocol catalog is rendered two rows at a time.
@@ -373,7 +267,8 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
     const OtaBlCaps& list_bl_update = c.bootloaderUpdateCaps();
 #endif
 #endif
-#if defined(NRF52_PLATFORM) && defined(OTA_FLASH_STORE) && !defined(OTA_SD_STORE) && \
+#if defined(NRF52_PLATFORM) && defined(OTA_FLASH_STORE) && \
+    (!defined(OTA_SD_STORE) || defined(OTA_RAK15002_SD_STORE)) && \
     (!defined(OTA_QSPI_STORE) || defined(OTA_RAK_AUTO_STORE))
     SelfFwInfo list_self;
     bool list_has_endf = ota_self_firmware(list_self) && list_self.valid;
@@ -443,11 +338,17 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
         installable = installable && c.fetch_store.compatible();
         if (h->codec == CODEC_FULL)
           installable = installable && c.fetch_store.usesExternal();
-#elif defined(OTA_SD_STORE)
+#elif defined(OTA_SD_STORE) && !defined(OTA_RAK_AUTO_STORE)
         installable = installable && (list_bl.storage_flags & OTA_BL_STORAGE_SD);
 #elif defined(OTA_RAK_AUTO_STORE)
-        if (c.fetch_store.usesExternal())
+        if (c.fetch_store.usesQspi())
           installable = installable && (list_bl.storage_flags & OTA_BL_STORAGE_QSPI);
+#if defined(OTA_RAK15002_SD_STORE)
+        if (c.fetch_store.usesSd())
+          installable = installable && list_bl.optional_sd_app_storage == OTA_BL_STORAGE_SD &&
+                        (h->flags & MFLAG_SIGNED);
+#endif
+        installable = installable && (c.fetch_store.usesExternal() || c.fetch_store.usesInternal());
         if (h->codec == CODEC_FULL)
           installable = installable && c.fetch_store.usesExternal();
 #elif defined(OTA_QSPI_STORE)
@@ -472,6 +373,146 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
       shown++;
     }
     if (shown == 0) strcpy(reply, "No updates seen yet - re-run `ota ls` in a few seconds (just asked around).");
+  return true;
+}
+
+static __attribute__((noinline)) bool handle_control_command(
+    const char* a, char* reply, mesh::MainBoard& board, OtaContext& c);
+
+bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board) {
+  const auto* active = ota_context_if_active();
+  const float adaptive_pace = active ? active->manager.adaptivePacketSpeed() : OTA_SPEED_DEFAULT;
+  if (handleSpeedCommand(command, reply, 160, adaptive_pace)) return true;
+  const char* a = command + 3;
+  if (*a != 0 && *a != ' ') return false;
+  while (*a == ' ') a++;
+  if (!ota_acquire_context(reply, 160)) return true;
+  OtaContext& c = ota_ctx();
+  c.manager.set_clock(millis());
+  c.manager.set_speed(speedFactor());
+#if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
+  c.prepareTowerStorage();
+#endif
+  const char* rest = a;
+  if (*a == 0 || is_cmd(a, "status|st", &rest)) return handle_status(reply, c);
+#if defined(NRF52_PLATFORM) && defined(OTA_RAK15002_SD_STORE) && !defined(OTA_SEEDER_ONLY)
+  // Radio/USB startup and status remain independent of removable storage.
+  // Explicit transfer/catalog/cache work may prepare it at this main-loop boundary.
+  if (!is_cmd(a, "qspi|storage|self|id|stats|help|?|h", &rest)) c.prepareRakStorage();
+#endif
+  if (is_cmd(a, "neighbors|nbrs|updates|ls|n", &rest))
+    return handle_neighbors(rest, reply, c);
+  return handle_control_command(a, reply, board, c);
+}
+
+static __attribute__((noinline)) bool handle_control_command(
+    const char* a, char* reply, mesh::MainBoard& board, OtaContext& c) {
+  const char* rest = a;
+
+  // ---- raw / internal primitives, tucked under `ota dev ...` ----
+  if (is_cmd(a, "dev", &rest)) {
+    return handle_dev(rest, reply, c);
+  }
+
+  // ---- help: list the commands in plain words (aliases in parentheses) ----
+  if (is_cmd(a, "help|?|h", &rest)) {
+#if defined(OTA_SEEDER_ONLY)
+    snprintf(reply, 160,
+      "OTA seeder: status | stats | ls=find images | get <id> folder=capture | cancel | "
+      "announce | folder | "
+#if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+      "cache | "
+#endif
+      "config. LoRa install is disabled.");
+#elif defined(NRF52_PLATFORM) && defined(OTA_FLASH_STORE) && !defined(OTA_SD_STORE) && \
+      !defined(OTA_QSPI_STORE)
+#if defined(OTA_INTERNAL_BOOTLOADER_UPDATE)
+    strcpy(reply,
+      "OTA: status | stats | ls | get <id> flash | install | "
+      "bootloader | cancel | announce | self | folder | config | key");
+#else
+    strcpy(reply,
+      "OTA: status | stats | ls | get <id> flash [rescue] | install | rescue install <hash16> | "
+      "cancel | announce | self | folder | config | key");
+#endif
+#elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
+    strcpy(reply,
+      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | storage | folder | "
+#if defined(OTA_RAK15002_SD_STORE)
+      "cache | "
+#endif
+      "config | key");
+#elif defined(NRF52_PLATFORM) && defined(OTA_QSPI_STORE)
+#if defined(OTA_QSPI_BOOTLOADER_UPDATE)
+    strcpy(reply,
+      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | "
+      "qspi | folder | config | key");
+#else
+    strcpy(reply,
+      "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | serve | qspi | "
+      "folder | config | key");
+#endif
+#elif defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+#if defined(OTA_TOWER_AUTO_STORE)
+    strcpy(reply,
+      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | "
+      "storage | folder | cache | config | key");
+#else
+#if defined(OTA_SD_BOOTLOADER_UPDATE)
+    strcpy(reply,
+      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | "
+      "folder | cache | config | key");
+#else
+    strcpy(reply,
+      "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | serve | folder | "
+      "cache | config | key");
+#endif
+#endif
+#else
+    snprintf(reply, 160,
+      "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | serve | folder | "
+      "cache | config | key. `ota ls [page]`; folder [validate].");
+#endif
+
+  // ---- admin OTA stats: crypto identities (our fw's content-id + body_hash), serving set, live fetch,
+  //      policy - one dense line. The remote-admin CLI path is admin-gated, so this is admin-only over the
+  //      mesh (send it from the app's repeater command screen, or the WiFi/serial OTA console).
+  } else if (is_cmd(a, "stats", &rest)) {
+    // our running fw's merkle content-id (mid) comes from the self serve entry; the EndF body_hash (fw
+    // identity, matched against a delta base) is separate - surface BOTH (only body_hash showed before).
+    const OtaManager::ServeEntry* self = nullptr;
+    for (uint8_t i = 0; i < c.manager.servedCount(); i++) {
+      const OtaManager::ServeEntry* e = c.manager.servedEntry(i);
+      if (e && e->is_self) { self = e; break; }
+    }
+    SelfFwInfo fi; bool sok = ota_self_firmware_for_display(fi);
+    char midhx[9], bodyhx[9], verbuf[20], dighx[9];
+    if (self)            mesh::Utils::toHex(midhx, self->mid, 4);        else strcpy(midhx, "?");
+    if (sok && fi.valid) mesh::Utils::toHex(bodyhx, fi.body_hash, 4);    else strcpy(bodyhx, "?");
+    if (self)            ver_str(verbuf, sizeof verbuf, self->fw_version); else strcpy(verbuf, "v?");
+    uint8_t dig[4]; c.manager.servedDigest(dig); mesh::Utils::toHex(dighx, dig, 4);
+    OtaManager::FetchState fs = c.manager.fetchState();
+    char fbuf[72];
+    if (fs == OtaManager::IDLE) {
+      strcpy(fbuf, "fetch idle");
+    } else {
+      char fmid[9]; mesh::Utils::toHex(fmid, c.manager.fetchManifestId(), 4);
+      unsigned have = (unsigned)c.manager.blocksHave(), tot = (unsigned)c.manager.blocksTotal();
+      unsigned pct = tot ? (unsigned)((uint64_t)have * 100 / tot) : 0;
+      unsigned age = c.session_started_ms ? (unsigned)((millis() - c.session_started_ms) / 1000) : 0;
+      if (fs == OtaManager::FAILED)
+        snprintf(fbuf, sizeof fbuf, "fetch failed:%s %u/%u id=%s",
+                 fetch_error_word(c.manager.fetchError()), have, tot, fmid);
+      else
+        snprintf(fbuf, sizeof fbuf, "fetch %s %u/%u %u%% id=%s %us",
+                 state_short(fs), have, tot, pct, fmid, age);
+    }
+    uint8_t af = c.manager.autofetch();
+    snprintf(reply, 160, "OTA | fw %s id=%s body=%s %ub %uK | serv %u dg=%s | %s | af=%s hops=%u",
+             verbuf, midhx, bodyhx, (unsigned)(self ? self->have_count : 0),
+             (unsigned)((sok ? fi.image_len : 0) / 1024), (unsigned)c.manager.servedCount(), dighx, fbuf,
+             af == OtaManager::AUTOFETCH_ANY ? "any" : af == OtaManager::AUTOFETCH_SIGNED ? "signed" : "off",
+             (unsigned)c.manager.max_hops());
 
   // ---- start fetching a specific catalogued mOTA (by list index or manifest_id) ----
   } else if (is_cmd(a, "pull|get|download", &rest)) {
@@ -633,7 +674,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
         snprintf(reply, 160, "ERR OTA storage unsafe: %s", c.fetch_store.selectionReason());
         return true;
       }
-#elif defined(OTA_SD_STORE)
+#elif defined(OTA_SD_STORE) && !defined(OTA_RAK_AUTO_STORE)
       if (!(bl.storage_flags & OTA_BL_STORAGE_SD)) {
         strcpy(reply, "ERR bootloader cannot apply an update staged on SD; update it over USB first");
         return true;
@@ -642,10 +683,26 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
       // Bootloader packages passed their separate privileged checks above and
       // select internal staging when their manifest arrives. The currently
       // selected application backend must not veto that transition.
-      if (!selboot && c.fetch_store.usesExternal() && !(bl.storage_flags & OTA_BL_STORAGE_QSPI)) {
+      if (!selboot &&
+#if defined(OTA_RAK15002_SD_STORE)
+          c.fetch_store.usesQspi() &&
+#else
+          c.fetch_store.usesExternal() &&
+#endif
+          !(bl.storage_flags & OTA_BL_STORAGE_QSPI)) {
         strcpy(reply, "ERR bootloader cannot apply from detected QSPI storage");
         return true;
       }
+#if defined(OTA_RAK15002_SD_STORE)
+      if (!selboot && c.fetch_store.usesSd() && bl.optional_sd_app_storage != OTA_BL_STORAGE_SD) {
+        strcpy(reply, "ERR bootloader lacks authenticated RAK SD application support");
+        return true;
+      }
+      if (!selboot && c.fetch_store.usesSd() && !(selflags & MFLAG_SIGNED)) {
+        strcpy(reply, "ERR SD application install requires a trusted signed package; use folder to inspect");
+        return true;
+      }
+#endif
       if (!selboot && !c.fetch_store.usesExternal() && !c.fetch_store.usesInternal()) {
         snprintf(reply, 160, "ERR OTA storage unsafe: %s", c.fetch_store.selectionReason());
         return true;
@@ -657,7 +714,8 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
       }
 #endif
 #endif
-#if defined(NRF52_PLATFORM) && defined(OTA_FLASH_STORE) && !defined(OTA_SD_STORE) && \
+#if defined(NRF52_PLATFORM) && defined(OTA_FLASH_STORE) && \
+    (!defined(OTA_SD_STORE) || defined(OTA_RAK15002_SD_STORE)) && \
     (!defined(OTA_QSPI_STORE) || defined(OTA_RAK_AUTO_STORE))
       SelfFwInfo self;
       bool has_endf = ota_self_firmware(self) && self.valid;
@@ -715,7 +773,9 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
       return true;
     }
     snprintf(reply, 160, "OK %s mid=%s -> %s (primary traffic)",
-             result == OtaManager::PULL_RESUMED ? "resuming" : "pulling", midhx, dname);
+             c.manager.fetchState() == OtaManager::PAUSED
+                 ? "paused (folder I/O error; reconnect to resume)"
+                 : result == OtaManager::PULL_RESUMED ? "resuming" : "pulling", midhx, dname);
 
   // ---- discard the current session (e.g. a stalled old fetch) to free the slot ----
   } else if (is_cmd(a, "drop|cancel|stop", &rest)) {
@@ -740,6 +800,11 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
 #endif
     const bool discarded = !was_folder && !was_sd_archive &&
                            c.fetch_store.discard();
+#if defined(NRF52_PLATFORM) && defined(OTA_RAK15002_SD_STORE) && !defined(OTA_SEEDER_ONLY)
+    // Keep cache sources/independent serving mounted; only refresh the
+    // application policy after the selected staged file was invalidated.
+    c.prepareRakStorage();
+#endif
 #if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
     if (discarded || (!c.fetch_store.usesExternal() && !c.fetch_store.usesInternal())) {
       c.fetch_store.resetSelection();
@@ -796,7 +861,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
   } else if (is_cmd(a, "announce|adv", &rest)) {
 #if defined(OTA_SEEDER_ONLY)
     c.manager.announce();
-    snprintf(reply, 160, "OK beacon sent (serving=%u host mOTA)",
+    snprintf(reply, 160, "OK beacon sent (serving=%u external mOTA)",
              (unsigned)c.manager.servedCount());
 #else
     if (c.self_serve_supported && !c.serving) c.serving = ota_serve_self(c, 0);
@@ -810,7 +875,13 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
     snprintf(reply, 160, "OTA storage: %s; capacity=%luK; SD primary, internal application deltas only",
              c.fetch_store.selectionReason(), (unsigned long)(c.fetch_store.capacity() / 1024));
 #elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
-    if (c.fetch_store.usesExternal()) {
+#if defined(OTA_RAK15002_SD_STORE)
+    if (c.fetch_store.usesSd()) {
+      snprintf(reply, 160, "OTA storage: RAK15002 SD; staged=%lu; use get sdcard free for media space",
+               (unsigned long)c.fetch_store.sdStore().staged_size());
+    } else
+#endif
+    if (c.fetch_store.usesQspi()) {
       const uint32_t qspi_capacity = c.fetch_store.qspiCapacity();
       snprintf(reply, 160, "QSPI %s jedec=%06lX size=%luK sr1=%02X stage=%s%s%s",
                c.fetch_store.selectionReason(), (unsigned long)c.fetch_store.jedec_id(),
@@ -818,16 +889,26 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
                c.fetch_store.last_stage(), c.fetch_store.last_error()[0] ? " error=" : "",
                c.fetch_store.last_error());
     } else if (c.fetch_store.usesInternal()) {
+#if defined(OTA_RAK15002_SD_STORE)
+      snprintf(reply, 160, "OTA storage: %s; internal capacity=%luK",
+               c.fetch_store.selectionReason(), (unsigned long)(c.fetch_store.capacity() / 1024));
+#else
       uint32_t rak_id = 0, w25_id = 0;
       OtaStoreQspiNrf52::autoProbeIds(rak_id, w25_id);
       snprintf(reply, 160, "OTA storage: %s; internal capacity=%luK; probe rak=%06lX w25=%06lX",
                c.fetch_store.selectionReason(), (unsigned long)(c.fetch_store.capacity() / 1024),
                (unsigned long)rak_id, (unsigned long)w25_id);
+#endif
     } else {
+#if defined(OTA_RAK15002_SD_STORE)
+      snprintf(reply, 160, "OTA storage: %s; optional storage is prepared by OTA transfer/cache work",
+               c.fetch_store.selectionReason());
+#else
       uint32_t rak_id = 0, w25_id = 0;
       OtaStoreQspiNrf52::autoProbeIds(rak_id, w25_id);
       snprintf(reply, 160, "OTA storage unsafe: %s; probe rak=%06lX w25=%06lX",
                c.fetch_store.selectionReason(), (unsigned long)rak_id, (unsigned long)w25_id);
+#endif
     }
 #elif defined(NRF52_PLATFORM) && defined(OTA_QSPI_STORE)
     // This probe only reads JEDEC/SR1. capacity() deliberately preserves a
@@ -854,12 +935,26 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
 #if defined(NRF52_PLATFORM)
     // nRF52 applies via the bootloader, so surface whether THIS device's bootloader can install this store.
     const OtaBlCaps& bl = c.bootloaderAppCaps();   // cached (flash scanned once)
+#if defined(OTA_SEEDER_ONLY)
+    (void)bl;
+    snprintf(reply + n, 160 - n, " | source-only; local install disabled");
+#elif defined(OTA_TOWER_AUTO_STORE) || defined(OTA_RAK_AUTO_STORE)
+    // These adaptive stores choose their backend at runtime. Keep the actual
+    // application capability fields ahead of storage text so remote preflight
+    // can verify them even when a diagnostic tail reaches the reply limit.
+    n += snprintf(reply + n, 160 - n, " abi=%u codecs=0x%x", bl.apply_abi, bl.codec_mask);
 #if defined(OTA_TOWER_AUTO_STORE)
     snprintf(reply + n, 160 - n, " | store:%s | bootloader:%s",
              c.fetch_store.usesExternal() ? "SD" : c.fetch_store.usesInternal() ? "internal" : "unsafe",
              c.fetch_store.compatible() ? "apply OK" : "unsupported");
-#elif defined(OTA_RAK_AUTO_STORE)
-    if (c.fetch_store.usesExternal()) {
+#else
+#if defined(OTA_RAK15002_SD_STORE)
+    if (c.fetch_store.usesSd()) {
+      snprintf(reply + n, 160 - n, " | SD store | bootloader: %s",
+               bl.optional_sd_app_storage == OTA_BL_STORAGE_SD ? "authenticated SD apply OK" : "NO SD apply");
+    } else
+#endif
+    if (c.fetch_store.usesQspi()) {
       const uint32_t qspi_capacity = c.fetch_store.qspiCapacity();
       snprintf(reply + n, 160 - n, " | QSPI store:%s%uK | bootloader: %s",
                qspi_capacity ? "" : "ERR ",
@@ -873,6 +968,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
       snprintf(reply + n, 160 - n, " | storage unsafe: %s",
                c.fetch_store.selectionReason());
     }
+#endif
 #elif defined(OTA_QSPI_STORE)
     uint32_t qspi_capacity = c.fetch_store.capacity();
     n += snprintf(reply + n, 160 - n, " | QSPI store:%s%uK",
@@ -934,6 +1030,37 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
 #endif
 
   } else if (is_cmd(a, "bootloader|blupdate", &rest)) {
+#if defined(OTA_BOOTLOADER_MIGRATION)
+    const char* update_args = nullptr;
+    if (is_cmd(rest, "update", &update_args)) {
+      if (*update_args) {
+        strcpy(reply, "ERR usage: ota bootloader update");
+      } else if (!c.embeddedBootloaderIdle()) {
+        strcpy(reply, "ERR another OTA operation is active");
+      } else {
+        bootloader_migration_request(nullptr, reply, 160);
+      }
+      return true;
+    }
+    const char* embedded = nullptr;
+    if (is_cmd(rest, "embedded", &embedded)) {
+      if (*embedded == 0 || strcmp(embedded, "status") == 0) {
+        bootloader_migration_status(reply, 160);
+      } else if (strcmp(embedded, "audit") == 0) {
+        bootloader_migration_audit(reply, 160);
+      } else {
+        const char* confirmation = nullptr;
+        if (!is_cmd(embedded, "install", &confirmation)) {
+          strcpy(reply, "ERR usage: ota bootloader embedded [status|audit|install HASH16]");
+        } else if (!c.embeddedBootloaderIdle()) {
+          strcpy(reply, "ERR another OTA operation is active");
+        } else {
+          bootloader_migration_request(confirmation, reply, 160);
+        }
+      }
+      return true;
+    }
+#endif
 #if defined(NRF52_PLATFORM) && !defined(OTA_SEEDER_ONLY) && \
     (defined(OTA_QSPI_BOOTLOADER_UPDATE) || defined(OTA_INTERNAL_BOOTLOADER_UPDATE) || \
      defined(OTA_SD_BOOTLOADER_UPDATE))
@@ -1001,6 +1128,10 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
       return true;
     }
 #endif
+    if (c.apply_pending || c.bootloader_apply_pending) {
+      strcpy(reply, "ERR another update is already armed");
+      return true;
+    }
     if (c.fetch_to_folder) {
       strcpy(reply, "ERR the complete update was captured to a folder, not staged for install; use `ota cancel`");
       return true;
@@ -1026,7 +1157,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
 #if !defined(OTA_SEEDER_ONLY)
       if (c.self_serve_supported && !c.serving) c.serving = ota_serve_self(c, 0);
 #endif
-      char m2[120]; c.attach_folder(m2, sizeof(m2)); c.manager.announce();
+      char m2[120]; c.attach_folder(m2, sizeof(m2));
       strncpy(reply, m2, 159); reply[159] = 0;
 #else
       strcpy(reply, "ERR not built with OTA_FOLDER_SERIAL (set the seeder UART in platformio.ini)");
@@ -1257,6 +1388,11 @@ static bool handle_dev(const char* d, char* reply, OtaContext& c) {
             r.root_ok, r.payload_ok, r.image_ok, r.sig_ok, r.trusted);
 
   } else if (is_cmd(d, "resume", &d)) {     // explicit re-adopt of a known/active staged MID (test/debug)
+    // Reopening can reset an approved store even when no checkpoint is found.
+    if (c.apply_pending || c.bootloader_apply_pending) {
+      strcpy(reply, "ERR another update is already armed");
+      return true;
+    }
     uint8_t mid[4];
     if (*d) {
       if (!parse_hex_exact(d, mid, sizeof(mid))) {
@@ -1367,6 +1503,9 @@ static bool handle_dev(const char* d, char* reply, OtaContext& c) {
       strcpy(reply, "OK cleared SD archive session; partial retained for resume");
     } else {
       const bool discarded = c.fetch_store.discard();
+#if defined(NRF52_PLATFORM) && defined(OTA_RAK15002_SD_STORE) && !defined(OTA_SEEDER_ONLY)
+      c.prepareRakStorage();
+#endif
 #if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
       if (discarded || (!c.fetch_store.usesExternal() && !c.fetch_store.usesInternal())) {
         c.fetch_store.resetSelection();

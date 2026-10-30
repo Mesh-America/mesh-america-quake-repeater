@@ -1,5 +1,8 @@
 #include "Dispatcher.h"
 #include "helpers/ota/OtaTiming.h"
+#if MESH_ENABLE_OTA_KISS_DIRECT
+#include "helpers/ota/OtaDirectWire.h"
+#endif
 
 #if MESH_PACKET_LOGGING
   #include <Arduino.h>
@@ -47,15 +50,26 @@ static uint32_t scaleCADDelayForQueue(uint32_t normal_delay, int ready_count,
 void Dispatcher::setRadioAvailable(bool available) {
   if (radio_available == available) return;
 
+#if MESH_ENABLE_TX_BEACONS
+  if (!available) cancelBeaconRadioFrame();
+#endif
   radio_available = available;
+#if MESH_ENABLE_FOREIGN_RADIO
+  if (!available && hasForeignRadioFrame()) {
+    if (foreign_radio_sending) _radio->onSendFinished();
+    finishForeignRadioFrame(false, foreign_radio_sending);
+  }
+#endif
   radio_nonrx_timer_armed = false;
   if (!dispatcher_started || !radio_available) return;
+#if MESH_ENABLE_TX_BEACONS
+  if (serviceBeaconRadioFrame()) return;
+#endif
 
   const unsigned long now = _ms->getMillis();
   radio_nonrx_start = now;
   next_floor_calib_time = now;
-  armed_agc_reset_interval = 0;
-  agc_reset_armed = false;
+  agc_reset.reset();
   _radio->begin();
   prev_isrecv_mode = _radio->isInRecvMode();
 #ifdef RADIO_LIVENESS_SOFT_ONLY
@@ -68,10 +82,22 @@ void Dispatcher::setRadioAvailable(bool available) {
 }
 
 void Dispatcher::begin() {
+#if MESH_ENABLE_TX_BEACONS
+  cancelBeaconRadioFrame();
+  if (hasBeaconRadioFrame()) return; // restoration owns the peripheral
+#endif
+#if MESH_ENABLE_FOREIGN_RADIO
+  if (hasForeignRadioFrame()) {
+    if (foreign_radio_sending && radio_available) _radio->onSendFinished();
+    finishForeignRadioFrame(false, foreign_radio_sending);
+  }
+#endif
   n_sent_flood = n_sent_direct = 0;
   n_recv_flood = n_recv_direct = 0;
   last_meshcore_recv_millis = 0;
   _err_flags = 0;
+  cad_busy_start = 0;
+  profile_cad_busy[0] = profile_cad_busy[1] = 0;
   outbound_radio_retry_at = 0;
   outbound_radio_prepare_deadline = 0;
   outbound_radio_retry_pending = false;
@@ -87,8 +113,7 @@ void Dispatcher::begin() {
   last_budget_update = _ms->getMillis();
 
   const unsigned long now = _ms->getMillis();
-  armed_agc_reset_interval = 0;
-  agc_reset_armed = false;
+  agc_reset.reset();
   dispatcher_started = true;
   if (radio_available) {
     _radio->begin();
@@ -210,10 +235,7 @@ bool Dispatcher::startOutboundTransmit() {
 #if MESH_PACKET_LOGGING
   if (isUsbLoggingEnabled()) {
 #if MESH_PACKET_LOGGING_COMPACT
-    SerialLogLine<> line;
-    line.printf("T");
-    line.hex(raw, len);
-    line.flush(usbLoggingPort(), false);
+    serialLogCompactPacket(usbLoggingPort(), 'T', raw, len);
 #else
     logPacketLine("TX", outbound, len, false, 0.0f, 0);
 #endif
@@ -224,6 +246,9 @@ bool Dispatcher::startOutboundTransmit() {
 
 bool Dispatcher::scheduleOutboundRadioRetry() {
   if (outbound == NULL || outbound_radio_retry_used || outbound_cancellation != OutboundCancellation::None) return false;
+  // A lost TxDone may follow a real transmission, so a denied flood must not
+  // spend its reserved airtime again during radio recovery.
+  if (outbound->isRouteFlood() && outbound->flood_retry_policy == FLOOD_RETRY_POLICY_DENY) return false;
 
   outbound_radio_retry_used = true;
   outbound_radio_retry_pending = true;
@@ -255,6 +280,235 @@ void Dispatcher::failOutboundTransmit() {
   outbound_radio_prepare_deadline = 0;
   outbound_cancellation = OutboundCancellation::None;
 }
+
+#if MESH_ENABLE_FOREIGN_RADIO
+bool Dispatcher::supportsForeignRadioProtocol(RadioProfileProtocol protocol) const {
+  switch (protocol) {
+#if MESH_ENABLE_MESHTEXT_CHAT
+    case RadioProfileProtocol::Meshtext: return _radio->supportsMeshtext();
+#endif
+#if MESH_ENABLE_ETHERNET_TUNNEL
+    case RadioProfileProtocol::Ethernet: return _radio->supportsEthernetTunnel();
+#endif
+    default: return false;
+  }
+}
+
+bool Dispatcher::isForeignRadioCurrent() const {
+  const auto* profiles = _radio->profiles();
+#if MESH_ENABLE_OTA_KISS_DIRECT
+  if (foreign_radio_protocol == RadioProfileProtocol::MeshCore) {
+    return radio_available && profiles && foreign_radio_profile < 2
+        && profiles->canTransmit(foreign_radio_profile)
+        && profiles->params(foreign_radio_profile).protocol == RadioProfileProtocol::MeshCore
+        && foreign_radio_generation == profiles->generation[foreign_radio_profile]
+        && foreign_radio_ota_epoch != 0 && foreign_radio_ota_epoch == directOtaEpoch()
+        && allowDirectOtaTransmit(foreign_radio_profile, foreign_radio_generation);
+  }
+#endif
+  return radio_available && supportsForeignRadioProtocol(foreign_radio_protocol) && profiles
+      && allowForeignRadioTransmit()
+      && foreign_radio_profile == 1 && profiles->enabled()
+      && profiles->canTransmit(foreign_radio_profile)
+      && profiles->params(foreign_radio_profile).protocol == foreign_radio_protocol
+      && foreign_radio_generation == profiles->generation[foreign_radio_profile];
+}
+
+#if MESH_ENABLE_OTA_KISS_DIRECT
+bool Dispatcher::queueDirectOtaRadioFrame(const uint8_t* message, uint16_t length,
+                                         uint8_t profile, uint32_t generation) {
+#if MESH_ENABLE_TX_BEACONS
+  if (hasBeaconRadioFrame()) return false;
+#endif
+  const auto* profiles = _radio->profiles();
+  const uint32_t epoch = directOtaEpoch();
+  if (hasForeignRadioFrame() || !radio_available || _radio->isCarrierWaveActive()
+      || !epoch
+      || !profiles || profile >= 2 || !profiles->canTransmit(profile)
+      || profiles->params(profile).protocol != RadioProfileProtocol::MeshCore
+      || generation != profiles->generation[profile]
+      || !allowDirectOtaTransmit(profile, generation)) return false;
+  const uint16_t encoded = ota::ota_direct_wire_encode(
+      foreign_radio_bytes, sizeof(foreign_radio_bytes), message, length);
+  if (!encoded) return false;
+  retireUnusedCADWait(profile);
+  foreign_radio_length = encoded;
+  foreign_radio_profile = profile;
+  foreign_radio_protocol = RadioProfileProtocol::MeshCore;
+  foreign_radio_generation = generation;
+  foreign_radio_ota_epoch = epoch;
+  foreign_radio_retry_at = foreign_radio_prepare_deadline = 0;
+  foreign_radio_sending = false;
+  return true;
+}
+#endif
+
+bool Dispatcher::queueForeignRadioFrame(const uint8_t* bytes, size_t length,
+                                        uint8_t profile, uint32_t generation,
+                                        RadioProfileProtocol protocol) {
+#if MESH_ENABLE_TX_BEACONS
+  if (hasBeaconRadioFrame()) return false;
+#endif
+  const auto* profiles = _radio->profiles();
+  if (!bytes || !length || length > sizeof(foreign_radio_bytes) || hasForeignRadioFrame()
+      || !radio_available || !supportsForeignRadioProtocol(protocol) || _radio->isCarrierWaveActive()
+      || !allowForeignRadioTransmit()
+      || !profiles || profile != 1 || !profiles->enabled() || !profiles->canTransmit(profile)
+      || profiles->params(profile).protocol != protocol
+      || generation != profiles->generation[profile]) return false;
+  retireUnusedCADWait(profile);
+  memcpy(foreign_radio_bytes, bytes, length);
+  foreign_radio_length = (uint16_t)length;
+  foreign_radio_profile = profile;
+  foreign_radio_protocol = protocol;
+  foreign_radio_generation = generation;
+  foreign_radio_retry_at = foreign_radio_prepare_deadline = 0;
+  foreign_radio_sending = false;
+  return true;
+}
+
+void Dispatcher::finishForeignRadioFrame(bool success, bool account_airtime) {
+  if (!hasForeignRadioFrame()) return;
+  const bool direct_ota = foreign_radio_protocol == RadioProfileProtocol::MeshCore;
+  if (account_airtime) {
+    const uint32_t elapsed = (uint32_t)_ms->getMillis() - foreign_radio_start;
+    total_air_time += elapsed;
+    if (direct_ota) {
+      ota_tx_finished_at = _ms->getMillis();
+      ota_tx_airtime = elapsed;
+    }
+    updateTxBudget();
+    tx_budget_ms = elapsed >= tx_budget_ms ? 0 : tx_budget_ms - elapsed;
+    if (tx_budget_ms < MIN_TX_BUDGET_RESERVE_MS) {
+      const float duty_cycle = 1.0f / (1.0f + getAirtimeBudgetFactor());
+      next_tx_time = futureMillis((unsigned long)((MIN_TX_BUDGET_RESERVE_MS - tx_budget_ms) / duty_cycle));
+    } else next_tx_time = _ms->getMillis();
+  }
+  if (success && _radio->profiles()) ++_radio->profiles()->tx_packets[foreign_radio_profile];
+  // Release ownership before calling the application; it may submit another
+  // explicit user message. No retry is scheduled after any failure/timeout.
+  foreign_radio_length = 0;
+  foreign_radio_sending = false;
+#if MESH_ENABLE_OTA_KISS_DIRECT
+  foreign_radio_ota_epoch = 0;
+#endif
+  foreign_radio_yield_meshcore = true;
+  profile_cad_busy[foreign_radio_profile] = 0;
+  foreign_radio_retry_at = foreign_radio_prepare_deadline = 0;
+  radio_nonrx_start = _ms->getMillis();
+  // A direct OTA packet is not a Meshtext/Ethernet send, and must not change
+  // either transport's application counters or trigger its callbacks.
+  if (direct_ota) {
+    if (success) ++n_sent_direct;
+  } else onForeignRadioSendComplete(success);
+}
+
+bool Dispatcher::discardQueuedForeignRadioFrame(RadioProfileProtocol protocol) {
+  if (!hasForeignRadioFrame() || foreign_radio_sending || foreign_radio_protocol != protocol) return false;
+  finishForeignRadioFrame(false, false);
+  return true;
+}
+
+bool Dispatcher::serviceForeignRadioFrame() {
+  if (!hasForeignRadioFrame()) return false;
+  if (!foreign_radio_sending) {
+    if (!isForeignRadioCurrent()) finishForeignRadioFrame(false, false);
+    return false;
+  }
+  if (_radio->isSendComplete()) {
+    const bool current = isForeignRadioCurrent();
+    _radio->onSendFinished();
+    finishForeignRadioFrame(current, true);
+    return false;
+  }
+  if (millisHasNowPassed(foreign_radio_expiry)) {
+    _radio->onSendFinished();
+    finishForeignRadioFrame(false, true);
+    _err_flags |= ERR_EVENT_RADIO_WATCHDOG;
+    _radio->recoverRadio(true);
+    return false;
+  }
+  return true;
+}
+
+bool Dispatcher::checkForeignRadioSend() {
+  if (!hasForeignRadioFrame() || outbound || foreign_radio_sending) return false;
+  if (!isForeignRadioCurrent()) {
+    finishForeignRadioFrame(false, false);
+    return false;
+  }
+  if (!restoreOutboundTxOverrides() || _radio->isCarrierWaveActive()) return false;
+  const uint32_t now = _ms->getMillis();
+  if (foreign_radio_protocol == RadioProfileProtocol::MeshCore && ota_tx_airtime) {
+    const uint32_t quiet = ota::packetQuietTime(ota_tx_airtime, getOtaPacketSpeedFactor());
+    if (now - ota_tx_finished_at < quiet) return false;
+    ota_tx_airtime = 0;
+  }
+  // Continuous explicit foreign chat must leave due MeshCore traffic a turn
+  // between messages; a blocked/absent MeshCore queue does not stall MT.
+  if (foreign_radio_yield_meshcore && _mgr->getOutboundCount(now) > 0) {
+    foreign_radio_yield_meshcore = false;
+    return false;
+  }
+  if (foreign_radio_retry_at && (int32_t)(now - foreign_radio_retry_at) < 0) return false;
+  updateTxBudget();
+  const uint32_t airtime = validPrepareBusyAirtime(
+      _radio->getProfileAirtime(foreign_radio_profile, foreign_radio_length));
+  if (!airtime) { finishForeignRadioFrame(false, false); return false; }
+  if (tx_budget_ms < airtime / MIN_TX_BUDGET_AIRTIME_DIV) {
+    const float duty_cycle = 1.0f / (1.0f + getAirtimeBudgetFactor());
+    next_tx_time = futureMillis((unsigned long)((airtime / MIN_TX_BUDGET_AIRTIME_DIV - tx_budget_ms) / duty_cycle));
+    return false;
+  }
+  if (!millisHasNowPassed(next_tx_time)) return false;
+  const auto prepared = _radio->prepareTransmitProfile(foreign_radio_profile);
+  if (prepared == RadioParamApplyResult::BUSY) {
+    if (!foreign_radio_prepare_deadline) {
+      uint32_t maximum = validPrepareBusyAirtime(_radio->getProfileAirtime(0, MAX_TRANS_UNIT));
+      const uint32_t other = validPrepareBusyAirtime(_radio->getProfileAirtime(1, MAX_TRANS_UNIT));
+      if (other > maximum) maximum = other;
+      foreign_radio_prepare_deadline = now + maximum * 3 / 2 + RADIO_PREPARE_BUSY_GRACE_MS;
+      if (!foreign_radio_prepare_deadline) foreign_radio_prepare_deadline = 1;
+    } else if (millisHasNowPassed(foreign_radio_prepare_deadline)) {
+      finishForeignRadioFrame(false, false);
+      _err_flags |= ERR_EVENT_RADIO_WATCHDOG;
+      _radio->recoverRadio(true);
+      return false;
+    }
+    foreign_radio_retry_at = now + 10;
+    return false;
+  }
+  foreign_radio_prepare_deadline = 0;
+  if (prepared != RadioParamApplyResult::APPLIED || !isForeignRadioCurrent()) {
+    finishForeignRadioFrame(false, false);
+    return false;
+  }
+  // CAD is the normal bounded pre-transmit check. Waiting does not retain the
+  // transceiver: MeshCore RX/TX and profile scanning continue in the meantime.
+  uint32_t& busy_since = profile_cad_busy[foreign_radio_profile];
+  if (_radio->isReceiving()) {
+    if (!busy_since) busy_since = now ? now : 1;
+    if ((uint32_t)(now - busy_since) <= getCADFailMaxDuration()) {
+      foreign_radio_retry_at = now + getCADFailRetryDelay();
+      return false;
+    }
+    _err_flags |= ERR_EVENT_CAD_TIMEOUT;
+  }
+  busy_since = 0;
+  foreign_radio_retry_at = 0;
+  foreign_radio_start = _ms->getMillis();
+  if (!_radio->startSendRaw(foreign_radio_bytes, foreign_radio_length)) {
+    // RadioLib owns failure cleanup (including the board's FEM). Unlike
+    // MeshCore reliable routing, this transport never retries autonomously.
+    // Companion may later submit a separately validated retained chat copy.
+    finishForeignRadioFrame(false, false);
+    return false;
+  }
+  foreign_radio_sending = true;
+  foreign_radio_expiry = foreign_radio_start + airtime * 3 / 2 + 1000;
+  return true;
+}
+#endif
 
 int Dispatcher::calcRxDelay(float score, uint32_t air_time) const {
   return (int) ((powf(10.0f, 0.85f - score) - 1.0f) * air_time);
@@ -296,16 +550,68 @@ void Dispatcher::logPacketLine(const char* direction, const Packet* packet,
 }
 #endif
 
-bool Dispatcher::getNextQueueWakeDelay(uint32_t& delay_millis) const {
-  if (isDualRadioActive()) { delay_millis = 0; return true; }
-  const uint32_t now = _ms->getMillis();
-  bool found = false;
-  uint32_t shortest_delay = 0;
+bool Dispatcher::getNextNoiseFloorWakeDelay(uint32_t& delay_millis) const {
+  return radio_available
+      && _radio->getNoiseFloorWakeDelay(_ms->getMillis(), delay_millis);
+}
 
+bool Dispatcher::getNextQueueWakeDelay(uint32_t& delay_millis) const {
+  const bool dual_profile = isDualRadioActive();
+  uint32_t profile_delay = 0;
+  if (dual_profile && (!radio_available
+      || !_radio->getProfileIdleDelay(profile_delay) || profile_delay == 0)) {
+    delay_millis = 0;
+    return true;
+  }
+#if MESH_ENABLE_FOREIGN_RADIO
+  if (hasForeignRadioFrame()) { delay_millis = 0; return true; }
+#endif
+  const uint32_t now = _ms->getMillis();
+  bool found = dual_profile;
+  uint32_t shortest_delay = profile_delay;
+#if MESH_ENABLE_TX_BEACONS
+  if (radio_available && hasBeaconRadioFrame()) {
+    // TX completion and restoration need the fast lifecycle, not timed sleep.
+    delay_millis = 0;
+    return true;
+  }
+  if (radio_available && beacon_wake_enabled) {
+    const int32_t wait = int32_t(beacon_wake_at - now);
+    const uint32_t beacon_delay = wait > 0 ? uint32_t(wait) : 0;
+    if (!found || beacon_delay < shortest_delay) shortest_delay = beacon_delay;
+    found = true;
+  }
+#endif
+  // Timed MCU sleep must not skip the adaptive maintenance/retry deadline.
+  // Preserve the legacy queue-only query when power saving is off.
+  if (radio_available && useAdaptiveAGC()) {
+    uint32_t agc_delay;
+    const bool agc_found = agc_reset.nextDelay(now, agc_delay);
+    if (agc_found && (!found || agc_delay < shortest_delay)) shortest_delay = agc_delay;
+    found = found || agc_found;
+    if (agc_found && !agc_reset.recoveryMatches(_radio->getRecoveryCount())) {
+      // A Dispatcher-owned recovery can occur after configure() this loop.
+      // Poll once before sleeping so the base cadence is restored promptly.
+      delay_millis = 0;
+      return true;
+    }
+  }
+
+  uint32_t receive_retry_delay = 0;
+  const bool receive_retry = radio_available
+      && _radio->getReceiveRetryDelay(now, receive_retry_delay);
   if (outbound != NULL) {
     if (outbound_radio_retry_pending) {
       int32_t signed_retry_delay = (int32_t)(outbound_radio_retry_at - now);
       delay_millis = signed_retry_delay > 0 ? (uint32_t)signed_retry_delay : 0;
+      // This backoff branch services checkRecv(), but returns before AGC.
+      // Wake for a failed RX retry without making overdue AGC a hot poll.
+      if (receive_retry && receive_retry_delay < delay_millis) {
+        delay_millis = receive_retry_delay;
+      }
+      if (dual_profile && profile_delay < delay_millis) {
+        delay_millis = profile_delay;
+      }
     } else {
       // TX completion/timeout still needs the normal fast lifecycle path.
       delay_millis = 0;
@@ -313,9 +619,15 @@ bool Dispatcher::getNextQueueWakeDelay(uint32_t& delay_millis) const {
     return true;
   }
 
+  if (receive_retry) {
+    if (!found || receive_retry_delay < shortest_delay) shortest_delay = receive_retry_delay;
+    found = true;
+  }
+
   if (outbound_restore_cr) {
     const int32_t restore_delay = (int32_t)(outbound_restore_retry_at - now);
-    shortest_delay = restore_delay > 0 ? (uint32_t)restore_delay : 0;
+    const uint32_t delay = restore_delay > 0 ? (uint32_t)restore_delay : 0;
+    if (!found || delay < shortest_delay) shortest_delay = delay;
     found = true;
   }
 
@@ -351,6 +663,15 @@ uint32_t Dispatcher::getRadioWatchdogMillis() const {
 #endif
 
 void Dispatcher::loop() {
+#if MESH_ENABLE_TX_BEACONS
+  // Keep an expired RF-start guard retired through later millis() wraps.
+  // Observe it even while the radio is suspended or an active lease returns
+  // early; this retires only the guard, never the frame or radio ownership.
+  if (beacon_has_started
+      && uint32_t(_ms->getMillis() - beacon_last_start) >= BEACON_START_GUARD_MS) {
+    beacon_has_started = false;
+  }
+#endif
   if (!radio_available) {
     // Keep packet-manager cleanup alive, but never touch an uninitialized or
     // physically unavailable radio. sendPacket() rejects new outbound work
@@ -359,6 +680,10 @@ void Dispatcher::loop() {
     return;
   }
 
+#if MESH_ENABLE_TX_BEACONS
+  // Restore before any calibration/scan/watchdog can observe a foreign tuple.
+  if (serviceBeaconRadioFrame()) return;
+#endif
   if (millisHasNowPassed(next_floor_calib_time)) {
     _radio->triggerNoiseFloorCalibrate(getInterferenceThreshold());
     _radio->setCADEnabled(getCADEnabled());
@@ -368,8 +693,17 @@ void Dispatcher::loop() {
   // A maintenance carrier has no TxDone packet. Keep its deadline serviced,
   // but leave queued packets and RX/AGC watchdogs alone until normal RX returns.
   if (_radio->isCarrierWaveActive()) return;
+#if MESH_ENABLE_FOREIGN_RADIO
+  // Use the same physical-radio owner and cleanup path as MeshCore TX. A
+  // foreign packet never enters the MeshCore retry/forwarding machinery.
+  if (serviceForeignRadioFrame()) return;
+#endif
 
   const unsigned long now = _ms->getMillis();
+  const int agc_interval = getAGCResetInterval();
+  const bool adaptive = useAdaptiveAGC();
+  agc_reset.configure(now, agc_interval > 0 ? agc_interval : 0,
+                      adaptive, adaptive ? _radio->getRecoveryCount() : 0);
   if (!radio_nonrx_timer_armed) {
     // Application setup can outlast the watchdog after begin() leaves the
     // radio in standby. Start observing when loop service actually begins,
@@ -540,35 +874,30 @@ void Dispatcher::loop() {
     }
 
     // going back into receive mode now...
-    const int agc_interval = getAGCResetInterval();
-    if (agc_interval > 0) {
-      next_agc_reset_time = futureMillis(agc_interval);
-      armed_agc_reset_interval = agc_interval;
-      agc_reset_armed = true;
-    } else {
-      armed_agc_reset_interval = 0;
-      agc_reset_armed = false;
-    }
+    agc_reset.noteTransmit(_ms->getMillis());
   }
 
-  const int agc_interval = getAGCResetInterval();
-  if (agc_interval <= 0) {
-    armed_agc_reset_interval = 0;
-    agc_reset_armed = false;
-  } else if (!agc_reset_armed
-             || agc_interval != armed_agc_reset_interval) {
-    // MyMesh loads persisted preferences after Dispatcher::begin().  Arm from
-    // the first loop so the real configured interval is used, and so a freshly
-    // initialized radio/frontend gets one full settle interval before the
-    // first warm-sleep AGC reset. A live interval change also gets a complete
-    // new interval instead of inheriting the old setting's deadline.
-    next_agc_reset_time = futureMillis(agc_interval);
-    armed_agc_reset_interval = agc_interval;
-    agc_reset_armed = true;
-  } else if (millisHasNowPassed(next_agc_reset_time)) {
-    _radio->resetAGC();
-    next_agc_reset_time = futureMillis(agc_interval);
-    armed_agc_reset_interval = agc_interval;
+  const uint32_t agc_now = _ms->getMillis();
+  if ((!adaptive || !recovered_this_loop) && agc_interval > 0
+      && (adaptive ? agc_reset.due(agc_now)
+      : millisHasNowPassed(agc_reset.nextAt()))) {
+    bool attempted;
+    if (!adaptive) {
+      _radio->resetAGC();
+      attempted = true;
+    } else {
+      attempted = !_radio->isCalibratingNoiseFloor() && _radio->tryResetAGC();
+    }
+    if (attempted) {
+      agc_reset.noteAttempt(_ms->getMillis());
+    } else {
+      // Ownership/calibration deferral is not a reset or health evidence.
+      const uint32_t deferred_at = _ms->getMillis();
+      uint32_t retry_delay = 50, receive_delay;
+      if (adaptive && _radio->getReceiveRetryDelay(deferred_at, receive_delay)
+          && receive_delay > retry_delay) retry_delay = receive_delay;
+      agc_reset.noteDeferred(deferred_at, retry_delay);
+    }
   }
 
   // check inbound (delayed) queue
@@ -629,7 +958,14 @@ void Dispatcher::loop() {
     }
 #endif
   }
+#if MESH_ENABLE_TX_BEACONS
+  if (checkBeaconRadioSend()) { releaseDroppedOutbound(); return; }
+#endif
+#if MESH_ENABLE_FOREIGN_RADIO
+  if (!checkForeignRadioSend()) checkSend();
+#else
   checkSend();
+#endif
   releaseDroppedOutbound();
 }
 
@@ -656,6 +992,10 @@ bool Dispatcher::tryParsePacket(Packet* pkt, const uint8_t* raw, int len) {
   pkt->radio_local = false;
   pkt->tx_radio = RADIO_TX_AUTO;
   pkt->radio_reply = pkt->radio_reply_force = false;
+  pkt->forwarded = false;
+#if defined(WITH_UDP_BRIDGE)
+  pkt->udp_bridge_ingress = false;
+#endif
   pkt->radio_generation = pkt->radio_origin_generation = _radio->receiveProfileGeneration();
   pkt->header = raw[i++];
   if (pkt->getPayloadVer() > PAYLOAD_VER_1) {
@@ -725,6 +1065,51 @@ void Dispatcher::checkRecv() {
       snr = _radio->getLastSNR();
       rssi = _radio->getLastRSSI();
 
+      const uint8_t profile = _radio->receiveProfile();
+      const auto* profiles = _radio->profiles();
+      // A logical tuple may have been replaced while the physical modem was
+      // completing RX. Never reinterpret old Ethernet/Meshtext bytes under
+      // the new MeshCore tuple, even for raw logs or bridge hooks.
+      if (profiles && (profile >= 2
+          || _radio->receiveProfileGeneration() != profiles->generation[profile])) {
+        _radio->onReceiveProcessed();
+        return;
+      }
+      // Protocol is selected by the receiving modem, never guessed from a
+      // payload byte. No foreign bytes may leak into MeshCore raw sinks,
+      // parsing, duplicate suppression, direct forwarding, or app counters.
+      if (profiles && profile < 2
+          && profiles->params(profile).protocol != RadioProfileProtocol::MeshCore) {
+#if MESH_ENABLE_FOREIGN_RADIO
+        if (profile == 1 && profiles->enabled()
+            && supportsForeignRadioProtocol(profiles->params(profile).protocol)
+            && _radio->receiveProfileGeneration() == profiles->generation[profile]) {
+          rx_air_time += _radio->getProfileAirtime(profile, len);
+          ++_radio->profiles()->rx_packets[profile];
+          onForeignRadioFrame(raw, (size_t)len, profile, profiles->generation[profile], snr, rssi);
+        }
+#endif
+        _radio->onReceiveProcessed();
+        return;
+      }
+
+#if MESH_ENABLE_OTA_KISS_DIRECT
+      // Consume the reserved direct extension before Packet allocation and
+      // before normal raw logs/bridges. Old firmware rejects its version.
+      // Malformed/unsolicited frames never become routed MeshCore traffic.
+      if (ota::ota_direct_wire_marker(raw, (size_t)len)) {
+        if (profiles && profile < 2
+            && onDirectOtaRadioFrame(raw, (size_t)len, profile,
+                                    _radio->receiveProfileGeneration())) {
+          rx_air_time += _radio->getProfileAirtime(profile, len);
+          ++_radio->profiles()->rx_packets[profile];
+          ++n_recv_direct;
+        }
+        _radio->onReceiveProcessed();
+        return;
+      }
+#endif
+
       // TRACE and CONTROL are direct-only.  Reject a flood framing before
       // raw hooks can expose it to USB logs, MQTT, ESP-NOW, or another bridge.
       // The header check is deliberate: it also holds when the packet pool is
@@ -790,6 +1175,7 @@ void Dispatcher::processRecvPacket(Packet* pkt) {
   const auto* profiles = _radio->profiles();
   if (profiles && (pkt->radio_profile > 1
       || (pkt->radio_profile == 1 && !profiles->enabled())
+      || profiles->params(pkt->radio_profile).protocol != RadioProfileProtocol::MeshCore
       || pkt->radio_generation != profiles->generation[pkt->radio_profile])) {
     releasePacket(pkt);
     return;
@@ -809,6 +1195,7 @@ void Dispatcher::processRecvPacket(Packet* pkt) {
   } else if (action == ACTION_MANUAL_HOLD) {
     // sub-class is wanting to manually hold Packet instance, and call releasePacket() at appropriate time
   } else {   // ACTION_RETRANSMIT*
+    pkt->forwarded = true;
     uint8_t priority = (action >> 24) - 1;
     uint32_t _delay = action & 0xFFFFFF;
 
@@ -987,12 +1374,40 @@ Packet* Dispatcher::obtainNewPacket() {
     pkt->tx_radio = RADIO_TX_AUTO;
     pkt->radio_reply = receive_context_active;
     pkt->radio_reply_force = false;
+    pkt->forwarded = false;
+#if defined(WITH_UDP_BRIDGE)
+    pkt->udp_bridge_ingress = false;
+#endif
   }
   return pkt;
 }
 
 void Dispatcher::releasePacket(Packet* packet) {
   _mgr->free(packet);
+}
+
+void Dispatcher::retireUnusedCADWait(uint8_t profile) {
+  if (profile_cad_busy[profile] && !(outbound && outbound->radio_profile == profile)
+#if MESH_ENABLE_FOREIGN_RADIO
+      && !(hasForeignRadioFrame() && foreign_radio_profile == profile)
+#endif
+      ) {
+    // Cancellation/echo suppression can retire the last packet for a profile
+    // without observing a free channel. Its old age must not force a later,
+    // unrelated packet to transmit immediately with a false timeout. Check
+    // only on enqueue with an aged wait, never during the idle/sleep loop.
+    bool waiting = false;
+    for (int i = 0, count = _mgr->getOutboundTotal(); i < count; ++i) {
+      const auto* queued = _mgr->getOutboundByIdx(i);
+      if (queued && queued->radio_profile == profile) { waiting = true; break; }
+    }
+    if (!waiting) profile_cad_busy[profile] = 0;
+  }
+}
+
+bool Dispatcher::queueTransmitCandidate(Packet* packet, uint8_t priority, uint32_t scheduled_for) {
+  retireUnusedCADWait(packet->radio_profile);
+  return _mgr->queueOutbound(packet, priority, scheduled_for);
 }
 
 bool Dispatcher::queueOutboundPacket(Packet* packet, uint8_t priority, uint32_t delay_millis) {
@@ -1012,13 +1427,13 @@ bool Dispatcher::queueOutboundPacket(Packet* packet, uint8_t priority, uint32_t 
   if (profiles == nullptr) {
     if (packet->tx_radio != RADIO_TX_AUTO
         && !(explicitRadioTxMask(packet->tx_radio, false) & 1)) return false;
-    return _mgr->queueOutbound(packet, priority, futureMillis(delay_millis));
+    return queueTransmitCandidate(packet, priority, futureMillis(delay_millis));
   }
   if (packet->radio_bound) {
     if (!isPacketRadioCurrent(packet)) return false;
     if (profiles && packet->radio_profile != packet->radio_origin
         && !allowRadioProfileCross(packet)) return false;
-    return _mgr->queueOutbound(packet, priority, futureMillis(delay_millis));
+    return queueTransmitCandidate(packet, priority, futureMillis(delay_millis));
   }
   if (!packet->radio_local && packet->radio_generation
       && packet->radio_generation != profiles->generation[packet->radio_profile]) return false;
@@ -1049,7 +1464,7 @@ bool Dispatcher::queueOutboundPacket(Packet* packet, uint8_t priority, uint32_t 
   }
   packet->radio_generation = profiles->generation[packet->radio_profile];
   packet->radio_bound = true;
-  if (!_mgr->queueOutbound(packet, priority, futureMillis(delay_millis))) return false;
+  if (!queueTransmitCandidate(packet, priority, futureMillis(delay_millis))) return false;
   if (packet->radio_profile != origin) onRadioProfileCopyQueued(packet, nullptr, priority);
   const uint8_t other = packet->radio_profile ^ 1;
   if (mask & (1U << other)) {
@@ -1058,7 +1473,7 @@ bool Dispatcher::queueOutboundPacket(Packet* packet, uint8_t priority, uint32_t 
       *copy = *packet;
       copy->radio_profile = other;
       copy->radio_generation = profiles->generation[other];
-      if (_mgr->queueOutbound(copy, priority, futureMillis(delay_millis))) {
+      if (queueTransmitCandidate(copy, priority, futureMillis(delay_millis))) {
         onRadioProfileCopyQueued(copy, packet, priority);
         onTracePacketQueuedForSend(copy);
       } else {
@@ -1080,24 +1495,37 @@ uint8_t Dispatcher::getTransmitProfileMask(const Packet* packet) const {
   uint8_t origin = packet->radio_profile;
   if (policy == RADIO_TX_AUTO && packet->radio_local && packet->getPayloadType() == PAYLOAD_TYPE_OTA
       && profiles->secondary_temporary && !profiles->primary_temporary) origin = 1;
-  return policy == RADIO_TX_AUTO ? profiles->transmitMask(origin)
+  uint8_t mask = policy == RADIO_TX_AUTO ? profiles->transmitMask(origin)
       : explicitRadioTxMask(policy, profiles->canTransmit(1, force));
+  // Explicit BOTH/secondary/reply-force policies cannot turn a MeshCore
+  // packet into foreign-network traffic. The raw API is its only TX path.
+  for (uint8_t profile = 0; profile < 2; ++profile) {
+    if (profiles->params(profile).protocol != RadioProfileProtocol::MeshCore)
+      mask &= (uint8_t)~(1U << profile);
+  }
+  return mask;
 }
 
 uint32_t Dispatcher::getTransmitAirtime(const Packet* packet) const {
+  return getTransmitAirtime(packet, packet->getRawLength());
+}
+
+uint32_t Dispatcher::getTransmitAirtime(const Packet* packet, int wire_length) const {
   const uint8_t mask = getTransmitProfileMask(packet);
   uint32_t total = 0;
   for (uint8_t profile = 0; profile < 2; ++profile) {
     if (mask & (1U << profile))
-      total += _radio->getProfileAirtime(profile, packet->getRawLength(), packet->tx_cr);
+      total += _radio->getProfileAirtime(profile, wire_length, packet->tx_cr);
   }
   return total;
 }
 
 bool Dispatcher::isPacketRadioCurrent(const Packet* packet) const {
   const auto* p = _radio->profiles();
-  if (!p || !packet->radio_bound) return true;
+  if (!p) return true;
   const uint8_t target = packet->radio_profile;
+  if (target > 1 || p->params(target).protocol != RadioProfileProtocol::MeshCore) return false;
+  if (!packet->radio_bound) return true;
   const uint8_t origin = packet->radio_origin;
   const bool force = packet->radio_reply && packet->radio_reply_force;
   return target < 2 && origin < 2 && p->canTransmit(target, force)

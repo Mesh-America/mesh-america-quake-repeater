@@ -1,4 +1,5 @@
 #include "TBeam1WBoard.h"
+#include <helpers/ESP32GpioHold.h>
 #include <helpers/radiolib/CustomSX1262Wrapper.h>
 #include <driver/gpio.h>
 #include <driver/rtc_io.h>
@@ -15,8 +16,8 @@ void TBeam1WBoard::begin() {
   // can also hold the dedicated radio LDO off. These pad holds survive wake
   // and can survive a subsequent software reset, so release them on every
   // startup before RadioLib tries to select the SX1262.
-  esp_err_t nss_hold_result = rtc_gpio_hold_dis((gpio_num_t)P_LORA_NSS);
-  esp_err_t dio_result = rtc_gpio_deinit((gpio_num_t)P_LORA_DIO_1);
+  esp_err_t nss_hold_result = mesh::esp32::releaseRtcGpioIfSupported((gpio_num_t)P_LORA_NSS);
+  esp_err_t dio_result = mesh::esp32::deinitRtcGpioIfSupported((gpio_num_t)P_LORA_DIO_1);
   esp_err_t power_hold_result = gpio_hold_dis((gpio_num_t)SX126X_POWER_EN);
   MESH_DEBUG_PRINTLN("T-Beam 1W pad recovery: NSS=%d DIO1=%d LDO=%d",
                      nss_hold_result, dio_result, power_hold_result);
@@ -83,8 +84,12 @@ void TBeam1WBoard::powerCycleRadio() {
                      power_off_level, digitalRead(SX126X_POWER_EN));
 }
 
+void TBeam1WBoard::applyLedPolicy() {
+  if (!mesh::leds::enabled()) digitalWrite(LED_PIN, LOW);
+}
+
 void TBeam1WBoard::onBeforeTransmit() {
-  digitalWrite(LED_PIN, HIGH);  // TX LED on
+  if (mesh::leds::enabled()) digitalWrite(LED_PIN, HIGH);  // TX LED on
   portENTER_CRITICAL(&_fan_mux);
   _tx_active = true;
   if (_mode == FAN_AUTO && !_stopped) {
@@ -106,7 +111,7 @@ void TBeam1WBoard::onAfterTransmit() {
 
 uint16_t TBeam1WBoard::getBattMilliVolts() {
   // T-Beam 1W uses a 2S battery through the GPIO4 divider. These settings
-  // match the hardware-tested fork and the Meshtastic board definition.
+  // match the hardware-tested fork's board configuration.
   static bool adc_initialized = false;
   if (!adc_initialized) {
     pinMode(BATTERY_PIN, INPUT);
@@ -121,8 +126,8 @@ uint16_t TBeam1WBoard::getBattMilliVolts() {
     delayMicroseconds(100);
   }
   raw /= BATTERY_SENSE_SAMPLES;
-  return static_cast<uint16_t>(
-      (static_cast<float>(raw) / 4095.0f) * 3300.0f * ADC_MULTIPLIER);
+  return calibrateBatteryMillivolts(static_cast<uint16_t>(
+      (static_cast<float>(raw) / 4095.0f) * 3300.0f * ADC_MULTIPLIER));
 }
 
 const char* TBeam1WBoard::getManufacturerName() const {

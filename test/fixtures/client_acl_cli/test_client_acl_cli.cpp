@@ -128,7 +128,8 @@ static void rejects_bad_pages() {
   acl.load(&fs, self);
   add(acl, 0, 3);
   for (const char* command : {
-      "get acl 0", "get acl -1", "get acl +1", "get acl 1x", "get acl 1 2",
+      "get acl 0", "get acl 0000000000000000000000000000000000000000",
+      "get acl -1", "get acl +1", "get acl 1x", "get acl 1 2", "get acl\n1",
       "get acl 1.0", "get acl page 1", "get acl 65536", "get acl 4294967296",
       "get acl 9999999999999999999999999999999999", "get acl 1\nsetperm key 3"}) {
     CHECK(query(acl, command) == "Err - usage: get acl [page]");

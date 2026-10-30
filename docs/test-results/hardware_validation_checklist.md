@@ -14,11 +14,219 @@ when its log identifies the physical device, firmware artifact, artifact hash,
 command result, and cold/warm boot outcome. Do not infer success from a tool's
 exit code when the tool has a documented false-success mode.
 
+## Known-failure follow-up, 2026-10-20/21 UTC
+
+The [follow-up report](hardware_validation_known_failures_1_18_0_1_2026-10-20.md)
+binds builds, host tests and hardware observations to their actual sources.
+It preserves the earlier failures and the accepted fleet results.
+
+- [x] **Current V4 Full logging-on idle/reopen:** shipping source `0b207a1ec`
+  passed case 3: 600.0913 seconds, zero idle writes, 105.3/20.5 ms post-idle
+  reply/reopen, continuous uptime and zero core errors. Watchdog recoveries
+  stayed 2 -> 2 and boot count 0 -> 0. Original settings, strict binary
+  handback, TTY/browser/stream cleanup passed. Complete application readback
+  matched the shipping image; partition table/OTA metadata were unchanged.
+- [x] **Morse receive setting floor:** configured reception now requires at
+  least 15 WPM, with default 25; TX at 1-14 WPM remains available. The operator
+  accepts false letters for now. Earlier quiet/message failures remain recorded;
+  complete-message accuracy and an absolute physical speed cutoff are not
+  inferred from setting validation.
+
+The independent eight-board nRF52 test-bootloader deployment and original-app
+handoffs are complete with documented USB concurrency and RAK secondary-data
+preservation limits. This is separate from final-source Companion qualification.
+The nRF52 testing hold is released; MeshPocket remains excluded.
+
+The current V4 differs from the physical board in the 18 October failure below.
+Its follow-up cannot establish that earlier USB disappearance's cause or erase
+the failed historical measurement. Remaining release gates keep their latest
+documented status.
+
+## Mercerwood candidate campaign, 2026-10-18 UTC
+
+The [current hardware campaign](hardware_validation_mercerwood_1_18_0_1_2026-10-18.md)
+records actual candidate flashes, identity-bound USB/BLE and warm-contact
+checks, live Room authentication/browser results, and shipping Morse failures.
+It retains the original populated-board stack failures and the d52e4e93
+repeated-read/browser retests that passed. The matching-profile trials established
+LoRa reception and paced live-session mailbox operation; durable replay,
+final-role testing and other release gates remain open. These observations do
+not constitute release approval.
+
+The ec9ebc09 Full V4 logging-off native-console trial 03 passed 600.444 seconds
+with zero idle writes, complete replies/reopen and zero core error flags.
+The passed Room logging-on trial does not qualify Full logging-on.
+
+- [ ] **Full V4 logging-on idle/reopen:** trial 01 started at 09:02:25 UTC,
+  then lost target USB at 09:11:14. The kernel's preceding 09:11:13
+  `disabled by hub (EMI?), re-enabling...` message is not proof of EMI;
+  descriptor/address `-71` errors and failed enumeration continued through
+  09:11:16. The run ended at 09:13:42 with a TTY cleanup `FileNotFoundError`
+  masking its primary failure. No post-idle reply or qualified idle was obtained;
+  by-id/path remained absent at 09:22 and recovery was in progress. No firmware
+  or reset cause is established. The harness cleanup fix passed 35 offline
+  native-console/TTY checks and preserves primary and cleanup failures separately.
+  One subsequent identity-guarded reset-only request to exact parent-hub port 2
+  returned success; status changed `0x101` to `0x103` after two seconds, but the
+  target still did not enumerate and sibling T096 remained unchanged. No hub
+  power change or broader hub reset followed. BLE diagnostic identity passed and
+  uptime 3959→3961 with zero errors established continued MCU operation through
+  the incident. The watchdog's volatile stage 2 and original SPIFFS namespace
+  absence of watchdog files establish two current-boot attempts; last event
+  reason `0x08` means client inactivity, not successful USB repair. ASCII
+  `stats-core` renews its 900-second lease; framed BLE does not. No evidence
+  selects the earlier lease-clear path or firmware/physical cause. A guarded
+  warm-restart request passed exact identity/flag gates, durable intent and
+  disconnect/cleanup checks, but USB remained absent at 09:45:07 with no new
+  kernel entries. Post-restart read-only trial 01 verified exact identity,
+  uptime 34→36 seconds, zero core errors and all owned cleanup checks; it did not
+  pair or create another bond. The unchanged last watchdog journal belongs to
+  the previous boot. USB remained absent at 09:48; physical reconnection of only
+  the V4 USB cable and verified recovery were then pending. All four checked host
+  services, including ModemManager, were active by 09:48. After the operator
+  reset the V4, exact by-id and physical-path USB endpoints were present at
+  15:09. A fresh Full ec9ebc09 binary identity snapshot passed with uptime
+  481→482 seconds, zero core errors/queue length, no contacts and all 40 channel
+  records. It did not verify the live application flash hash. The Pi had been
+  up approximately seven minutes at session start; no V4 cold boot is verified.
+  Full logging-on remains failed/unqualified despite USB return.
+- [x] **Current V4 settings restoration:** original NVS/SPIFFS readback and
+  returned-state checks passed before the native trials. BLE restoration trial
+  01 passed at 09:41:23: power saving off, logging off, MQTT on, WiFi off and
+  MQTT not running, with immediate/final readbacks and zero error flags.
+  Those values persisted through the verified warm reboot. A new owned BLE bond
+  was created by diagnostic 01. After USB return, both original data partitions
+  matched their backup readbacks, with the active ec9 application, table and OTA
+  metadata unchanged. Fresh binary comparison matched identity, complete contacts
+  and all 40 channels; all 62 returned CLI fields and the original temporary
+  flags matched. Post-restore uptime was 85→86 with zero core errors. The owned
+  host diagnostic BLE bond was removed and all four original checked services
+  were active. This qualifies these readbacks, not cold boot or every runtime
+  preference.
+- [ ] **Full V4 MQTT/WSS soak:** the pinned recovery-guarded runner is staged
+  but has **not launched** while upstream changes are integrated. Require real
+  PUBACK/heap evidence and original-data restoration before qualification.
+
+Complete CI runs [39110179910](https://github.com/mikecarper/MeshCore/actions/runs/39110179910)
+at `5fd33a230` and [39109551854](https://github.com/mikecarper/MeshCore/actions/runs/39109551854)
+at `7a5a7993c` are green. The native-console/TTY cleanup follow-up passed 35
+offline checks. Both [run 39115389840](https://github.com/mikecarper/MeshCore/actions/runs/39115389840)
+at `76220d5d7` and [run 39116894845](https://github.com/mikecarper/MeshCore/actions/runs/39116894845)
+at `7b41d2893` completed successfully with all eleven jobs green. Those CI passes
+do not qualify the failed hardware case.
+
+## PR17–21 follow-up qualification, 2026-10-18 UTC
+
+The merged source checkpoint is `0a24279a3`. This audit adds host regressions,
+operator documentation, and a C6 GPIO capability fix; it is not a hardware
+qualification. No device was flashed or contacted during the audit.
+
+Completed host coverage includes guest replay-store capacity and live-client
+eviction; per-address/shared WebConfig limits and room-password windows across
+`millis()` rollover; existing WebConfig sessions during login throttling;
+migration credential precedence and failed-identity upload denial; generated
+package instructions; and cached/uncached partial-contact recovery. The real
+Chromium room and WebConfig fixtures use mocked HTTP responses, so they do not
+prove the actual network/firmware interaction below.
+
+The merge was compiled for `Heltec_v3_room_server`,
+`heltec_v4_companion_radio_usb`, `esp32_s3_4mb_partition_migrator`, and all four
+small STM32 USB Companions at release-version length. Follow-up builds cover
+`Xiao_rp2040_companion_radio_usb` and Arduino 3's
+`LilyGo_Tlora_C6_room_server_`. The C6 build initially exposed unavailable
+global deep-sleep GPIO hold APIs; the helper now follows the SDK's per-pad
+capability, with a fixture that omits the unavailable declarations. The CI
+`cross-platform-smoke` job retains both RP2040 and C6 build checks.
+
+Additional migration builds passed for `esp32_8mb_partition_migrator`,
+`esp32_c3_4mb_partition_migrator`,
+`heltec_v4_partition_migrator_lora_repeater`, `heltec_v4_partition_expander`,
+and `esp32_s3_4mb_partition_migrator_usb`, including their application-size and
+runtime-RAM gates. This covers representative chip families and Wi-Fi,
+identity-only LoRa, Expander and USB code paths, rather than every board alias.
+
+### Physical acceptance checks and subsequent campaign results
+
+Record the exact clean source revision, firmware SHA-256, device identity,
+observed result, and cold/warm boot outcome for each check. Record password
+classes and success/failure, never the passwords themselves.
+Checked entries below are later, candidate-specific campaign results; they do
+not change the host-only scope of the earlier `0a24279a3` audit.
+
+- [ ] **Migration credentials:** on cable-recoverable test hardware, join with
+  a distinct saved 8–15-character printable ASCII admin password. Reject the
+  wrong password and published fallback. Repeat with unusable/missing saved
+  credentials and verify the documented fallback. Forget or update the host's
+  saved `MeshCore-Migrate` network between different credentials.
+- [ ] **Migration handoff:** test both source OTA slots and the distinct
+  identity-only LoRa and configuration-preserving Expander routes. Verify
+  recovery-AP credentials after expansion, actual browser upload, unchanged
+  identity/supported settings, final version, and cold-boot persistence.
+  Exercise supported interruption/retry points on sacrificial hardware; the
+  partition-table sector write is not atomic.
+- [x] **WebConfig LAN and Room password windows:** the complete two-source
+  LAN suite passed on d52e4e93 in 161.67 seconds. It covered per-address/shared
+  limits, existing-session access, refill/recovery, Room duplicate-password
+  suppression and the shared window, including nonempty credential rejection
+  and continued public empty-password read-only access. No temporary lockout
+  remained. These runs use guarded timing windows; they do not establish exact
+  millisecond boundary behavior or saved-network recovery-AP acceptance.
+- [ ] **WebConfig saved-network recovery AP:** repeat the two-source checks
+  on the actual recovery AP. One address's five failures must not lock the
+  other out; shared-budget exhaustion must reject even a correct new login;
+  an existing session must remain usable. Verify refill/address-lock recovery
+  and remember that clients sharing one address also share its lock.
+- [x] **Room browser:** actual Chromium on d52e4e93 passed real admin form
+  login, five distinct wrong passwords across two tokens, visible automatic
+  throttle-error polling, production Connect retry, and preserved unsent draft
+  and Room boot identity. The browser used unmodified native fetch and issued
+  no compose/write requests. This completes the previously open real-board
+  error/retry/draft case for this candidate.
+- [x] **Room populated-board repeated reads:** d52e4e93 completed twenty
+  live index/article reads of the owned 2048-byte UTF-8 article with unchanged
+  content, boot identity and continuous uptime. Earlier 652/d3e05abc stack
+  failures remain historical evidence; subsequent candidates must retain this
+  regression check. A later sticky radio-watchdog flag `8` is consistent with
+  the five-minute no-successful-RX policy and does not establish an HTTP cause
+  or qualify radio reception. Original-filesystem restoration was independently
+  verified after the later Full Companion handoff.
+- [ ] **Guest sessions:** churn transient guest identities, then admit a new
+  admin and an explicitly assigned writer. Power-cycle and verify privileged
+  login replay floors remain authoritative. Document the expected captured
+  guest-traffic replay boundary after transient state is lost; no durable
+  guest record is added and an already-full older store is not reclaimed.
+- [ ] **Contact storage:** on ESP32 cached/uncached, RP2040 and STM32, exercise
+  legacy interrupted saves, full-volume/read failures and complete-backup
+  precedence. Require complete records to survive, the partial source to stay
+  unchanged until ordinary save, and identity/settings to remain untouched.
+  RP2040's `exists()` cannot distinguish absence from every metadata error;
+  include actual storage faults. nRF52 uses separate legacy migration rules
+  and is not covered by the partial-tail salvage change.
+- [ ] **C6 terminal sleep:** measure the selected radio/FEM output levels
+  through terminal deep sleep and wake/reset, and verify that runtime/light
+  sleep does not latch unrelated live pins. A successful build and simulated
+  pad retention do not establish physical latch or current behavior.
+
+The later d52e4e93 campaign completes the real-board browser
+throttle-error/retry/draft and reproduced repeated-read cases above. An executed
+configuration-restore-to-AP credential handoff remains open. The host AP fixture
+supplies pre/post-restore files; it does not run an entire migration. The current
+hardware campaign remains in progress and is not release qualification.
+
 ## ESP32 web console and browser OTA release gates
 
 The [2026-10-05 V4/XIAO checkpoint](hardware_validation_esp32_web_console_ota_2026-10-05.md)
 records reproduced browser OTA failures, fixes, physical results, and remaining
 USB qualification limits. It is not a release approval.
+
+The [19 October XIAO S3 WIO password campaign](esp32_management_password_2026-10-19.md)
+records Full Companion AP/password transitions, HTTP session rotation,
+production browser password saves, warm-reboot persistence and a real
+authenticated raw WiFi upload at `036fb477`. Post-OTA password persistence,
+alternate-slot image readback, original device state and host networking all
+passed. This scoped result does not close the browser-upload gate below,
+two-source recovery-AP throttling, migration checks, or other board/role
+qualification.
 
 Host tests cannot prove USB enumeration, WiFi discovery, or an HTTP upload on
 the physical board. Before qualifying an ESP32 release, record the following
@@ -55,7 +263,8 @@ successful build or simulated peripheral is not a hardware pass.
    raw binary request. Confirm identity and settings were preserved, then restore temporary
    device settings and the test host's network connection.
 
-Keep the host regressions (`test_official_web_console.py`,
+Keep the host regressions (`test_official_console_acceptance.py`,
+`test_official_web_console.py`,
 `test_wifi_ota_start.py`, `test_wifi_ota_lifecycle.py`, and
 `test_async_web_lifecycle.py`) alongside these gates.
 They cover parsing, sleep policy, startup errors, network ownership, and

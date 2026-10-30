@@ -1,26 +1,75 @@
 #pragma once
 
 #include <RadioLib.h>
+#include "RadioRegulatorState.h"
 #include "MeshCore.h"
+#include "LR11x0MorseRfSwitch.h"
+#include "../MorseRx.h"
 
 class CustomLR1121 : public LR1121 {
+  // Existing LR11xx recipes already require the fitted DC/DC network.
+  mesh::power::RadioRegulatorState _regulator{mesh::power::REGULATOR_DCDC | mesh::power::REGULATOR_LDO,
+      mesh::power::RegulatorMode::Dcdc};
   uint32_t _preambleMillis = 66;
   uint32_t _maxPayloadMillis = 3934;
   uint32_t _activityAt = 0;
   bool _headerSeen = false;
   bool _rx_boosted = false;
+  LR11x0MorseRfSwitch _morse_rf_switch;
+  int8_t _txPower = 0;
+  bool _txPowerSet = false;
 
   public:
     CustomLR1121(Module *mod) : LR1121(mod) { }
 
+    uint8_t regulatorModes() const { return _regulator.modes(); }
+    mesh::power::RegulatorMode defaultRegulatorMode() const { return _regulator.defaultMode(); }
+    bool configureBootRegulator(mesh::power::RegulatorMode mode) { return _regulator.configureBoot(mode); }
+    mesh::power::RegulatorMode activeRegulatorMode() const { return _regulator.activeMode(); }
+
+    int16_t setProfileProtocol(uint8_t syncWord) {
+      int16_t status = LR1121::setSyncWord(syncWord);
+      if (status == RADIOLIB_ERR_NONE) status = LR1121::setCRC(2);
+      if (status == RADIOLIB_ERR_NONE) status = LR1121::explicitHeader();
+      if (status == RADIOLIB_ERR_NONE) status = LR1121::invertIQ(false);
+      return status;
+    }
+
+    void setRfSwitchTable(const uint32_t (&pins)[Module::RFSWITCH_MAX_PINS],
+                          const Module::RfSwitchMode_t table[]) {
+      _morse_rf_switch.capture(this->mod, pins, table);
+      LR1121::setRfSwitchTable(pins, table);
+    }
+
+    int16_t beginMorseReceive(float frequency_mhz) {
+      const auto regulator = _regulator.beginInitialization();
+      int16_t status = LR1121::beginGFSK(frequency_mhz,
+          mesh::MorseRx::ReceiverBitRateKbps, 0.6f, 4.8f, 2, 16, tcxoVoltage);
+      if (status == RADIOLIB_ERR_NONE) status = regulator == mesh::power::RegulatorMode::Ldo
+          ? setRegulatorLDO() : setRegulatorDCDC();
+      if (status == RADIOLIB_ERR_NONE) status = _morse_rf_switch.restore(
+          [this](uint8_t enable, const uint8_t* modes) {
+            return setDioAsRfSwitch(enable, modes[0], modes[1], modes[2],
+                modes[3], modes[4], modes[5], modes[6]);
+          });
+      if (status == RADIOLIB_ERR_NONE) status = LR1121::setRxBoostedGainMode(_rx_boosted);
+      if (status == RADIOLIB_ERR_NONE) {
+        syncWordLength = preambleDetLength = 0;
+        status = LR1121::setCRC(0);
+      }
+      return _regulator.finishInitialization(status);
+    }
+
     int16_t begin(float freq = 434.0, float bw = 125.0, uint8_t sf = 9, uint8_t cr = 7,
                   uint8_t syncWord = RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE, int8_t power = 10,
                   uint16_t preambleLength = 8, float tcxoVoltage = 1.6) {
+      const auto regulator = _regulator.beginInitialization();
       int16_t state = LR1121::begin(freq, bw, sf, cr, syncWord, power, preambleLength,
                                     tcxoVoltage);
-      // RadioLib begin() defaults to LDO; use the LR1121 DC/DC regulator.
-      if (state == RADIOLIB_ERR_NONE) state = setRegulatorDCDC();
-      return state;
+      // Native begin() resets to LDO; restore the boot choice on every reset.
+      if (state == RADIOLIB_ERR_NONE) state = regulator == mesh::power::RegulatorMode::Ldo
+          ? setRegulatorLDO() : setRegulatorDCDC();
+      return _regulator.finishInitialization(state);
     }
 
     size_t getPacketLength(bool update) override {
@@ -36,6 +85,33 @@ class CustomLR1121 : public LR1121 {
       return len;
     }
 
+    using LR1121::setOutputPower;
+    using LR1121::setFrequency;
+
+    int16_t setOutputPower(int8_t power) override {
+#ifdef LR1121_FORCE_HP_PA
+      const bool force_hp = true;   // boards with only RFO_HP_LF wired: never select the LP PA
+#else
+      const bool force_hp = false;
+#endif
+      // clip to the active PA's range (HF PA tops out at 13 dBm) rather than fail and keep the other band's PA
+      int8_t clipped = power;
+      checkOutputPower(power, &clipped, force_hp);
+      int16_t state = LR1121::setOutputPower(clipped, force_hp);
+      if (state == RADIOLIB_ERR_NONE) {
+        _txPower = power;
+        _txPowerSet = true;
+      }
+      return state;
+    }
+
+    int16_t setFrequency(float freq) override {
+      int16_t state = LR1121::setFrequency(freq);
+      // PA selection depends on the band, and set radio / tempradio don't call setTxPower
+      if (state == RADIOLIB_ERR_NONE && _txPowerSet) state = setOutputPower(_txPower);
+      return state;
+    }
+
     float getFreqMHz() const { return freqMHz; }
 
     int16_t setRxBoostedGainMode(bool en) {
@@ -47,7 +123,12 @@ class CustomLR1121 : public LR1121 {
 
     int16_t startReceive() override {
       // include the PREAMBLE_DETECTED irq bit in reported flags.
-      return LR1121::startReceive(RADIOLIB_LR11X0_RX_TIMEOUT_INF, RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED), RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+      const int16_t status = LR1121::startReceive(RADIOLIB_LR11X0_RX_TIMEOUT_INF, RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED), RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+      if (status == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
+      return status;
     }
 
     bool isReceiving() {

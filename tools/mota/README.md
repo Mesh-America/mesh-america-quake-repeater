@@ -57,6 +57,11 @@ family derived from the environment name, and `fw_version` = parsed from `FIRMWA
 
 ## Privileged nRF52 bootloader reference builder
 
+For an opt-in Repeater or Room Server application carrying its board-matched
+OTAFIX 2.4.12 replacement, see the
+[embedded bootloader guide](../../docs/nrf52_embedded_bootloader.md).
+Its authenticated activation is separate from the signed `.mota` path below.
+
 Ordinary calls to `build_manifest()` continue to emit v2 application packages.
 New application packages default to 2048-byte blocks; pass 1024 explicitly when
 targeting a deployed receiver that predates the extended transport descriptor.

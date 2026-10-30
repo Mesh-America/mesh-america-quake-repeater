@@ -88,6 +88,53 @@ class BootloaderVersionTest(unittest.TestCase):
         self.assertIn("char ver[128]", cli)
         self.assertIn("_board->getBootloaderVersion(ver, sizeof(ver))", cli)
 
+    def test_companion_getter_and_real_cmd42_dispatch(self):
+        from cpp_source import body
+        source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
+        local = body(source, "bool MyMesh::handleLocalControlCommand(")
+        branch = body(local, 'if (strcmp(command, "get bootloader.ver") == 0)')
+        # Execute the actual pointer/size validation, space normalization and
+        # query. Other settings and hardware services cannot hide a getter bug.
+        entry = local[:local.index("#if defined(ESP32_PLATFORM)")]
+        getter = entry + branch + "\n  return false;\n}\n"
+        shared = body(source, "bool MyMesh::handleCommand(")
+        self.assertIn("if (handleLocalControlCommand(command, reply, reply_capacity)) return true;", shared)
+        shared_entry = shared[:shared.index("#if defined(ESP32_PLATFORM)")]
+        getter += shared_entry + "  (void)sender_timestamp;\n  return handleLocalControlCommand(command, reply, reply_capacity);\n}\n"
+        framed = body(source, "if (mesh::companion::isRunCliFrame(")
+        terminal = body(source, "void MyMesh::handleTerminalCommand(")
+        terminal_adapter = body(terminal, "if (!usb_mota_owner_transition")
+        self.assertIn("handleLocalControlCommand(command, local_reply, sizeof(local_reply))", terminal_adapter)
+        # The read-only query is not hidden behind Full, OTA, logging, terminal,
+        # or private-key export feature switches.
+        import re
+        nesting = re.findall(r"^\s*#\s*(if|ifdef|ifndef|endif)\b",
+                             local[:local.index(branch)], re.MULTILINE)
+        self.assertEqual(sum(-1 if token == "endif" else 1 for token in nesting), 0)
+        for forbidden in ("savePrefs", "reboot", "startOTAUpdate", "_prefs", "ota_"):
+            self.assertNotIn(forbidden, branch)
+        with tempfile.TemporaryDirectory(prefix="meshcore-companion-boot-version-") as temp:
+            work = Path(temp)
+            (work / "production_companion_getter.inc").write_text(getter)
+            (work / "production_companion_frame.inc").write_text(framed)
+            (work / "production_companion_terminal.inc").write_text(terminal_adapter)
+            for platform, full in (("NRF52_PLATFORM", 0), ("NRF52_PLATFORM", 1),
+                                   ("ESP32_PLATFORM", 0), ("STM32_PLATFORM", 0),
+                                   ("RP2040_PLATFORM", 0)):
+                with self.subTest(platform=platform, full=full):
+                    exe = work / (platform + str(full))
+                    command = [os.environ.get("CXX", "g++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                        "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
+                        "-D" + platform + "=1", "-DCOMPANION_RADIO_FULL=" + str(full),
+                        "-DCOMPANION_FEATURE_TEXT_TERMINAL=" + str(full), "-DCOMPANION_FEATURE_OTA_CLI=" + str(full),
+                        "-I" + str(ROOT / "src"), "-I" + str(work),
+                        str(FIXTURES / "test_companion.cpp"), "-o", str(exe)]
+                    built = subprocess.run(command, capture_output=True, text=True, timeout=60)
+                    self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                    result = subprocess.run([str(exe)], capture_output=True, text=True, timeout=20)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("getter/dispatch cases passed", result.stdout)
+
     def test_native_version_reader(self):
         compiler = shutil.which(os.environ.get("CXX", "g++"))
         self.assertIsNotNone(compiler, "g++ (or CXX) is required for this native test")

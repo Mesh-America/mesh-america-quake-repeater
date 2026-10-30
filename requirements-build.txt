@@ -1,2 +1,5 @@
+# nRF52 HEX post-build trailer generation.
+intelhex==2.3.0
+
 # Reproducible compressors for firmware-resident and OTA assets.
 zopfli==0.4.3

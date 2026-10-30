@@ -22,6 +22,7 @@ class Inspector : public mesh::Dispatcher {
 static void secondaryReplies() {
   unsigned checks = 0;
   for (const char* command : {"set tempradio2 911.5,500,8,5,rxtx,1",
+                             "set radio2 mediamesh", "set radio2 mediamesh-range",
                              "set radio2 912.5,500,8,5,rxtx", "set radio2 off",
                              "set tempradio2 off", "del tempradioat2 all"}) {
     for (bool success : {false, true}) {
@@ -57,7 +58,8 @@ static void secondaryReplies() {
       if (!success) {
         assert(before == f.radio.p.generation[1]);
         assert(saved == f.fs.files["/radio_profiles"]);
-      } else if (strstr(command, "911.5") || strstr(command, "912.5") || !strcmp(command,"set radio2 off")) {
+      } else if (strstr(command, "911.5") || strstr(command, "912.5")
+          || strstr(command, "mediamesh") || !strcmp(command,"set radio2 off")) {
         assert(before != f.radio.p.generation[1]);
         assert(!inspector.isPacketRadioCurrent(&reply));
       }

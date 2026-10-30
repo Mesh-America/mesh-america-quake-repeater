@@ -16,12 +16,23 @@
 #define OUT_PATH_FORCE_FLOOD  0xFE
 #define OUT_PATH_UNKNOWN      0xFF
 
+// The source-role pre-script sets this for the complete build, including
+// ClientACL.cpp. Never infer it from a local MyMesh header: that would give
+// different translation units incompatible ClientInfo layouts.
+#ifndef MESH_CLIENT_REPEATER_ONLY
+#define MESH_CLIENT_REPEATER_ONLY 0
+#endif
+#if MESH_CLIENT_REPEATER_ONLY != 0 && MESH_CLIENT_REPEATER_ONLY != 1
+#error "MESH_CLIENT_REPEATER_ONLY must be 0 or 1"
+#endif
+
 struct ClientInfo {
   mesh::Identity id;
   uint8_t permissions;
   uint8_t out_path_len;
   uint8_t out_path[MAX_PATH_SIZE];
   bool out_path_is_persistable;  // live route may replace, but not erase, durable route
+  bool permissions_are_explicit; // operator assignment; room login caches remain transient
   uint8_t alt_path_len;
   uint8_t alt_path[MAX_PATH_SIZE];
   uint8_t observed_path_len;       // reciprocal login PATH (transient)
@@ -34,12 +45,22 @@ struct ClientInfo {
   union  {
     struct {
       uint32_t sync_since;  // sync messages SINCE this timestamp (by OUR clock)
+#if !MESH_CLIENT_REPEATER_ONLY
       uint32_t last_post_timestamp; // sender timestamp for room posts only (transient)
       uint32_t pending_ack;
       uint32_t push_post_timestamp;
       unsigned long ack_timeout;
       uint8_t  push_failures;
+      // Topic delivery is transient and independent of the post cursor. These
+      // fields fit inside the existing sensor-sized union on shared profiles.
+      uint32_t topic_seen_revision;
+      uint32_t pending_topic_revision;
+      uint8_t topic_failures;
+      uint16_t post_quota_used;
+      uint16_t poll_quota_used;
+#endif
     } room;
+#if !MESH_CLIENT_REPEATER_ONLY
     struct {
       uint32_t expiry_timestamp;  // epoch seconds
       uint32_t push_tag;
@@ -48,6 +69,7 @@ struct ClientInfo {
       uint8_t  min_deltas[14];  // LPP encoded
       uint8_t  prev_telem[14];  // LPP encoded
     } sensor;
+#endif
   } extra;
   
   bool isAdmin() const { return (permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_ADMIN; }
@@ -60,7 +82,7 @@ struct ClientInfo {
   #define MAX_CLIENTS           32
 #endif
 
-static_assert(sizeof(void*) != 4 || sizeof(ClientInfo) <= 320,
+static_assert(sizeof(void*) != 4 || sizeof(ClientInfo) <= (MESH_CLIENT_REPEATER_ONLY ? 284 : 320),
               "Update the client-table runtime RAM budget in check_firmware_ram.py");
 
 struct ClientLoginReplayClampResult {
@@ -77,6 +99,7 @@ class ClientACL {
   int num_clients;
   bool login_replay_store_available;
   bool acl_load_complete;
+  bool protect_explicit_permissions = false;
 
 public:
   // MAX_CLIENTS entries run to several kilobytes. Classic ESP32's link-time
@@ -98,8 +121,10 @@ public:
   ClientACL(const ClientACL&) = delete;
   ClientACL& operator=(const ClientACL&) = delete;
   void load(FILESYSTEM* _fs, const mesh::LocalIdentity& self_id);
+  void protectExplicitPermissions(bool protect = true) { protect_explicit_permissions = protect; }
   bool save(FILESYSTEM* _fs, bool (*filter)(ClientInfo*)=NULL);
   bool clear();
+  int removeGuestClients();  // transient sessions only; never writes flash
 
   // Authenticate the sender/password first, then call this before allocating
   // or mutating a client.  A true result means any required replay high-water

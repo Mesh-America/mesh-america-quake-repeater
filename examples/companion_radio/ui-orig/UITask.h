@@ -31,8 +31,8 @@ class UITask : public AbstractUITask {
 #elif defined(PIN_VIBRATION)
   GenericVibration vibration;
 #endif
-  unsigned long _next_refresh;
-  CompanionNodePrefs* _node_prefs;
+  uint32_t _next_refresh;
+  CompanionNodePrefs* _node_prefs = nullptr;
   char _version_info[32];
   char _origin[62];
 #if UI_SMALL_MESSAGE_FONT == 1
@@ -56,6 +56,7 @@ class UITask : public AbstractUITask {
   unsigned long ui_started_at;
   uint32_t _radio_profile_page_started_at = 0;
   bool _dual_radio_enabled_seen = false;
+  bool _startup_complete = false;
   uint8_t _radio_profile_display_page = 0;
 
   // Button handlers
@@ -103,7 +104,9 @@ public:
     return _display != NULL && _display->supportsRotation();
   }
   bool setDisplayRotationDegrees(uint16_t degrees) override {
-    return _display != NULL && _display->setRotationDegrees(degrees);
+    if (_display == NULL || !_display->setRotationDegrees(degrees)) return false;
+    _next_refresh = millis();
+    return true;
   }
   void clearMsgPreview();
   void servicePairingState() override;
@@ -122,6 +125,7 @@ public:
   void notificationVibration(bool on) override;
   void notificationMelody(const char* text) override;
   void notificationScreen(int8_t mode) override;
+  void syncAlertPreferences() override;
   void loop() override;
 #ifdef MESH_BUTTON_AUDIO_HIL
   bool handleButtonAudioTest(const char* command, char* reply, size_t size) override;

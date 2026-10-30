@@ -27,7 +27,7 @@ void T1Board::initiateShutdown(uint8_t reason) {
 #endif
 
 void T1Board::begin() {
-  NRF52Board::begin();
+  NRF52BoardDCDC::begin();
 
 #ifdef NRF52_POWER_MANAGEMENT
   checkBootVoltage(&power_config);
@@ -58,8 +58,13 @@ void T1Board::begin() {
   delay(1);
 }
 
+void T1Board::applyLedPolicy() {
+  NRF52Board::applyLedPolicy();
+  if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, !LED_STATE_ON);
+}
+
 void T1Board::onBeforeTransmit() {
-  digitalWrite(P_LORA_TX_LED, LED_STATE_ON);
+  if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LED_STATE_ON);
 }
 
 void T1Board::onAfterTransmit() {

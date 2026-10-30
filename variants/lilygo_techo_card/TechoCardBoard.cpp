@@ -54,10 +54,19 @@ uint16_t TechoCardBoard::getBattMilliVolts() {
 
   // Convert the raw value to compensated mv, taking the resistor-
   // divider into account (providing the actual LIPO voltage)
-  return (uint16_t)((float)adcvalue * REAL_VBAT_MV_PER_LSB);
+  return calibrateBatteryMillivolts((uint16_t)((float)adcvalue * REAL_VBAT_MV_PER_LSB));
+}
+
+void TechoCardBoard::applyLedPolicy() {
+    NRF52Board::applyLedPolicy();
+    if (!mesh::leds::enabled()) {
+        Led_A.setPixelColor(0, 0, 0, 0);
+        Led_A.show();
+    }
 }
 
 void TechoCardBoard::onBeforeTransmit() {
+    if (!mesh::leds::enabled()) return;
     Led_A.setPixelColor(0, 20, 20, 20);   // turn TX LED on
     Led_A.show();
 }

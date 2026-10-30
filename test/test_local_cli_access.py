@@ -16,10 +16,15 @@ PREAMBLE = r'''
 #include <cstring>
 #include <cstdint>
 #include <initializer_list>
+#include <string>
 #define TBEAM_SX1262 1
 #include <helpers/CLICommandUtils.h>
 #include <helpers/RadioProfileCommandUtils.h>
 #include <helpers/BatteryChargeCLI.h>
+#include <helpers/CompanionLostReply.h>
+#include <helpers/CompanionTimezonePrefs.h>
+#include "companion_fleet_dispatch.h"
+#include "battery_calibration_cli_stub.h"
 #define ESP32 1
 #define WIFI_SSID "test"
 #define WITH_MQTT_BRIDGE 1
@@ -27,7 +32,19 @@ PREAMBLE = r'''
 #define MAX_MQTT_SLOTS 2
 #define MAX_LORA_TX_POWER 22
 #define TXT_TYPE_CLI_COMMAND 1
+uint32_t millis() { return 0; }
 namespace mesh {
+// The real Morse parser, capture paging and ownership are executed by their
+// dedicated tests. This fixture isolates unrelated local/remote CLI access.
+template <typename Radio>
+bool handleMorseCommand(Radio*, const char*, char*, size_t) { return false; }
+struct MorseReplyHandoff {
+  unsigned generation() const { return 0; }
+  void beginCommand(const uint8_t*) {}
+  void endCommand() {}
+};
+template <typename Radio>
+bool handleMorseReplyCommand(MorseReplyHandoff&, Radio*, const char*, char*, size_t, uint32_t) { return false; }
 struct RadioProfileCLI {
   bool remote_origin=false;
   bool handle(const char*, char*, size_t, bool remote=false) { remote_origin=remote;return false; }
@@ -56,6 +73,7 @@ struct Utils {
 }
 struct ContactInfo {
   bool allowed=true;
+  struct { uint8_t pub_key[32] = {}; } id;
   bool isRemoteCLIAllowed() const { return allowed; }
 };
 struct WiFiSetupPortal {
@@ -71,9 +89,10 @@ struct Store {
   bool formatFileSystem(){++erased;return success;}
 };
 struct Prefs {
+  uint8_t lost_reply=0;
   float tx_delay_factor=0.5f, direct_tx_delay_factor=0.2f;
   uint8_t interference_threshold=0, agc_reset_interval=0;
-  int8_t tz_offset=0;
+  float tz_offset=0;
   float freq=910, bw=125, airtime_factor=1, rx_delay_base=1;
   uint8_t sf=7, cr=5, path_hash_mode=0, multi_acks=0, rx_ps_level=0, rx_ps_preamble=16;
   uint32_t rx_ps_rx_us=1, rx_ps_sleep_us=1;
@@ -113,7 +132,9 @@ struct WebConfigServer {
 };
 const char* FIRMWARE_VERSION="test";
 const char* FIRMWARE_BUILD_DATE="test";
-struct MyMesh {
+struct MyMesh : CompanionFleetFixture {
+  mesh::MorseReplyHandoff _morse_reply;
+  bool _morse_reply_admission = false;
   mesh::RadioProfileCLI _radio_profiles;
   Identity self_id;
   Store store; Store* _store=&store;
@@ -141,9 +162,11 @@ struct MyMesh {
     return false;
   }
   void stopContactsIterator(){}
+  void onContactCacheFlushed();
   void cancelAllFloodRetries(){}
   void resetContacts(){++resets;}
   bool savePrefs(){++saves;return save_ok;}
+  @SAVE_PREFERENCE@
   int getTotalAirTime(){return 0;}
   int getReceiveAirTime(){return 0;}
   int getNumSentFlood(){return 0;}
@@ -163,6 +186,27 @@ SCENARIOS = r'''
 int main() {
   MyMesh node;
   char reply[160] = {};
+  assert(node.handleCommand("set lost.reply yes",0,reply));
+  assert(node._prefs.lost_reply==2 && !strcmp(reply,"> lost.reply yes"));
+  assert(node.handleCommand("get lost.reply",0,reply) && !strcmp(reply,"> yes"));
+  const int lost_saves=node.saves;
+  for(uint32_t stamp:{0u,100u}) {
+    reply[0]=0;
+    node.onCLICommandRecv(ContactInfo{},nullptr,stamp,"set lost.reply no",reply);
+    assert(node._prefs.lost_reply==2 && node.saves==lost_saves);
+    reply[0]=0;
+    node.onCLICommandRecv(ContactInfo{},nullptr,stamp,"A7|get lost.reply",reply);
+    assert(!strstr(reply,"> yes") && node.saves==lost_saves);
+  }
+  node.save_ok=false;
+  assert(node.handleCommand("set lost.reply no",0,reply));
+  assert(node._prefs.lost_reply==2 && strstr(reply,"could not save"));
+  node.save_ok=true;
+  for (uint32_t timestamp : {0u, 100u}) {
+    node.onCLICommandRecv(ContactInfo{}, nullptr, timestamp,
+                          "fleet send 1 all set radio2 off", reply);
+    assert(strstr(reply, "requires local Companion access"));
+  }
   assert(node.handleCommand("set charge.voltage 4.1",0,reply));
   assert(board.charge_target==4100 && strstr(reply,"saved"));
   for(uint32_t stamp:{0u,100u}) {
@@ -232,17 +276,37 @@ int main() {
   node.onCLICommandRecv(ContactInfo{},nullptr,0,"erase",reply);
   assert(node.store.erased==0);
   assert(node.handleCommand("erase",0,reply));
-  assert(node.store.erased==1 && node.resets==1 && node.dirty_contacts_expiry==0);
+  assert(node.store.erased==1 && node.resets==1 && node.dirty_contacts_expiry==0
+         && node.dirty_contacts_failures==0);
   assert(strstr(reply,"OK"));
   node.store.success=false;
+  node.dirty_contacts_expiry=2; node.dirty_contacts_failures=3;
   assert(node.handleCommand("erase",0,reply));
-  assert(node.resets==1 && strstr(reply,"Err"));
+  assert(node.resets==1 && strstr(reply,"Err") && node.dirty_contacts_expiry==2
+         && node.dirty_contacts_failures==3);
   for(const char* command:{"poweroff","shutdown"}) {
     const int previous=board.power_offs;
     node.handleCommand(command,100,reply);
     assert(board.power_offs==previous);
     assert(node.handleCommand(command,0,reply));
     assert(!strcmp(reply,"OK") && board.power_offs==previous+1);
+  }
+  // Exercise the real timezone dispatch and typed transaction helper, not a
+  // fixture-only setter: a failed save must preserve the exact fraction.
+  node.save_ok=true;
+  assert(node.handleCommand("set tz.offset 5.75",0,reply) && !strcmp(reply,"OK"));
+  assert(node._prefs.tz_offset==5.75f);
+  assert(node.handleCommand("get tz.offset",0,reply) && !strcmp(reply,"> 5.75"));
+  node.save_ok=false;
+  const int timezone_saves=node.saves;
+  assert(node.handleCommand("set tz.offset -3.5",0,reply));
+  assert(strstr(reply,"Error") && node.saves==timezone_saves+1);
+  assert(node._prefs.tz_offset==5.75f);
+  for(const char* bad:{"nan","inf","5.75junk","15","-12.25"}) {
+    const std::string command=std::string("set tz.offset ")+bad;
+    assert(node.handleCommand(command.c_str(),0,reply));
+    assert(strstr(reply,"Error") && node.saves==timezone_saves+1);
+    assert(node._prefs.tz_offset==5.75f);
   }
 }
 '''
@@ -346,6 +410,7 @@ int main() {
             binary = Path(temp) / "test"
             result = subprocess.run([
                 "c++", "-std=c++17", "-include", "initializer_list", "-x", "c++", "-",
+                "-include", str(ROOT / "src/helpers/CLICommandUtils.h"),
                 *SANITIZER_FLAGS, "-o", str(binary),
             ], input=code, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -358,17 +423,23 @@ int main() {
             "static bool isCompanionRadioPrefsCommand(",
             "MyMesh::RadioSettingResult MyMesh::applyAndSaveTxPower(",
             "bool MyMesh::saveAdvertName(",
+            "void MyMesh::onContactCacheFlushed()",
             "bool MyMesh::handleDirectCommand(", "bool MyMesh::handleCommand(",
             "void MyMesh::onCLICommandRecv("))
+        header = (ROOT / "examples/companion_radio/MyMesh.h").read_text()
+        preamble = PREAMBLE.replace("@SAVE_PREFERENCE@", extract_braced(
+            header, "template <typename T> bool savePreference("))
         for export, webconfig in ((0, False), (1, False), (0, True), (1, True)):
             with self.subTest(export=export, webconfig=webconfig), tempfile.TemporaryDirectory() as temp:
                 binary = Path(temp) / "test"
                 result = subprocess.run([
                     "c++", "-std=c++17", "-x", "c++", "-", "-I"+str(ROOT / "src"),
+                    "-I"+str(ROOT / "test/fixtures"),
                     "-DENABLE_PRIVATE_KEY_EXPORT="+str(export),
+                    "-DMESH_ENABLE_LOST_REPLY=1",
                     *(["-DWITH_WEBCONFIG=1"] if webconfig else []),
                     *SANITIZER_FLAGS, "-o", str(binary),
-                ], input=PREAMBLE+implementation+SCENARIOS, text=True, capture_output=True)
+                ], input=preamble+implementation+SCENARIOS, text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 result = subprocess.run([str(binary)], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stdout+result.stderr)

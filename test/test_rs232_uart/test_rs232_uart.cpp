@@ -6,7 +6,9 @@
 
 struct FakeUart {
   std::vector<int> calls;
-  void end() { calls.push_back(1); }
+  bool begun = false;
+  explicit operator bool() const { return begun; }
+  void end() { calls.push_back(1); begun = false; }
   void setPins(int rx, int tx) {
     calls.push_back(2);
     calls.push_back(rx);
@@ -16,12 +18,27 @@ struct FakeUart {
 
 TEST(RS232Uart, StopsPeripheralBeforeChangingPins) {
   FakeUart uart;
+  uart.begun = true;
   mesh::bridge::prepareNrfUart(uart, 7, 8);
   ASSERT_EQ(uart.calls.size(), 4u);
   EXPECT_EQ(uart.calls[0], 1);
   EXPECT_EQ(uart.calls[1], 2);
   EXPECT_EQ(uart.calls[2], 7);
   EXPECT_EQ(uart.calls[3], 8);
+  EXPECT_FALSE(uart.begun);
+}
+
+TEST(RS232Uart, FreshAndAlreadyStoppedUartsOnlyChangePins) {
+  FakeUart uart;
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    mesh::bridge::prepareNrfUart(uart, 7, 8);
+    ASSERT_EQ(uart.calls.size(), 3u);
+    EXPECT_EQ(uart.calls[0], 2);
+    EXPECT_EQ(uart.calls[1], 7);
+    EXPECT_EQ(uart.calls[2], 8);
+    EXPECT_FALSE(uart.begun);
+    uart.calls.clear();
+  }
 }
 
 int main(int argc, char** argv) {

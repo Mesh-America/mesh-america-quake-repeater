@@ -41,7 +41,7 @@ MIGRATED_BOARD_COUNTS = {
     "heltec_e290": 9,
     "heltec_t190": 9,
     "heltec_tracker_v1_1": 2,
-    "heltec_tracker_v2": 15,
+    "heltec_tracker_v2": 16,
     "station-g2": 12,
     "station-g3-esp32": 16,
     "t_beam_1w": 11,
@@ -52,21 +52,35 @@ LEGACY_DIAGNOSTIC_CDC_OVERRIDES = {
     "xiao_s3_partition_migrator_test_usb_diagnostic",
 }
 
+# Host-managed partition utilities keep application CDC disabled while flash
+# tables change. Review them by name, independently of normal firmware roles:
+# S3/C3 recover the ROM USB interface, and classic ESP32 uses external UART.
+USB_PARTITION_BRIDGES = {
+    "esp32_s3_4mb_partition_migrator_usb": ("esp32-s3-devkitc-1", "esp32s3", "uart"),
+    "esp32_s3_8mb_partition_migrator_usb": ("esp32-s3-devkitc-1", "esp32s3", "uart"),
+    "esp32_s3_16mb_partition_migrator_usb": ("esp32-s3-devkitc-1", "esp32s3", "uart"),
+    "esp32_c3_4mb_partition_migrator_usb": ("esp32-c3-devkitm-1", "esp32c3", "uart"),
+    "esp32_4mb_partition_migrator_usb": ("esp32dev", "esp32", "classic_uart"),
+    "esp32_8mb_partition_migrator_usb": ("esp32dev", "esp32", "classic_uart"),
+}
+
 # Pin reviewed family/transport counts rather than copying a machine's
-# environment inventory. Mixed families have explicit role rules below.
+# environment inventory. USB partition bridges are tallied separately above;
+# mixed firmware families have explicit role rules below.
 UNCHANGED_COUNTS = {
     ("ESP32-S3-WROOM-1-N4", "uart"): 21,
     ("ebyte_eora-s3", "hwcdc"): 8,
     ("esp32-c3-devkitm-1", "uart"): 19,
     ("esp32-c6-devkitm-1", "hwcdc"): 16,
     ("esp32-s3-devkitc-1", "hwcdc"): 22,
-    ("esp32-s3-devkitc-1", "uart"): 55,
-    ("esp32-s3-zero", "hwcdc"): 17,
+    # Original OPI and N16R2 Indicator LoRa repeaters retain their UART backend.
+    ("esp32-s3-devkitc-1", "uart"): 57,
+    ("esp32-s3-zero", "hwcdc"): 25,
     ("esp32dev", "classic_uart"): 5,
     ("esp32doit-devkit-v1", "classic_uart"): 19,
     ("esp32s3box", "hwcdc"): 7,
     ("heltec-rc32", "hwcdc"): 22,
-    ("heltec_v4", "hwcdc"): 45,
+    ("heltec_v4", "hwcdc"): 46,
     ("heltec_v4_migrator", "hwcdc"): 1,
     ("heltec_v4_migrator", "uart"): 4,
     ("heltec_v4_r8", "hwcdc"): 25,
@@ -76,6 +90,7 @@ UNCHANGED_COUNTS = {
     ("seeed_xiao_esp32s3", "hwcdc"): 26,
     ("seeed_xiao_esp32s3_migrator", "hwcdc"): 1,
     ("seeed_xiao_esp32s3_migrator", "uart"): 3,
+    ("seeed_wio_tracker_l2", "hwcdc"): 5,
     ("t-deck", "hwcdc"): 4,
     ("t3_s3_v1_x", "hwcdc"): 19,
     ("t_beams3_supreme", "hwcdc"): 9,
@@ -83,6 +98,7 @@ UNCHANGED_COUNTS = {
     ("thinknode_m9", "uart"): 6,
     ("ttgo-lora32-v1", "classic_uart"): 12,
     ("ttgo-t-beam", "classic_uart"): 16,
+    ("waveshare_s3_lr1121_migrator", "uart"): 2,
 }
 
 # Native-only CI does not install the ESP32 platform's standard manifests.
@@ -149,6 +165,11 @@ def bool_option(value):
 
 
 def expected_other_transport(board, name):
+    if name in USB_PARTITION_BRIDGES:
+        expected_board, _, kind = USB_PARTITION_BRIDGES[name]
+        if board != expected_board:
+            raise AssertionError(f"USB partition bridge {name} changed board: {board}")
+        return kind
     choices = {kind for family, kind in UNCHANGED_COUNTS if family == board}
     if len(choices) == 1:
         return next(iter(choices))
@@ -226,14 +247,17 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                 self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
                 self.assertEqual(self.config.get(f"env:{name}", "platform"),
                                  "platformio/espressif32@6.11.0")
-                self.assertFalse(self.config.get(f"env:{name}", "platform_packages", []))
+                self.assertEqual(self.config.get(f"env:{name}", "platform_packages", []), [
+                    "framework-arduinoespressif32 @ https://github.com/IoTThinks/"
+                    "powersaving-arduino-lib/releases/download/2.0.17/esp32-2.0.17.zip",
+                ])
                 self.assertIn("pre:scripts/esp32_usb_session_fix.py",
                               self.config.get(f"env:{name}", "extra_scripts", []))
                 if name not in PREVIOUS_G2_HWCDC:
                     migrated.add(name)
         self.assertEqual(counts, MIGRATED_BOARD_COUNTS)
         self.assertTrue(PREVIOUS_G2_HWCDC <= self.rows.keys())
-        self.assertEqual(len(migrated), 80)
+        self.assertEqual(len(migrated), 81)
 
     def test_migrated_uploads_use_hardware_reset_without_touch_or_port_wait(self):
         for name, row in self.rows.items():
@@ -261,7 +285,44 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                 self.assertEqual(self.sdk["hwcdc_primary_enabled"](row["env"]),
                                  row["kind"] == "hwcdc")
                 self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
-        self.assertEqual(counts, {"hwcdc": 323, "uart": 118, "classic_uart": 61})
+        expected = Counter({"hwcdc": 338, "uart": 122, "classic_uart": 61})
+        expected.update(kind for _, _, kind in USB_PARTITION_BRIDGES.values())
+        self.assertEqual(counts, expected)
+
+    def test_canonical_full_companions_preserve_their_usb_base_transport(self):
+        for name, board in (
+            ("Waveshare_S3_LR1121_companion_radio_full", "esp32-s3-zero"),
+            ("Wio_Tracker_L2_companion_radio_full", "seeed_wio_tracker_l2"),
+        ):
+            with self.subTest(environment=name):
+                base_name = name.removesuffix("_full") + "_usb"
+                self.assertEqual(self.config.get(f"env:{name}", "extends"),
+                                 [f"env:{base_name}"])
+                for row in (self.rows[name], self.rows[base_name]):
+                    self.assertEqual((row["board"], row["mcu"], row["kind"]),
+                                     (board, "esp32s3", "hwcdc"))
+                    self.assertEqual(row["values"], {USB_MODE: "1", USB_CDC: "1"})
+                    self.assertTrue(self.sdk["hwcdc_primary_enabled"](row["env"]))
+                    self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
+
+    def test_usb_partition_bridges_keep_application_usb_disabled(self):
+        names = {name for name in self.rows if name.startswith("esp32_")
+                 and name.endswith("_partition_migrator_usb")}
+        self.assertEqual(names, USB_PARTITION_BRIDGES.keys())
+        for name, (board, mcu, kind) in USB_PARTITION_BRIDGES.items():
+            with self.subTest(environment=name):
+                row = self.rows[name]
+                self.assertEqual((row["board"], row["mcu"], row["kind"]), (board, mcu, kind))
+                self.assertEqual(row["values"], {USB_MODE: "0", USB_CDC: "0"})
+                definitions = dict(definition if isinstance(definition, (tuple, list))
+                                   else (definition, 1)
+                                   for definition in row["env"].get("CPPDEFINES", []))
+                self.assertEqual(str(definitions.get("MESHCORE_MIGRATION_USB")), "1")
+                for option in ("ARDUINO_USB_MSC_ON_BOOT", "ARDUINO_USB_DFU_ON_BOOT",
+                               "ARDUINO_USB_ON_BOOT"):
+                    self.assertEqual(str(definitions.get(option, 0)), "0", option)
+                self.assertFalse(self.sdk["hwcdc_primary_enabled"](row["env"]))
+                self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
 
     def test_all_m5stack_native_usb_roles_select_hwcdc_and_its_startup_patch(self):
         # M5's documented USB-C wiring exposes C6 Serial/JTAG, including when
@@ -306,22 +367,26 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                 expected = expected_other_transport(row["board"], name)
                 self.assertEqual(row["kind"], expected)
                 counts[row["board"], row["kind"]] += 1
-        self.assertEqual(counts, UNCHANGED_COUNTS)
+        expected = Counter(UNCHANGED_COUNTS)
+        expected.update((board, kind) for board, _, kind in USB_PARTITION_BRIDGES.values())
+        self.assertEqual(counts, expected)
 
     def test_non_esp32_recipes_do_not_acquire_esp32_usb_selectors(self):
-        count = 0
+        checked = set()
         for name, row in self.rows.items():
             if row["esp32"]:
                 continue
             with self.subTest(environment=name):
-                # Mesh America's own environments are checked below but not counted, so the
-                # expected total tracks Keymind's recipes.
-                if not name.startswith("MeshAmerica_"):
-                    count += 1
+                checked.add(name)
                 self.assertEqual(row["values"], {USB_MODE: "0", USB_CDC: "0"})
                 self.assertFalse(self.sdk["hwcdc_primary_enabled"](row["env"]))
                 self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
-        self.assertEqual(count, 321)
+        # Every current non-ESP32 recipe is checked above, including newly
+        # added boards. Keep representative architecture coverage explicit
+        # rather than pinning an unrelated, ever-growing environment count.
+        self.assertTrue({"RAK_3x72_companion_radio_usb",
+                         "Xiao_nrf52_companion_radio_usb",
+                         "PicoW_companion_radio_usb"} <= checked)
 
     def test_only_existing_partition_diagnostics_keep_their_cdc_override(self):
         # These two pre-existing diagnostic recipes intentionally select CDC1

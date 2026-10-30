@@ -65,6 +65,40 @@ TEST(CompanionNodePrefs, DevicePowerSavingIsIndependentFromRxps) {
   EXPECT_EQ(1, prefs.powersaving_enabled);
 }
 
+TEST(CompanionNodePrefs, RxpsAdapterReadsAnIndependentSnapshot) {
+  CompanionNodePrefs prefs;
+  prefs.rx_powersaving_enabled = 1;
+  prefs.rx_ps_rx_us = 1234;
+  prefs.rx_ps_sleep_us = 5678;
+  prefs.rx_ps_level = 6;
+  prefs.rx_ps_preamble = 32;
+  const CompanionNodePrefs& stored = prefs;
+  auto config = stored.getRadioPrefs()->readRxPowerSavingConfig();
+  EXPECT_EQ(1, config.enabled);
+  EXPECT_EQ(1234U, config.rx_us);
+  EXPECT_EQ(5678U, config.sleep_us);
+  EXPECT_EQ(6, config.level);
+  EXPECT_EQ(32, config.preamble);
+  config.sleep_us = 9999;
+  EXPECT_EQ(5678U, prefs.rx_ps_sleep_us);
+  EXPECT_FALSE(prefs.isDirty());
+}
+
+TEST(CompanionNodePrefs, RxpsSnapshotPreservesDisabledManualConfiguration) {
+  CompanionNodePrefs prefs;
+  prefs.freq = 911.150f;
+  prefs.powersaving_enabled = 1;
+  const auto config = prefs.getRadioPrefs()->readRxPowerSavingConfig();
+  EXPECT_EQ(0, config.enabled);
+  EXPECT_EQ(0U, config.rx_us);
+  EXPECT_EQ(0U, config.sleep_us);
+  EXPECT_EQ(0, config.level);
+  EXPECT_EQ(0, config.preamble);
+  EXPECT_FLOAT_EQ(911.150f, prefs.freq);
+  EXPECT_EQ(1, prefs.powersaving_enabled);
+  EXPECT_FALSE(prefs.isDirty());
+}
+
 TEST(CompanionNodePrefs, WiFiStateIsIndependentFromPowerSaving) {
   CompanionNodePrefs prefs = {};
   prefs.wifi_enabled = 1;

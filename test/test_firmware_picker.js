@@ -1,6 +1,9 @@
 "use strict";
 
 const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
 const picker = require("../docs/_javascript/firmware_picker.js");
 
 const bootloaderManifest = require("../docs/_data/bootloader_manifest.json");
@@ -43,8 +46,8 @@ for (const hardware of ["WioTrackerL1-1W", "WioTrackerL1Eink"]) {
   assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, hardware, "nrf52").id, "wio_tracker_l1");
 }
 assert(picker.unavailableBootloaderForHardware(bootloaderCatalog, "GAT562_Mesh_Watch13", "nrf52").reason.includes("vibration motor"));
-assert(picker.unavailableBootloaderForHardware(bootloaderCatalog, "wio_wm1110", "nrf52").reason.includes("identity and installation route still need qualification"));
-const nextBootloaderTag = "v0.11.0-OTAFIX2.4.12";
+assert(picker.unavailableBootloaderForHardware(bootloaderCatalog, "wio_wm1110", "nrf52").reason.includes("not proven native-USB UF2"));
+const nextBootloaderTag = "v0.11.0-OTAFIX2.4.13";
 const nextBootloaderRelease = {
   tag_name: nextBootloaderTag, draft: false, prerelease: false,
   html_url: "https://github.com/" + bootloaderManifest.repository + "/releases/tag/" + nextBootloaderTag,
@@ -57,7 +60,7 @@ const nextBootloaderRelease = {
   }),
 };
 const nextBootloaderCatalog = picker.buildBootloaderCatalog(bootloaderManifest, nextBootloaderRelease);
-assert.strictEqual(nextBootloaderCatalog.version, "2.4.12");
+assert.strictEqual(nextBootloaderCatalog.version, "2.4.13");
 assert(picker.bootloaderForHardware(nextBootloaderCatalog, "t1000e", "nrf52").files.uf2.url.includes(nextBootloaderTag));
 const ambiguousBootloader = structuredClone(nextBootloaderRelease);
 ambiguousBootloader.assets.push(ambiguousBootloader.assets.find(a => a.name.startsWith("update-heltec_t096_")));
@@ -1014,6 +1017,27 @@ const rakLegacyCatalog = picker.buildCatalog([
   release(family, "2026-09-25T00:00:00Z", rakStorageAssets.slice(1, 4).concat(rakStorageAssets.slice(5))),
 ]);
 assert.strictEqual(rakLegacyCatalog.profiles.length, 5);
+// Sensor-policy suffixes must not resurrect the storage-specific compatibility
+// images. A Full successor cannot replace a missing Reduced successor.
+const rakPolicyTargets = rakStorageTargets.flatMap(target =>
+  ['full', 'reduced'].map(policy => target + '-' + policy));
+const rakPolicyAssets = rakPolicyTargets.map(target =>
+  asset(target + '-ota-' + family + '.uf2'));
+const rakPolicyCatalog = picker.buildCatalog([
+  release(family, '2026-10-08T00:00:00Z', rakPolicyAssets),
+]);
+assert.deepStrictEqual(rakPolicyCatalog.profiles.map(item => item.target).sort(),
+  ['RAK_3401', 'RAK_4631'].flatMap(board =>
+    ['full', 'reduced'].map(policy => board + '_repeater_unified_lora_ota-' + policy)).sort());
+assert.deepStrictEqual(rakPolicyCatalog.rows.map(item => item.target).sort(), rakPolicyTargets.sort(),
+  'All exact legacy OTA identities must remain in the raw catalog');
+const rakMissingReducedCatalog = picker.buildCatalog([
+  release(family, '2026-10-08T00:00:00Z', rakPolicyAssets.filter(file =>
+    !file.name.includes('_unified_lora_ota-reduced-'))),
+]);
+assert.deepStrictEqual(rakMissingReducedCatalog.profiles.map(item => item.target).sort(),
+  rakPolicyTargets.filter(target => target.endsWith('_unified_lora_ota-full') ||
+    (target.endsWith('-reduced') && !target.includes('_unified_lora_ota-'))).sort());
 assert.strictEqual(picker.formatBytes(2097152), "2.00 MiB");
 assert.strictEqual(
   picker.parseFirmwareAsset(
@@ -1094,6 +1118,13 @@ assert.strictEqual(rakCommands.find(s => s.title.startsWith('RS232')).actions[0]
 assert(commands(rakCommands).includes('set gps on'));
 assert(!rakCommands.some(s => s.title === 'MQTT broker connections'));
 const indicator = picker.runtimeDirections(findControlled('SenseCapIndicator-LoRa_companion_radio_full'), {});
+const isolation = picker.runtimeDirections(Object.assign({},
+  findControlled('SenseCapIndicator-LoRa_companion_radio_full'),
+  {releaseFamily: 'v1.17.1.6-halo-keymind-cascade-dev-test'}), {})
+  .find(section => section.title === 'Companion tempradio2: transmit on both');
+assert(isolation);
+assert.deepStrictEqual(isolation.actions.find(action => action.label === 'Default isolation').commands,
+  ['set radio2.cross off']);
 assert(commands(indicator).includes('set companion.transport ble'));
 assert(!indicator.some(s => s.title.startsWith('MQTT')));
 // Never apply old hardware capabilities to another release, or to an unknown
@@ -1155,6 +1186,341 @@ const currentCatalog = picker.buildCatalog([
 ], currentControls);
 assert.strictEqual(currentCatalog.rows.length, currentAssets.length);
 assert(currentCatalog.profiles.every(profile => profile.controls && profile.chipFamily !== 'unknown'));
+for (const hardware of ['solarxiao_30S', 'solarxiao_33S']) {
+  const roomBase = hardware + '_room_server';
+  const roomProfiles = currentCatalog.profiles.filter(profile =>
+    picker.profileMatchesFacets(profile, {hardware, role: 'room'}));
+  assert.deepStrictEqual(roomProfiles.map(profile => profile.target).sort(),
+    ['full', 'reduced'].map(policy => roomBase + '_lora_ota-' + policy),
+    hardware + ' must recommend only QSPI room builds while retaining both sensor policies');
+  for (const profile of roomProfiles) {
+    assert.strictEqual(profile.controls.updateRequirements.lora.storage, 'external_qspi');
+    assert.strictEqual(profile.sensorProfile, profile.target.endsWith('-full') ? 'full' : 'reduced');
+    assert(profile.files.every(file => file.target === profile.target),
+      'QSPI recommendations must keep their exact files and OTA target identities');
+  }
+  for (const policy of ['full', 'reduced']) {
+    const target = roomBase + '-' + policy;
+    const original = currentAssets.find(file => file.name.startsWith(target + '-'));
+    assert(original, 'The fixture must exercise an internal-only compatibility file');
+    assert(currentCatalog.rows.some(row => row.target === target &&
+      row.name === original.name && row.url === original.browser_download_url),
+      'Internal-only files must retain their exact names, downloads and target identities');
+  }
+}
+const solarFullLink = picker.selectionFromUrl(
+  'https://mikecarper.github.io/MeshCore/firmware_picker/?s=1.hsolarxiao_33S.olora-receiver.ffull.vdefault#firmware-picker-1-results',
+  currentCatalog.profiles);
+assert.deepStrictEqual(solarFullLink.unavailable, []);
+const solarFullMatches = currentCatalog.profiles.filter(profile =>
+  picker.profileMatchesFacets(profile, solarFullLink.filters));
+assert.deepStrictEqual(solarFullMatches.map(profile => profile.target).sort(), [
+  'solarxiao_33S_repeater-full', 'solarxiao_33S_room_server_lora_ota-full',
+]);
+assert.deepStrictEqual(solarFullMatches.filter(profile =>
+  picker.profileMatchesFacets(profile, {...solarFullLink.filters, role: 'room'}))
+  .map(profile => profile.target), ['solarxiao_33S_room_server_lora_ota-full']);
+const internalSolarTargets = ['solarxiao_30S', 'solarxiao_33S'].flatMap(hardware =>
+  ['', '-full', '-reduced', '-full-ota', '-reduced-ota'].map(suffix =>
+    hardware + '_room_server' + suffix));
+const internalSolarAssets = internalSolarTargets.map(target =>
+  asset(target + '-ota-' + family + '.uf2'));
+const internalSolarCatalog = picker.buildCatalog([
+  release(family, '2026-10-16T00:00:00Z', internalSolarAssets),
+]);
+assert.deepStrictEqual(internalSolarCatalog.profiles, [],
+  'A missing QSPI image must never restore internal-only room recommendations');
+assert.deepStrictEqual(internalSolarCatalog.rows.map(row => row.target), internalSolarTargets);
+assert.deepStrictEqual(internalSolarCatalog.rows.map(row => row.name),
+  internalSolarAssets.map(file => file.name),
+  'Every legacy publication form must remain available to exact filename search');
+console.log('SolarXiao QSPI-only room recommendations and exact compatibility downloads passed');
+const fixedQspiHardware = ['LilyGo_T-Echo', 'SenseCap_Solar', 'ThinkNode_M1',
+  'ThinkNode_M6', 'WioTrackerL1'];
+const newQspiRoomHardware = ['Xiao_nrf52', 'ikoka_handheld_nrf_e22_30dbm',
+  'ikoka_nano_nrf_22dbm', 'ikoka_nano_nrf_30dbm', 'ikoka_nano_nrf_33dbm',
+  'ikoka_stick_nrf_22dbm', 'ikoka_stick_nrf_30dbm', 'ikoka_stick_nrf_33dbm',
+  'LilyGo_T-Echo-Lite', ...fixedQspiHardware];
+for (const hardware of newQspiRoomHardware) {
+  const oldRoomLink = picker.selectionFromUrl(
+    'https://example.com/p/?s=1.h' + hardware + '.rroom.olora-receiver.ffull.vdefault',
+    currentCatalog.profiles);
+  assert.deepStrictEqual(oldRoomLink.unavailable, [],
+    'Saved Room links must keep their role until a qualified QSPI replacement is published');
+  assert.strictEqual(oldRoomLink.filters.role, 'room');
+  assert.strictEqual(oldRoomLink.filters.ota, 'lora-receiver');
+  const oldRoomMatches = currentCatalog.profiles.filter(profile =>
+    picker.profileMatchesFacets(profile, oldRoomLink.filters));
+  assert.strictEqual(oldRoomMatches.length, 1);
+  assert.strictEqual(oldRoomMatches[0].target,
+    hardware + '_room_server_lora_ota_no_external_sensors-full');
+  for (const policy of ['full', 'reduced']) {
+    const target = hardware + '_room_server_lora_ota_no_external_sensors-' + policy;
+    assert(currentCatalog.rows.some(row => row.target === target),
+      'Retired room images must remain available for exact compatibility search');
+  }
+}
+const qspiFixtureSource = 'deadbeef' + '0'.repeat(32);
+const qspiFixtureFamily = 'v1.17.1.10-halo-keymind-cascade-dev-deadbeef';
+const qspiRoomControls = {familyTag: qspiFixtureFamily, profiles: {}};
+const qspiRoomTargets = [];
+for (const hardware of [...newQspiRoomHardware, 'solarxiao_30S', 'solarxiao_33S']) {
+  for (const base of [hardware + '_room_server',
+    hardware + '_room_server_lora_ota_no_external_sensors', hardware + '_room_server_lora_ota']) {
+    for (const policy of ['full', 'reduced']) {
+      const target = base + '-' + policy;
+      qspiRoomTargets.push(target);
+      qspiRoomControls.profiles[target] = {
+        platform: 'NRF52_PLATFORM', otaRole: 'lora-receiver', updateMethods: ['lora'],
+        sensorProfile: policy, sensorProfileSource: qspiFixtureSource,
+        updateRequirements: {lora: {storage: base.endsWith('_lora_ota') ? 'external_qspi' : 'internal_flash'}},
+      };
+    }
+  }
+}
+const qspiRoomAssets = qspiRoomTargets.map(target => asset(target + '-ota-' + qspiFixtureFamily + '.uf2'));
+const qspiRoomCatalog = picker.buildCatalog([
+  release(qspiFixtureFamily, '2026-10-16T00:00:00Z', qspiRoomAssets),
+], qspiRoomControls);
+assert.deepStrictEqual(qspiRoomCatalog.rows.map(row => row.target), qspiRoomTargets);
+for (const hardware of [...newQspiRoomHardware, 'solarxiao_30S', 'solarxiao_33S']) {
+  const visible = qspiRoomCatalog.profiles.filter(profile => profile.hardware === hardware);
+  assert.deepStrictEqual(visible.map(profile => profile.target).sort(),
+    ['full', 'reduced'].map(policy => hardware + '_room_server_lora_ota-' + policy));
+  assert(visible.every(profile => profile.sensorProfile &&
+    profile.files.every(file => file.target === profile.target)),
+    'New QSPI room recommendations must retain qualified sensor policies and exact identities');
+}
+const retiredRoomOnly = picker.buildCatalog([
+  release(qspiFixtureFamily, '2026-10-16T00:00:00Z', qspiRoomAssets.filter(file =>
+    !file.name.includes('_room_server_lora_ota-full-') && !file.name.includes('_room_server_lora_ota-reduced-'))),
+], qspiRoomControls);
+for (const hardware of newQspiRoomHardware) {
+  assert.strictEqual(retiredRoomOnly.profiles.filter(profile => profile.hardware === hardware).length, 4,
+    'Keep current internal Room identities when the release has no replacement downloads');
+}
+assert(!retiredRoomOnly.profiles.some(profile => profile.hardware.startsWith('solarxiao_')),
+  'The previously established SolarXiao retirement policy remains unconditional');
+for (const hardware of newQspiRoomHardware) {
+  const base = hardware + '_room_server_lora_ota';
+  for (const fault of ['missing_full', 'missing_reduced', 'stale_source', 'mixed_source',
+    'internal_storage', 'missing_controls']) {
+    const changedControls = JSON.parse(JSON.stringify(qspiRoomControls));
+    let files = qspiRoomAssets.filter(file => file.name.startsWith(hardware + '_room_server'));
+    if (fault === 'missing_full' || fault === 'missing_reduced') {
+      files = files.filter(file => !file.name.startsWith(base + '-' + fault.slice(8) + '-'));
+    } else if (fault === 'stale_source') {
+      changedControls.profiles[base + '-full'].sensorProfileSource = 'f'.repeat(40);
+    } else if (fault === 'mixed_source') {
+      changedControls.profiles[base + '-full'].sensorProfileSource = 'a'.repeat(40);
+      files = files.map(file => file.name.startsWith(base + '-full-')
+        ? asset(file.name.replace(/-[0-9a-f]{8}\.uf2$/, '-aaaaaaaa.uf2')) : file);
+    } else if (fault === 'internal_storage') {
+      changedControls.profiles[base + '-full'].updateRequirements.lora.storage = 'internal_flash';
+    }
+    const partial = picker.buildCatalog([
+      release(qspiFixtureFamily, '2026-10-16T00:00:00Z', files),
+    ], fault === 'missing_controls' ? undefined : changedControls);
+    for (const policy of ['full', 'reduced']) {
+      assert(partial.profiles.some(profile =>
+        profile.target === hardware + '_room_server_lora_ota_no_external_sensors-' + policy),
+        hardware + ': keep the existing Room download during incomplete QSPI rollout (' + fault + ')');
+    }
+  }
+}
+const liteRepeaterTargets = ['', '_lora_ota_no_external_sensors', '_lora_ota'].flatMap(suffix =>
+  ['full', 'reduced'].map(policy => 'LilyGo_T-Echo-Lite_repeater' + suffix + '-' + policy));
+const liteRepeaterAssets = liteRepeaterTargets.map(target =>
+  asset(target + '-ota-' + qspiFixtureFamily + '.uf2'));
+for (const target of liteRepeaterTargets) {
+  const policy = target.endsWith('-full') ? 'full' : 'reduced';
+  qspiRoomControls.profiles[target] = {
+    platform: 'NRF52_PLATFORM', otaRole: 'lora-receiver', updateMethods: ['lora'],
+    sensorProfile: policy, sensorProfileSource: qspiFixtureSource,
+    updateRequirements: {lora: {storage: /_lora_ota-(?:full|reduced)$/.test(target)
+      ? 'external_qspi' : 'internal_flash'}},
+  };
+}
+const liteRepeaterCatalog = picker.buildCatalog([
+  release(qspiFixtureFamily, '2026-10-16T00:00:00Z', liteRepeaterAssets),
+], qspiRoomControls);
+assert.deepStrictEqual(liteRepeaterCatalog.profiles.map(profile => profile.target).sort(),
+  ['full', 'reduced'].map(policy => 'LilyGo_T-Echo-Lite_repeater_lora_ota-' + policy));
+assert.deepStrictEqual(liteRepeaterCatalog.rows.map(row => row.target), liteRepeaterTargets);
+const oldLiteRepeaterLink = picker.selectionFromUrl(
+  'https://example.com/p/?s=1.hLilyGo_T-Echo-Lite.rrepeater.olora-receiver.ffull.vdefault',
+  currentCatalog.profiles);
+assert.deepStrictEqual(oldLiteRepeaterLink.unavailable, []);
+assert.strictEqual(oldLiteRepeaterLink.filters.role, 'repeater');
+assert.strictEqual(oldLiteRepeaterLink.filters.ota, 'lora-receiver');
+assert.deepStrictEqual(currentCatalog.profiles.filter(profile =>
+  picker.profileMatchesFacets(profile, oldLiteRepeaterLink.filters)).map(profile => profile.target),
+  ['LilyGo_T-Echo-Lite_repeater_lora_ota_no_external_sensors-full']);
+for (const fault of ['missing_full', 'missing_reduced', 'stale_source', 'missing_controls']) {
+  const changedControls = JSON.parse(JSON.stringify(qspiRoomControls));
+  let files = liteRepeaterAssets;
+  const base = 'LilyGo_T-Echo-Lite_repeater_lora_ota';
+  if (fault === 'missing_full' || fault === 'missing_reduced') {
+    files = files.filter(file => !file.name.startsWith(base + '-' + fault.slice(8) + '-'));
+  } else if (fault === 'stale_source') {
+    changedControls.profiles[base + '-full'].sensorProfileSource = 'f'.repeat(40);
+  }
+  const partial = picker.buildCatalog([
+    release(qspiFixtureFamily, '2026-10-16T00:00:00Z', files),
+  ], fault === 'missing_controls' ? undefined : changedControls);
+  for (const policy of ['full', 'reduced']) {
+    assert(partial.profiles.some(profile =>
+      profile.target === 'LilyGo_T-Echo-Lite_repeater_lora_ota_no_external_sensors-' + policy),
+      'Keep existing Lite repeater functionality during incomplete QSPI rollout: ' + fault);
+  }
+}
+for (const hardware of ['LilyGo_T-Echo_Card', 'muzi_base_uno', 'muzi_base_duo', 'Nano_G2_Ultra']) {
+  const original = Object.keys(currentControls.profiles).filter(target =>
+    target.startsWith(hardware + '_repeater_') || target.startsWith(hardware + '_room_server_'));
+  assert(original.length > 0, 'The fixture must exercise each hardware-pending board');
+  for (const target of original) {
+    assert(currentCatalog.profiles.some(profile => profile.target === target),
+      'Hardware-pending QSPI boards must retain their supported current firmware');
+  }
+}
+for (const hardware of fixedQspiHardware) {
+  const base = hardware + '_repeater';
+  const visible = currentCatalog.profiles.filter(profile => profile.hardware === hardware && profile.role === 'repeater');
+  assert.deepStrictEqual(visible.map(profile => profile.target).sort(),
+    ['full', 'reduced'].map(policy => base + '-' + policy),
+    'Qualified QSPI canonical pairs must replace duplicate repeater recommendations');
+  for (const policy of ['full', 'reduced']) {
+    assert(currentCatalog.rows.some(row => row.target === base + '_lora_ota_no_external_sensors-' + policy));
+  }
+  for (const fault of ['missing_full', 'missing_reduced', 'stale_source', 'mixed_source',
+    'internal_storage', 'missing_controls']) {
+    const changedControls = JSON.parse(JSON.stringify(currentControls));
+    let files = currentAssets.filter(file => file.name.startsWith(base + '-full-') ||
+      file.name.startsWith(base + '-reduced-') || file.name.startsWith(base + '_lora_ota_no_external_sensors-'));
+    if (fault.startsWith('missing_') && fault !== 'missing_controls') {
+      files = files.filter(file => !file.name.startsWith(base + '-' + fault.slice('missing_'.length) + '-'));
+    } else if (fault === 'stale_source') {
+      changedControls.profiles[base + '-full'].sensorProfileSource = 'f'.repeat(40);
+    } else if (fault === 'mixed_source') {
+      changedControls.profiles[base + '-full'].sensorProfileSource = 'a'.repeat(40);
+      files = files.map(file => file.name.startsWith(base + '-full-')
+        ? asset(file.name.replace(/-[0-9a-f]{8}\.uf2$/, '-aaaaaaaa.uf2')) : file);
+    } else if (fault === 'internal_storage') {
+      changedControls.profiles[base + '-full'].updateRequirements.lora.storage = 'internal_flash';
+    }
+    const partial = picker.buildCatalog([
+      release(currentControls.familyTag, '2026-10-16T00:00:00Z', files),
+    ], fault === 'missing_controls' ? undefined : changedControls);
+    for (const policy of ['full', 'reduced']) {
+      assert(partial.profiles.some(profile => profile.target === base + '_lora_ota_no_external_sensors-' + policy),
+        hardware + ': retain exact aliases when canonical QSPI qualification is incomplete (' + fault + ')');
+    }
+  }
+}
+const xiaoBridgeBase = 'Xiao_nrf52_repeater_bridge_rs232';
+const xiaoBridgeBases = [xiaoBridgeBase, xiaoBridgeBase + '_lora_ota_no_external_sensors'];
+assert(['full', 'reduced'].every(policy => currentCatalog.profiles.some(profile =>
+  profile.target === xiaoBridgeBase + '-' + policy)),
+  'The old canonical image has no merged bridge proof and must retain both bridge downloads');
+const mergedXiaoControls = JSON.parse(JSON.stringify(currentControls));
+for (const policy of ['full', 'reduced']) {
+  Object.assign(mergedXiaoControls.profiles['Xiao_nrf52_repeater-' + policy], {
+    rs232: true, rs232Merged: true,
+    rs232Source: currentControls.profiles['Xiao_nrf52_repeater-' + policy].sensorProfileSource,
+  });
+  mergedXiaoControls.profiles[xiaoBridgeBases[1] + '-' + policy] = {
+    ...currentControls.profiles[xiaoBridgeBase + '-' + policy],
+  };
+}
+const xiaoRepeaterAssets = currentAssets.filter(file =>
+  file.name.startsWith('Xiao_nrf52_repeater-full-') ||
+  file.name.startsWith('Xiao_nrf52_repeater-reduced-') || file.name.startsWith(xiaoBridgeBase + '-'))
+  .concat(['full', 'reduced'].map(policy =>
+    asset(xiaoBridgeBases[1] + '-' + policy + '-ota-' + currentControls.familyTag + '.uf2')));
+const mergedXiaoCatalog = picker.buildCatalog([
+  release(currentControls.familyTag, '2026-10-16T00:00:00Z', xiaoRepeaterAssets),
+], mergedXiaoControls);
+assert.deepStrictEqual(mergedXiaoCatalog.profiles.map(profile => profile.target).sort(),
+  ['full', 'reduced'].map(policy => 'Xiao_nrf52_repeater-' + policy));
+for (const profile of mergedXiaoCatalog.profiles) {
+  assert.deepStrictEqual(picker.profileFieldValues(profile, 'mode'), ['standard', 'rs232']);
+  assert(profile.files.every(file => file.target === profile.target));
+}
+assert(xiaoBridgeBases.every(base => ['full', 'reduced'].every(policy =>
+  mergedXiaoCatalog.rows.some(row => row.target === base + '-' + policy))),
+  'Retired bridge identities must remain exact searchable compatibility files');
+for (const fault of ['missing_full', 'missing_reduced', 'unmerged', 'missing_source', 'stale_source', 'no_rs232']) {
+  const changedControls = JSON.parse(JSON.stringify(mergedXiaoControls));
+  let files = xiaoRepeaterAssets;
+  const info = changedControls.profiles['Xiao_nrf52_repeater-full'];
+  if (fault === 'missing_full' || fault === 'missing_reduced') {
+    files = files.filter(file => !file.name.startsWith('Xiao_nrf52_repeater-' + fault.slice(8) + '-'));
+  } else if (fault === 'unmerged') {
+    delete info.rs232Merged;
+  } else if (fault === 'missing_source') {
+    delete info.rs232Source;
+  } else if (fault === 'stale_source') {
+    info.rs232Source = 'f'.repeat(40);
+  } else {
+    info.rs232 = false;
+  }
+  const partial = picker.buildCatalog([
+    release(currentControls.familyTag, '2026-10-16T00:00:00Z', files),
+  ], changedControls);
+  assert(xiaoBridgeBases.every(base => ['full', 'reduced'].every(policy =>
+    partial.profiles.some(profile => profile.target === base + '-' + policy))),
+    'Keep bridge functionality until both canonical policies prove merged control: ' + fault);
+}
+console.log('onboard-QSPI room retirement and qualified repeater alias replacements passed');
+for (const [hardware, bases] of [
+  ['RAK_4631', ['RAK_4631_repeater_unified_lora_ota', 'RAK_4631_repeater_ethernet']],
+  ['RAK_3401', ['RAK_3401_repeater_unified_lora_ota']],
+]) {
+  const context = {hardware, role: 'repeater'};
+  const expected = bases.flatMap(base => ['full', 'reduced'].map(policy => base + '-' + policy));
+  const visible = currentCatalog.profiles.filter(profile => picker.profileMatchesFacets(profile, context));
+  assert.deepStrictEqual(visible.map(profile => profile.target).sort(), expected.sort(),
+    hardware + ' must recommend only combined storage/UART2 images and genuine Ethernet variants');
+  const choices = picker.firmwareProfileChoices(currentCatalog.profiles, context);
+  assert.strictEqual(choices.length, expected.length, hardware + ' must have one choice per real image');
+  assert.strictEqual(new Set(choices.map(choice => choice.label)).size, choices.length,
+    hardware + ' must not show duplicate profile labels');
+  for (const profile of visible.filter(item => item.target.includes('_unified_lora_ota-'))) {
+    assert.deepStrictEqual(picker.profileFieldValues(profile, 'mode'),
+      hardware === 'RAK_4631' ? ['standard', 'rs232'] : ['standard']);
+    if (hardware === 'RAK_4631') {
+      const bridge = picker.runtimeDirections(profile, {mode: 'rs232'})
+        .find(section => section.title.startsWith('RS232 bridge'));
+      assert(bridge && bridge.note.includes('set bridge.uart 2') && bridge.note.includes('reserve UART1'),
+        'Both combined sensor policies must explain the powered-GPS UART1 restriction');
+      assert(!bridge.note.includes('pauses UART GPS'));
+    }
+  }
+}
+for (const policy of ['full', 'reduced']) {
+  const target = 'RAK_4631_repeater_bridge_rs232_serial1_lora_ota_no_external_sensors-' + policy;
+  assert(!currentCatalog.profiles.some(profile => profile.target === target),
+    'Normal recommendations must prefer UART2 over legacy Serial1');
+  assert(currentCatalog.rows.some(row => row.target === target && row.name.startsWith(target + '-')),
+    'Existing Serial1 installations must retain exact compatibility downloads');
+  assert.strictEqual(currentControls.profiles[target].gps, false);
+}
+const rakBridgeBase = 'RAK_4631_repeater_bridge_rs232_serial1_lora_ota_no_external_sensors';
+const rakPartialAssets = currentAssets.filter(file =>
+  file.name.startsWith('RAK_4631_repeater_unified_lora_ota-full-') ||
+  file.name.startsWith(rakBridgeBase + '-reduced-'));
+const rakPartialCatalog = picker.buildCatalog([
+  release(currentControls.familyTag, '2026-10-08T00:00:00Z', rakPartialAssets),
+], currentControls);
+assert(rakPartialCatalog.profiles.some(profile => profile.target === rakBridgeBase + '-reduced'),
+  'A Full combined image must not hide the only available Reduced bridge image');
+const rakInversePartialCatalog = picker.buildCatalog([
+  release(currentControls.familyTag, '2026-10-08T00:00:00Z', currentAssets.filter(file =>
+    file.name.startsWith('RAK_4631_repeater_unified_lora_ota-reduced-') ||
+    file.name.startsWith(rakBridgeBase + '-full-'))),
+], currentControls);
+assert(rakInversePartialCatalog.profiles.some(profile => profile.target === rakBridgeBase + '-full'),
+  'A Reduced combined image must not hide the only available Full bridge image');
 const expandedEsp32 = currentCatalog.profiles.find(profile =>
   profile.target === 'Ebyte_EoRa-S3_Repeater-full-usb-wifi');
 assert(expandedEsp32);
@@ -1559,6 +1925,161 @@ assert.deepStrictEqual(escapedShare.filters, {});
 assert.deepStrictEqual(escapedShare.unavailable, ['role=<script>']);
 console.log('shareable picker URL tests passed');
 
+// Compact links navigate to the picker and retain the same selection semantics.
+// Parameter values stay readable rather than depending on catalog row numbers.
+const shortShareBase = 'https://example.com/p/?h=storage#installation-methods';
+const shortShareUrl = picker.shortSelectionUrl(shortShareBase, shareFilters, true);
+const shortShareParsedUrl = new URL(shortShareUrl);
+assert.strictEqual(shortShareParsedUrl.pathname, '/p/');
+assert.strictEqual(shortShareParsedUrl.searchParams.get('h'), 'storage');
+assert.strictEqual(shortShareParsedUrl.hash, '#installation-methods');
+assert(shortShareUrl.length < shareUrl.length);
+assert.strictEqual(shortShareParsedUrl.searchParams.get('s'),
+  '1.hRAK_4631.rcompanion.lusb.olora-source.mfull.ffull.vdefault.iuf2');
+assert(picker.FACET_FIELDS.every(field => !shortShareParsedUrl.searchParams.has(field)));
+assert(!shortShareParsedUrl.searchParams.has('chipAuto'));
+const restoredShortShare = picker.selectionFromUrl(shortShareUrl, controlled.profiles);
+assert.deepStrictEqual(restoredShortShare, restoredShare);
+assert.strictEqual(picker.shortSelectionUrl(shortShareUrl, {}, false), shortShareBase);
+assert.strictEqual(picker.selectionUrl(shortShareUrl, {}, false), shortShareBase,
+  'Legacy serialization must also remove the compact selection when clearing');
+
+const manualShortShare = picker.shortSelectionUrl(shortShareBase, shareFilters, false);
+const manualShortSelection = picker.selectionFromUrl(manualShortShare, controlled.profiles);
+assert.strictEqual(manualShortSelection.automaticChipFamily, false);
+for (const field of picker.FACET_FIELDS) {
+  assert.strictEqual(manualShortSelection.filters[field], shareFilters[field], field);
+}
+assert(new URL(manualShortShare).searchParams.get('s').split('.').includes('a0'));
+const anyChipShortSelection = picker.selectionFromUrl(picker.shortSelectionUrl(shortShareBase,
+  {...shareFilters, chipFamily: ''}, false), controlled.profiles);
+assert.strictEqual(anyChipShortSelection.automaticChipFamily, false);
+assert(!anyChipShortSelection.filters.chipFamily);
+assert.strictEqual(anyChipShortSelection.filters.hardware, 'RAK_4631');
+
+const partialShortShare = picker.shortSelectionUrl(shortShareBase,
+  {hardwareFamily: 'RAK_4631', hardware: 'RAK_4631', role: 'companion'}, true);
+assert.strictEqual(new URL(partialShortShare).searchParams.get('s'), '1.hRAK_4631.rcompanion');
+assert.deepStrictEqual(picker.selectionFromUrl(partialShortShare, controlled.profiles), {
+  filters: {hardwareFamily: 'RAK_4631', hardware: 'RAK_4631', role: 'companion'},
+  automaticChipFamily: true, unavailable: [],
+});
+const familyOnlyShortSelection = picker.selectionFromUrl(picker.shortSelectionUrl(shortShareBase,
+  {hardwareFamily: 'RAK_4631'}, true), controlled.profiles);
+assert.deepStrictEqual(familyOnlyShortSelection.filters, {hardwareFamily: 'RAK_4631'});
+assert.strictEqual(familyOnlyShortSelection.automaticChipFamily, true);
+
+// Opening, editing and clearing a compact link must not resurrect stale choices.
+const changedShortSelection = {...restoredShortShare.filters, install: ''};
+const editedShortShare = picker.shortSelectionUrl(shortShareUrl, changedShortSelection, true);
+const editedShortSelection = picker.selectionFromUrl(editedShortShare, controlled.profiles);
+assert.deepStrictEqual(editedShortSelection.unavailable, []);
+assert.strictEqual(editedShortSelection.filters.install, undefined);
+assert.strictEqual(new URL(editedShortShare).searchParams.getAll('s').length, 1);
+const editedLegacyShare = picker.selectionUrl(shortShareUrl, changedShortSelection, true);
+assert(!new URL(editedLegacyShare).searchParams.has('s'));
+assert.strictEqual(picker.selectionFromUrl(editedLegacyShare, controlled.profiles).filters.install, undefined);
+const compactWithLegacy = shortShareUrl.replace('#installation-methods', '') +
+  '&hardware=RAK_3401&role=repeater&chipAuto=0';
+assert.deepStrictEqual(picker.selectionFromUrl(compactWithLegacy, controlled.profiles), restoredShortShare,
+  'A compact selection must not inherit stale legacy picker fields');
+const normalizedCompact = new URL(picker.shortSelectionUrl(compactWithLegacy, shareFilters, true));
+assert(!normalizedCompact.searchParams.has('hardware'));
+assert(!normalizedCompact.searchParams.has('role'));
+assert(!normalizedCompact.searchParams.has('chipAuto'));
+assert.strictEqual(normalizedCompact.searchParams.get('h'), 'storage');
+
+const staleShortSelection = picker.selectionFromUrl(
+  'https://example.com/p/?s=1.hRAK_4631.rcompanion.vremoved.ibin', controlled.profiles);
+assert.strictEqual(staleShortSelection.filters.hardware, 'RAK_4631');
+assert.strictEqual(staleShortSelection.filters.role, 'companion');
+assert.deepStrictEqual(staleShortSelection.unavailable, ['variant=removed', 'install=bin']);
+const escapedShortSelection = picker.selectionFromUrl(
+  'https://example.com/p/?s=1.r%253Cscript%253E', controlled.profiles);
+assert.deepStrictEqual(escapedShortSelection.filters, {});
+assert.deepStrictEqual(escapedShortSelection.unavailable, ['role=<script>']);
+for (const malformedQuery of [
+  's=', 's=2.hRAK_4631', 's=1.hRAK_4631.hRAK_3401', 's=1.xjunk',
+  's=1.h%252', 's=1.a2', 's=1.a0.a0', 's=1.hRAK_4631&s=1.hRAK_3401',
+  's=1.', 's=1.h',
+]) {
+  const invalid = picker.selectionFromUrl('https://example.com/p/?' + malformedQuery, controlled.profiles);
+  assert.deepStrictEqual(invalid.filters, {}, malformedQuery);
+  assert(invalid.unavailable.length > 0, malformedQuery + ' must explain the invalid selection');
+}
+
+// Field delimiters and URL punctuation are data inside a catalog identifier.
+const punctuationHardware = 'Board.rev/2 +100%?x#';
+const punctuationProfile = {chipFamily: 'esp32', hardwareFamily: 'Board_Family',
+  hardware: punctuationHardware, role: 'repeater', logging: 'none', ota: 'none',
+  mode: 'standard', feature: 'standard', variant: 'rev.2+hot/cold 50% \u00e9',
+  installKinds: ['merged-bin']};
+const punctuationFilters = Object.fromEntries(picker.FACET_FIELDS.map(field =>
+  [field, field === 'install' ? 'merged-bin' : punctuationProfile[field]]));
+const punctuationShortUrl = picker.shortSelectionUrl(shortShareBase, punctuationFilters, false);
+const punctuationTokens = new URL(punctuationShortUrl).searchParams.get('s').split('.');
+assert.strictEqual(decodeURIComponent(punctuationTokens.find(token => token.startsWith('h')).slice(1)),
+  punctuationHardware);
+assert(punctuationTokens.includes('gBoard_Family'), 'Different family and hardware IDs must both survive');
+const punctuationSelection = picker.selectionFromUrl(punctuationShortUrl, [punctuationProfile]);
+assert.deepStrictEqual(punctuationSelection.unavailable, []);
+assert.deepStrictEqual(punctuationSelection.filters, punctuationFilters);
+assert.strictEqual(punctuationSelection.automaticChipFamily, false);
+
+for (const candidateCatalog of [catalog, controlled, currentCatalog, chipCatalog, withMigrations]) {
+  for (const profile of candidateCatalog.profiles) {
+    for (const install of profile.installKinds) {
+      for (const logging of picker.profileFieldValues(profile, 'logging')) {
+        for (const automatic of [false, true]) {
+          const chosen = Object.fromEntries(picker.FACET_FIELDS.map(field =>
+            [field, field === 'install' ? install : field === 'logging' ? logging :
+              picker.profileFieldValues(profile, field)[0] || '']));
+          const compactUrl = picker.shortSelectionUrl(shortShareBase, chosen, automatic);
+          const compactSelection = picker.selectionFromUrl(compactUrl, candidateCatalog.profiles);
+          const legacySelection = picker.selectionFromUrl(
+            picker.selectionUrl(shortShareBase, chosen, automatic), candidateCatalog.profiles);
+          const choiceDescription = profile.target + ' / ' + install + ' / logging=' + logging +
+            ' / automatic=' + automatic;
+          assert.deepStrictEqual(compactSelection.unavailable, [], choiceDescription);
+          assert.deepStrictEqual(compactSelection, legacySelection, choiceDescription);
+          assert(candidateCatalog.profiles.filter(item => picker.profileMatchesFacets(item, compactSelection.filters))
+            .includes(profile), profile.target + ' must remain reachable');
+        }
+      }
+    }
+  }
+}
+console.log('compact picker URL compatibility, validation, escaping and catalog round trips passed');
+
+// Exercise the actual short-route script, including its fallback navigation link.
+const shortRouteHtml = fs.readFileSync(path.join(__dirname, '../docs/p/index.html'), 'utf8');
+const shortRouteScript = shortRouteHtml.match(/<script>([\s\S]*?)<\/script>/);
+assert(shortRouteScript, 'The short picker route must contain its navigation script');
+for (const routeHref of [
+  'https://example.com/MeshCore/p/?s=1.hRAK_4631.rcompanion#installation-methods',
+  'https://example.com/MeshCore/p/?s=1.hRAK_4631&url=https%3A%2F%2Fother.test%2Fevil#installation-methods',
+  'https://example.com/MeshCore/p/',
+]) {
+  const sourceUrl = new URL(routeHref);
+  const expectedDestination = 'https://example.com/MeshCore/firmware_picker/' +
+    sourceUrl.search + sourceUrl.hash;
+  const fallbackLink = {href: '../firmware_picker/'};
+  const redirectedUrls = [];
+  vm.runInNewContext(shortRouteScript[1], {
+    URL,
+    window: {location: {href: routeHref, search: sourceUrl.search, hash: sourceUrl.hash,
+      replace: href => redirectedUrls.push(href)}},
+    document: {getElementById: id => {
+      assert.strictEqual(id, 'picker-link');
+      return fallbackLink;
+    }},
+  });
+  assert.deepStrictEqual(redirectedUrls, [expectedDestination]);
+  assert.strictEqual(fallbackLink.href, expectedDestination);
+  assert.strictEqual(new URL(fallbackLink.href).origin, sourceUrl.origin);
+}
+console.log('short picker route preserves selections and redirects only to the same-origin picker');
+
 // One choice carries OTA, feature set and sensor/storage tradeoffs together.
 // Every existing profile remains reachable and resolves to its original files.
 for (const candidateCatalog of [catalog, controlled, currentCatalog, chipCatalog, withMigrations]) {
@@ -1899,6 +2420,94 @@ assert.strictEqual(JSON.stringify(feedbackCatalog), feedbackSnapshot);
 assert.deepStrictEqual(simpleFilters, {...feedbackFilters, hardwareFamily: 'Heltec_v3'});
 console.log('same-image selectors skip redundant steps while distinct profiles and install routes stay explicit');
 
+// Board-specific help belongs to exact qualified results, never to a broad
+// family filter or an unrelated role which happens to share the board name.
+const boardText = profile => picker.boardNotes(profile).join('\n');
+const boardProfile = target => currentCatalog.profiles.find(profile => profile.target === target);
+assert.deepStrictEqual(picker.boardNotes(null), []);
+assert.deepStrictEqual(picker.boardNotes({}), []);
+for (const board of ['RAK_3401', 'RAK_4631']) {
+  for (const policy of ['full', 'reduced']) {
+    const profile = boardProfile(board + '_repeater_unified_lora_ota-' + policy);
+    assert(profile);
+    const before = JSON.stringify(profile);
+    const notes = boardText(profile);
+    assert(notes.includes('storage automatically'));
+    assert(notes.includes('sensor drivers, not a storage module'));
+    assert(notes.includes('Internal flash accepts in-place deltas only'));
+    assert(notes.includes('matching OTAFIX bootloader'));
+    if (board === 'RAK_4631') {
+      assert(notes.includes('UART2') && notes.includes('UART1') && notes.includes('W25'));
+      assert(notes.includes('Legacy GPS-free Serial1') && notes.includes('Ethernet'));
+    } else {
+      assert(!notes.includes('UART') && !notes.includes('Ethernet'));
+    }
+    assert.strictEqual(JSON.stringify(profile), before, 'boardNotes must not mutate release metadata');
+    for (const change of [
+      {controls: undefined}, {ota: 'none'}, {sensorProfile: undefined},
+      {hardware: 'RAK_4631_ethernet'}, {role: 'companion'},
+      {controls: {...profile.controls, platform: 'ESP32_PLATFORM'}},
+      {controls: {...profile.controls, updateRequirements: undefined}},
+      {controls: {...profile.controls, updateRequirements: {lora: {storage: 'external_only'}}}},
+    ]) {
+      assert.deepStrictEqual(picker.boardNotes({...profile, ...change}), [],
+        'Unqualified adaptive-storage metadata must not create a storage promise');
+    }
+  }
+}
+const boardRak = boardProfile('RAK_4631_repeater_unified_lora_ota-full');
+assert(!boardText({...boardRak, controls: {...boardRak.controls, rs232: false}}).includes('UART2'));
+assert(!boardText({...boardRak, controls: {...boardRak.controls, gps: false}}).includes('UART2'));
+const boardLegacy = rakPartialCatalog.profiles.find(profile => profile.target === rakBridgeBase + '-reduced');
+assert(boardText(boardLegacy).includes('legacy GPS-free Serial1'));
+assert(!boardText(boardLegacy).includes('storage automatically'));
+assert.deepStrictEqual(picker.boardNotes({...boardLegacy,
+  controls: {...boardLegacy.controls, gps: true}}), []);
+const boardEthernet = boardProfile('RAK_4631_repeater_ethernet-full');
+assert(boardText(boardEthernet).includes('separate RAK4631 Ethernet hardware image'));
+assert(!boardText(boardEthernet).includes('storage automatically'));
+assert(!boardText(boardEthernet).includes('Use UART2'));
+for (const [profile, selected] of [[tloraNormalProfile, 'UART/RS-232 choice'],
+                                [tloraObserverProfile, 'MQTT observer choice']]) {
+  assert(boardText(profile).includes('two RAM-safe Full images'));
+  assert(boardText(profile).includes(selected));
+  for (const change of [{controls: undefined}, {feature: 'standard'},
+    {controls: {...profile.controls, espnowBridge: false}},
+    {controls: {...profile.controls, rs232: true, mqtt: true}},
+    {target: profile.target.replace('V2_1_1_6', 'V2_0'), hardware: 'LilyGo_TLora_V2_0'}]) {
+    assert.deepStrictEqual(picker.boardNotes({...profile, ...change}), []);
+  }
+}
+assert(boardText(boardProfile('LilyGo_TLora_V2_1_1_6_repeater-full-logging'))
+  .includes('UART/RS-232 choice'), 'Current UART-only logging recipe must retain the RAM warning');
+for (const profile of tripleCatalog.profiles) {
+  assert(boardText(profile).includes('independent RS-232 and ESP-NOW'));
+  assert.deepStrictEqual(picker.boardNotes({...profile,
+    controls: {...profile.controls, rs232: false}}), []);
+}
+for (const profile of currentCatalog.profiles.filter(profile =>
+  /^heltec_v4(?:_[a-z0-9]+)*_companion_radio_full/i.test(profile.target))) {
+  assert(boardText(profile).includes('Full Companion is LoRa-primary'), profile.target);
+  assert(!boardText(profile).includes('can bridge to ESP-NOW'));
+  assert.deepStrictEqual(picker.boardNotes({...profile, controls: undefined}), []);
+  assert.deepStrictEqual(picker.boardNotes({...profile,
+    controls: {...profile.controls, primaryEspnow: true}}), []);
+}
+const boardV4Gateway = boardProfile('heltec_v4_repeater-full-usb-wifi');
+assert(boardText(boardV4Gateway).includes('can bridge to ESP-NOW'));
+assert.deepStrictEqual(picker.boardNotes({...boardV4Gateway,
+  controls: {...boardV4Gateway.controls, espnowBridge: false}}), []);
+assert.deepStrictEqual(picker.boardNotes({...boardV4Gateway, role: 'companion'}), []);
+assert(boardText(wio).includes('flash-capacity exception'));
+assert(boardText(picker.parseTargetProfile('wio-e5_repeater')).includes('separate ordinary repeater'));
+for (const target of ['wio-e5_companion_radio_usb', 'wio-e5-mini_companion_radio_usb',
+  'wio-e5-mini_repeater', 'wio-e5-dev_repeater', 'RAK_4631_companion_radio_full',
+  'RAK_3401_sensor', 't1000e_companion_radio_full', 'heltec_v4_companion_radio_usb']) {
+  assert.deepStrictEqual(picker.boardNotes(picker.parseTargetProfile(target)), [], target);
+}
+assert.deepStrictEqual(picker.boardNotes({...wio, controls: {platform: 'ESP32_PLATFORM'}}), []);
+console.log('exact-board notes qualify adaptive storage, UART wiring, RAM splits and gateway roles');
+
 // Logging choices remain available beneath the download. Linked choices
 // preselect their exact commands; an unselected logging mode shows off steps.
 for (const logging of ['none', 'usb', 'wifi', 'both']) {
@@ -1950,6 +2559,24 @@ global.document = {
   createTextNode: text => new RuntimeElement('#text', text),
 };
 try {
+  const boardContainer = new RuntimeElement('section');
+  picker.renderProfileCard(boardContainer, boardRak, boardRak.files[0], 'uf2', {}, {});
+  const boardCard = boardContainer.children[0];
+  const boardDetails = boardCard.children.find(node => node.className === 'firmware-picker-board-notes');
+  assert(boardDetails && boardDetails.tagName === 'DETAILS');
+  assert.strictEqual(!!boardDetails.open, false, 'Board notes start collapsed');
+  assert.strictEqual(boardDetails.children[0].tagName, 'SUMMARY');
+  assert.strictEqual(boardDetails.children[0].textContent, 'Board notes');
+  assert(boardCard.children.indexOf(boardDetails) > boardCard.children.findIndex(node =>
+    node.className === 'firmware-picker-actions'), 'Exact download actions stay ahead of board notes');
+  assert(boardCard.children.indexOf(boardDetails) < boardCard.children.findIndex(node =>
+    node.className === 'firmware-picker-steps'), 'Board notes precede installation steps');
+  assert.strictEqual(boardDetails.children.filter(node => node.tagName === 'P').length,
+    picker.boardNotes(boardRak).length);
+  const noNotesContainer = new RuntimeElement('section');
+  picker.renderProfileCard(noNotesContainer, companionEsp32, companionEsp32.files[0], 'bin', {}, {});
+  assert(!noNotesContainer.children[0].children.some(node =>
+    node.className === 'firmware-picker-board-notes'), 'Unaffected boards must not get an empty notes panel');
   const card = new RuntimeElement('article');
   const changes = [];
   picker.renderRuntimeDirections(card, observer, {logging: 'wifi'}, {

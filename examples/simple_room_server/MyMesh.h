@@ -2,6 +2,7 @@
 
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
+#include <helpers/PowerSavingDiagnostics.h>
 #include "RoomServerFeatures.h"
 
 #if defined(NRF52_PLATFORM)
@@ -30,23 +31,22 @@
 #include <helpers/StatsFormatHelper.h>
 #include <helpers/LocalCliOutput.h>
 #include <helpers/ClientACL.h>
+#include <helpers/RoomAccessPolicy.h>
+#include <helpers/RoomHistoryStore.h>
+#include <helpers/RoomBoardStore.h>
 #include <helpers/LogicalMessageCache.h>
 #include <helpers/RemoteCliReplyCache.h>
 #include <helpers/RemoteCliRequest.h>
+#include <helpers/RoomClientPathCommand.h>
 #include <helpers/RegionMap.h>
 #include "FloodRuleEngine.h"
 #include <helpers/RoutingPolicy.h>
 #include <RTClib.h>
 #include <target.h>
 
-#ifndef MESH_ENABLE_TELEMETRY_HISTORY
-  // LoRa-E5-class STM32 room images do not have enough flash for history.
-  #if defined(STM32_PLATFORM)
-    #define MESH_ENABLE_TELEMETRY_HISTORY 0
-  #else
-    #define MESH_ENABLE_TELEMETRY_HISTORY 1
-  #endif
-#endif
+namespace mesh { class RoomJsonWriter; }
+
+#include <helpers/TelemetryHistoryConfig.h>
 
 #ifndef MESH_ENABLE_TELEMETRY_GPS_HISTORY
   #if ENV_INCLUDE_GPS == 1
@@ -59,6 +59,7 @@
 #if MESH_ENABLE_TELEMETRY_HISTORY
 #include <helpers/ExternalVoltageHistory.h>
 #include <helpers/TelemetryHistory.h>
+#include <helpers/NoiseFloorHistorySampler.h>
 #endif
 
 #ifdef WITH_MQTT_BRIDGE
@@ -80,15 +81,18 @@
 #if defined(ESP_PLATFORM) && defined(ADMIN_PASSWORD) && !defined(WEBCONFIG_DISABLED)
 #include "helpers/esp32/WebConfigServer.h"
 #endif
+#ifdef WITH_WEBCONFIG
+#include <ArduinoJson.h>
+#endif
 
 /* ------------------------------ Config -------------------------------- */
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "14 Aug 2026"
+  #define FIRMWARE_BUILD_DATE   "15 Oct 2026"
 #endif
 
 #ifndef FIRMWARE_VERSION
-  #define FIRMWARE_VERSION   "v1.17.1"
+  #define FIRMWARE_VERSION   "v1.18.0"
 #endif
 
 #ifndef LORA_FREQ
@@ -142,6 +146,18 @@
 #define PACKET_LOG_FILE  "/packet_log"
 
 #define MAX_POST_TEXT_LEN    (160-9)
+
+#ifndef ROOM_POSTS_RTC_SLOW_STORAGE
+#define ROOM_POSTS_RTC_SLOW_STORAGE 0
+#endif
+#if ROOM_POSTS_RTC_SLOW_STORAGE != 0 && ROOM_POSTS_RTC_SLOW_STORAGE != 1
+#error "ROOM_POSTS_RTC_SLOW_STORAGE must be 0 or 1"
+#endif
+#if ROOM_POSTS_RTC_SLOW_STORAGE && (!defined(ESP32_PLATFORM) \
+    || (!defined(LILYGO_TLORA) && !defined(TBEAM_SX1262) && !defined(TBEAM_SX1276)) \
+    || !defined(MESHCORE_EXPANDED_PARTITION_PROFILE))
+#error "RTC slow Room posts require a qualified Full TLora or Tbeam ESP32 recipe"
+#endif
 
 struct PostInfo {
   mesh::Identity author;
@@ -211,6 +227,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
 #endif
   ClientACL acl;
   mesh::LogicalMessageCache<ROOM_MESSAGE_CACHE_SIZE> recent_room_posts;
+  mesh::LogicalMessageCache<16> recent_room_polls;
+  mesh::RoomAccessPolicy room_access;
   mesh::RemoteCliReplyCache remote_cli_reply_cache;
   CommonCLI _cli;
   mesh::MeshClockSync _clock_sync;
@@ -224,11 +242,29 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
   uint16_t _num_posted, _num_post_pushes;
   int next_client_idx;  // for round-robin polling
   int next_post_idx;
+#if ROOM_POSTS_RTC_SLOW_STORAGE
+  PostInfo (&posts)[MAX_UNSYNCED_POSTS];
+#else
   PostInfo posts[MAX_UNSYNCED_POSTS];   // cyclic queue
+#endif
+  static_assert(MAX_UNSYNCED_POSTS <= 32, "Room readiness bitmap holds 32 posts");
+  uint32_t post_ready_at[MAX_UNSYNCED_POSTS] = {};
+  uint32_t post_ready_mask = UINT32_MAX;
+  uint32_t last_room_timestamp = 0;
+  mesh::RoomHistoryState room_history_state;
+  bool room_history_enabled = false;
+  bool room_history_available = true;
+  char room_topic[MAX_POST_TEXT_LEN + 1] = {};
+  uint32_t room_topic_revision = 0;
+  uint32_t room_topic_timestamp = 0;
+  unsigned long room_topic_ready_at = 0;
+  bool room_topic_ready = true;
   CayenneLPP telemetry;
 #if MESH_ENABLE_TELEMETRY_HISTORY
   mesh::TelemetryHistory telemetry_history;
   mesh::ExternalVoltageHistory external_voltage_history;
+  mesh::NoiseFloorHistory noise_floor_history;
+  mesh::NoiseFloorHistorySampler noise_floor_sampler;
 #endif
   RegionEntry* load_stack[8];
   RegionEntry* recv_pkt_region;
@@ -259,15 +295,28 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
     ND_SEND_FAILED = 5,
   };
   struct NeighborDiscoverEntry {
+    // Keep every full key in the immutable crypto overlay, even when the
+    // existing JSON/query budget cannot publish that neighbor this pass.
     mesh::Identity id;
+  };
+  struct NeighborDiscoverMetadata {
     uint32_t heard_timestamp;
-    int8_t snr;
-    int16_t rssi;
     uint32_t tag;
-    char scopes[96];
+    int16_t rssi;
+    int8_t snr;
     uint8_t status;
   };
+  static_assert(sizeof(NeighborDiscoverMetadata) == 12,
+                "Discovery metadata must retain its complete compact layout");
   NeighborDiscoverEntry neighbor_discover[MAX_NEIGHBOURS];
+  // Only the publishable prefix (plus the result that detects truncation)
+  // receives scope queries. Keep every neighbor snapshot, without reserving
+  // 96 response bytes for each entry that will never be queried.
+  static constexpr size_t NEIGHBOR_SCOPE_RESULTS =
+      MAX_NEIGHBOURS < MQTTBridge::NEIGHBORS_SCOPE_RESULT_CAPACITY
+          ? MAX_NEIGHBOURS : MQTTBridge::NEIGHBORS_SCOPE_RESULT_CAPACITY;
+  NeighborDiscoverMetadata neighbor_discover_metadata[NEIGHBOR_SCOPE_RESULTS];
+  char neighbor_discover_scopes[NEIGHBOR_SCOPE_RESULTS][96];
   uint8_t neighbor_discover_count;
   uint8_t neighbor_discover_next;
   uint8_t neighbor_discover_publish_count;
@@ -320,6 +369,34 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
 #endif
 #ifdef WITH_WEBCONFIG
   WebConfigServer* _webconfig = nullptr;
+  bool room_web_enabled = false;
+  bool room_web_request_authenticated = false;
+  uint32_t room_web_boot_id = 0;
+  struct RoomWebUser {
+    mesh::Identity id;
+    uint32_t last_seen = 0, last_sequence = 0;
+    uint16_t posts = 0, polls = 0;
+  } room_web_users[8] = {};
+  // Wrong room-browser passwords, shared by every browser token: when the
+  // current thirty-second window began, how many distinct ones failed in it,
+  // and digests of the last four. RAM only; a reboot starts afresh.
+  struct RoomWebPasswordLimit {
+    uint32_t window = 0;
+    uint8_t failures = 0, recent_next = 0;
+    uint8_t recent[4][8] = {};
+  } room_web_password_limit;
+  bool handleRoomWebCommand(const char* command, char* reply);
+  bool processRoomWebMail(const mesh::Identity& author, uint8_t role, uint32_t sequence,
+                         JsonObjectConst input, mesh::RoomJsonWriter& json) __attribute__((noinline));
+  void processRoomWebAdmin(const char* operation, JsonObjectConst input,
+                          mesh::RoomJsonWriter& json) __attribute__((noinline));
+  void processRoomWebBoard(const char* operation, JsonObjectConst input,
+                          mesh::RoomJsonWriter& json) __attribute__((noinline));
+  void processRoomWebBoardRead(JsonObjectConst input, const mesh::RoomBoardIndex& board,
+                              mesh::RoomJsonWriter& json) __attribute__((noinline));
+  void processRoomWebBoardWrite(const char* operation, JsonObjectConst input,
+                               const mesh::RoomBoardIndex& board,
+                               mesh::RoomJsonWriter& json) __attribute__((noinline));
   bool _unconfigured_setup_espnow_suspended = false;
   void suspendUnconfiguredSetupBridges();
   bool startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup);
@@ -331,10 +408,20 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
   void serviceIdleWiFi();
 #endif
 
-  void addPost(ClientInfo* client, const char* postData);
+  bool addPost(ClientInfo* client, const char* postData);
   bool applySavedRadioParams();
-  void storePost(const mesh::Identity& author, const char* postData);
-  void pushPostToClient(ClientInfo* client, PostInfo& post);
+  bool storePost(const mesh::Identity& author, const char* postData);
+  bool snapshotRoomHistory();
+  void loadRoomHistory();
+  bool handleRoomHistoryCommand(const char* command, char* reply);
+  void serviceRoomQuotas();
+  bool pushPostToClient(ClientInfo* client, PostInfo& post);
+  bool pushRoomTextToClient(ClientInfo* client, uint32_t timestamp,
+                            const mesh::Identity& author, const char* text,
+                            uint32_t topic_revision = 0);
+  bool handleRoomTopicCommand(const char* command, char* reply);
+  void activateRoomTopic();
+  void serviceRoomPush();
   uint8_t getUnsyncedCount(ClientInfo* client);
   bool processAck(const uint8_t *data);
   mesh::Packet* createSelfAdvert();
@@ -391,6 +478,7 @@ protected:
   int getAGCResetInterval() const override {
     return ((int)_prefs.agc_reset_interval) * 4000;   // milliseconds
   }
+  bool useAdaptiveAGC() const override { return _prefs.powersaving_enabled != 0; }
   uint8_t getExtraAckTransmitCount() const override {
     return _prefs.multi_acks;
   }
@@ -401,7 +489,10 @@ protected:
   mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
 
   bool allowPacketForward(const mesh::Packet* packet) override;
+  bool allowPacketTransmit(const mesh::Packet* packet) const override;
   void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret, const mesh::Identity& sender, uint8_t* data, size_t len) override;
+  void sendDefaultPasswordWarning(ClientInfo* client, uint32_t sender_timestamp,
+                                  uint8_t path_hash_size);
   int searchPeersByHash(const uint8_t* hash) override ;
   void getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) override;
   void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) override;
@@ -409,6 +500,10 @@ protected:
   void onAckRecv(mesh::Packet* packet, uint32_t ack_crc) override;
   void onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) override;
   void onGroupPacketRecv(mesh::Packet* packet) override;
+  void onSendComplete(mesh::Packet* packet) override;
+  void onSendFail(mesh::Packet* packet) override;
+  void onRadioProfileCopyQueued(mesh::Packet* packet, const mesh::Packet* original,
+                                uint8_t priority) override;
 #if defined(WITH_MQTT_NEIGHBORS)
   void onControlDataRecv(mesh::Packet* packet) override;
 #endif
@@ -424,17 +519,30 @@ protected:
   }
 #endif
 
-  void sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
+  bool sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 #if MESH_ENABLE_TELEMETRY_HISTORY
-  bool handleTelemetryHistoryCommand(const char* command, char* reply);
+  bool handleTelemetryHistoryCommand(const char* command, char* reply,
+                                     size_t reply_capacity = 160, bool include_prompt = true);
   void sampleTelemetryHistory();
+  void sampleNoiseFloorHistory();
 #endif
 
 public:
+  bool supportsFleetControl() const override { return true; }
+#if MESH_ENABLE_FLEET_CONTROL
+  bool getFleetLocation(int32_t& latitude_e6, int32_t& longitude_e6) const override;
+#endif
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
+#if ROOM_POSTS_RTC_SLOW_STORAGE
+  ~MyMesh();
+  MyMesh(const MyMesh&) = delete;
+  MyMesh& operator=(const MyMesh&) = delete;
+  MyMesh(MyMesh&&) = delete;
+  MyMesh& operator=(MyMesh&&) = delete;
+#endif
 
   void begin(FILESYSTEM* fs);
-  void addSystemPost(const char* postData);
+  bool addSystemPost(const char* postData);
 
   const char* getFirmwareVer() override { return FIRMWARE_VERSION; }
   const char* getBuildDate() override { return FIRMWARE_BUILD_DATE; }
@@ -552,6 +660,23 @@ public:
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply,
                      int gpio_client_index = -1,
                      uint8_t gpio_path_hash_size = 1);
+  bool handleClientPathCommand(ClientInfo* client, char* command, char* reply);
+  bool roomClientChatEnabled(ClientInfo* client);
+  bool handleRoomMailClientCommand(ClientInfo* client, const char* text, uint64_t request_id,
+                                   char* reply, size_t capacity);
+  bool handleRoomMailText(ClientInfo* client, mesh::Packet* packet, const uint8_t* secret,
+                          uint8_t* data, size_t len);
+  bool executeClientPathCommand(ClientInfo* client, mesh::RoomClientPathCommand operation,
+                                 const char* body, char* reply);
+  bool setRoomClientPath(ClientInfo* client, const char* which, const char* value, char* reply);
+  bool handleRoomCatchUpCommand(ClientInfo* client, char* command, char* reply);
+  bool applyRoomCatchUpCommand(ClientInfo* client, const char* mode, uint32_t value, char* reply);
+  bool handleRoomManagementCommand(char* command, char* reply);
+#ifdef WITH_WEBCONFIG
+  void writeRoomClientJson(mesh::RoomJsonWriter& json, ClientInfo* client, bool detail);
+#endif
+  bool sendClientReply(ClientInfo* client, mesh::Packet* packet,
+                       unsigned long delay_millis, uint8_t path_hash_size);
   bool _wireless_usb_command = false;
   void handleUsbCommand(char* command, char* reply) {
     _wireless_usb_command = true;
@@ -567,6 +692,12 @@ public:
     return mesh::wireless::WiFi;
   }
   void loop();
+#if defined(OTA_BOOTLOADER_MIGRATION)
+  bool prepareForOtaReboot() override {
+    // Let the normal ACL save finish, including its failure backoff.
+    return dirty_contacts_expiry == 0;
+  }
+#endif
   bool canRecoverUsbLogging() const {
     return dirty_contacts_expiry == 0 && !hasOutbound() && !isAnyTempRadioActive()
         && !hasPendingOtaApply() && !saved_radio_apply_pending
@@ -581,6 +712,22 @@ public:
 
 
 #if defined(WITH_BRIDGE)
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+  void formatEspNowStatus(char* reply, size_t capacity) override {
+    espnow_bridge.formatStatus(reply, capacity);
+  }
+  void formatEspNowStats(const char* page, char* reply, size_t capacity) override {
+    espnow_bridge.formatStats(page, reply, capacity);
+  }
+  bool sendEspNowTest(uint32_t nonce) override {
+    return espnow_bridge.sendTest(nonce);
+  }
+  bool resetEspNowStats() override {
+    espnow_bridge.resetStats();
+    return true;
+  }
+#endif
+
 #if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
   // MQTT's WiFi task associates asynchronously. ESP-NOW must wait for that
   // station interface so it can share the AP-selected channel safely.
@@ -929,6 +1076,11 @@ public:
   }
   void getNodeSnapshot(WebConfigServer::NodeSnapshot& snapshot) override;
   void execCommand(char* cmd, char* reply) override { handleCommand(0, cmd, reply); }
+  bool supportsRoomService() const override { return true; }
+  const uint8_t* roomPageGzip(size_t& length) const override;
+  bool roomRequestAuthenticated() const override { return room_web_request_authenticated; }
+  void processRoomRequest(const uint8_t* token, uint32_t sequence, char* request,
+                          char* response, size_t capacity) override;
   bool supportsCliTerminal() const override { return true; }
   void execAdminCommand(char* cmd, char* reply) override {
     if (strcmp(cmd, "get acl") == 0 || strcmp(cmd, "log") == 0
@@ -971,11 +1123,13 @@ public:
   void buildStatsJson(char* buf, size_t buf_size) override;
 #endif
   uint32_t getPowerSaveSleepSeconds(uint32_t max_secs) const;
+  uint32_t getPowerSaveSleepMilliseconds(uint32_t max_ms) const;
 
   // To check if there is pending work
   bool hasPendingWork() const;
+  mesh::powerdiag::Mask pendingWorkReason() const;
 
 private:
   bool isMillisTimerDue(unsigned long timestamp) const;
-  uint32_t limitSleepToMillisTimer(unsigned long timestamp, uint32_t sleep_secs) const;
+  uint32_t limitSleepToMillisTimer(unsigned long timestamp, uint32_t sleep_ms) const;
 };

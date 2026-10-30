@@ -84,7 +84,12 @@ public:
 
   TraceTestMesh(mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng,
                 mesh::RTCClock& rtc, mesh::PacketManager& mgr, mesh::MeshTables& tables)
-    : mesh::Mesh(radio, ms, rng, rtc, mgr, tables) { }
+    : mesh::Mesh(radio, ms, rng, rtc, mgr, tables) {
+    // Every firmware role begins the mesh before RX/TX. Helpers which invoke
+    // receivePacket() directly need that same retry/timer initialization;
+    // otherwise stack-allocated fixtures read indeterminate retry-slot flags.
+    mesh::Mesh::begin();
+  }
 
   uint8_t airtimeFactor(const mesh::Packet* packet) const {
     return getDirectRetryPacketAirtimeFactor(packet);
@@ -420,6 +425,276 @@ TEST_F(RetryCodingRateTest, DirectTransmissionsKeepTheirScheduleWithFloodRetryOf
     }
   }
 }
+
+class TelemetryRetryMesh : public RetryCodingRateMesh {
+public:
+  using RetryCodingRateMesh::RetryCodingRateMesh;
+  bool direct_enabled = true;
+  bool allowDirectRetry(const mesh::Packet*, const uint8_t*, uint8_t) const override {
+    return direct_enabled;
+  }
+};
+
+class TelemetryDirectRetryTest : public testing::TestWithParam<const char*> {
+protected:
+  TraceTestClock clock;
+  TraceTestRTC rtc;
+  TraceTestRNG rng;
+  RetryCodingRateRadio radio;
+  TraceTestTables tables;
+  StaticPoolPacketManager manager{12};
+  TelemetryRetryMesh node{radio, clock, rng, rtc, manager, tables};
+  const uint8_t path[2] = {0x12, 0x34};
+
+  void SetUp() override {
+    node.begin();
+    node.direct_attempts = 2;
+  }
+
+  std::vector<uint8_t> snapshot(uint8_t count = 4) const {
+    const char* magic = GetParam();
+    const bool external = memcmp(magic, "IVB1", 4) == 0;
+    const uint8_t bits = external ? 15 : magic[0] == 'N' ? 5 : 8;
+    const size_t header = external ? 20 : 19;
+    std::vector<uint8_t> payload(header + (count * bits + 7U) / 8U, 0x51);
+    memcpy(payload.data(), magic, 4);
+    payload[16] = magic[0] == 'N' ? 15 : 30;
+    payload[17] = 0;
+    payload[18] = external ? 1 : count;
+    if (external) payload[19] = count;
+    return payload;
+  }
+
+  mesh::Packet* queue(const std::vector<uint8_t>& payload, uint8_t hops = 2) {
+    auto* packet = node.createRawData(payload.data(), payload.size());
+    EXPECT_NE(nullptr, packet);
+    if (packet && !node.sendDirect(packet, path, hops)) {
+      ADD_FAILURE() << "Could not queue telemetry packet";
+      return nullptr;
+    }
+    return packet;
+  }
+
+  void transmitNext() {
+    clock.now += 10000;
+    node.loop();
+    ASSERT_TRUE(radio.sending);
+    radio.complete = true;
+    ++clock.now;
+    node.loop();
+    ASSERT_FALSE(radio.sending);
+  }
+
+  void expectIdle() {
+    clock.now += 10000;
+    node.loop();
+    EXPECT_FALSE(radio.sending);
+    EXPECT_EQ(0, manager.getOutboundTotal());
+    EXPECT_EQ(12, manager.getFreeCount());
+  }
+};
+
+TEST_P(TelemetryDirectRetryTest, MissingEchoUsesTheDirectRetryBudgetAndCodingRates) {
+  auto* packet = queue(snapshot());
+  ASSERT_NE(nullptr, packet);
+  const mesh::Packet original = *packet;
+  for (uint8_t attempt = 0; attempt <= node.direct_attempts; ++attempt) {
+    transmitNext();
+    if (attempt == node.direct_attempts) continue;
+    ASSERT_EQ(1, manager.getOutboundTotal());
+    const auto* retry = manager.getOutboundByIdx(0);
+    EXPECT_EQ(original.header, retry->header);
+    EXPECT_EQ(original.payload_len, retry->payload_len);
+    EXPECT_EQ(0, memcmp(original.payload, retry->payload, original.payload_len));
+    EXPECT_EQ(original.path_len, retry->path_len);
+    EXPECT_EQ(0, memcmp(path, retry->path, sizeof(path)));
+    EXPECT_EQ(original.radio_profile, retry->radio_profile);
+  }
+  expectIdle();
+  EXPECT_EQ((std::vector<uint8_t>{5, 5, 7}), radio.transmitted_crs);
+}
+
+TEST_P(TelemetryDirectRetryTest, RetryIsAllocatedOnlyAfterTheRadioCompletesSending) {
+  ASSERT_NE(nullptr, queue(snapshot()));
+  ++clock.now;
+  node.loop();
+  ASSERT_TRUE(radio.sending);
+  EXPECT_EQ(0, manager.getOutboundTotal());
+  clock.now += 10; // still within this fake radio's 15 ms TX timeout
+  node.loop();
+  EXPECT_TRUE(radio.sending);
+  EXPECT_EQ(0, manager.getOutboundTotal());
+  EXPECT_EQ(1U, radio.transmitted_crs.size());
+  radio.complete = true;
+  ++clock.now;
+  node.loop();
+  EXPECT_FALSE(radio.sending);
+  ASSERT_EQ(1, manager.getOutboundTotal());
+  transmitNext();
+  EXPECT_EQ(2U, radio.transmitted_crs.size());
+}
+
+TEST_P(TelemetryDirectRetryTest, MatchingDownstreamEchoCancelsTheQueuedRetry) {
+  auto* packet = queue(snapshot());
+  ASSERT_NE(nullptr, packet);
+  mesh::Packet echo = *packet;
+  transmitNext();
+  ASSERT_EQ(1, manager.getOutboundTotal());
+  echo.setPathHashCount(1);
+  echo.path[0] = path[1];
+  node.receivePacket(&echo);
+  expectIdle();
+  EXPECT_EQ((std::vector<uint8_t>{5}), radio.transmitted_crs);
+}
+
+TEST_P(TelemetryDirectRetryTest, RelaysRetryTheRemainingRouteForEveryHashWidth) {
+  node.forwardFloods = true;
+  const uint8_t route[] = {0x12, 0x13, 0x14, 0x34, 0x35, 0x36, 0x56, 0x57, 0x58};
+  for (uint8_t width : {1, 2, 3}) {
+    SCOPED_TRACE(width);
+    const auto payload = snapshot();
+    auto* incoming = node.createRawData(payload.data(), payload.size());
+    ASSERT_NE(nullptr, incoming);
+    incoming->header |= ROUTE_TYPE_DIRECT;
+    incoming->setPathHashSizeAndCount(width, 3);
+    memcpy(incoming->path, route, width * 3);
+    memcpy(node.self_id.pub_key, route, width);
+    ASSERT_NE(ACTION_RELEASE, node.receivePacket(incoming));
+    EXPECT_TRUE(incoming->forwarded);
+    EXPECT_EQ(width, incoming->getPathHashSize());
+    EXPECT_EQ(2, incoming->getPathHashCount());
+    EXPECT_EQ(0, memcmp(route + width, incoming->path, width * 2));
+    const mesh::Packet forwarded = *incoming;
+    ASSERT_TRUE(node.sendPacket(incoming, 0));
+    transmitNext();
+    ASSERT_EQ(1, manager.getOutboundTotal());
+    const auto* retry = manager.getOutboundByIdx(0);
+    EXPECT_EQ(forwarded.path_len, retry->path_len);
+    EXPECT_EQ(0, memcmp(forwarded.path, retry->path, width * 2));
+    transmitNext();
+    auto echo = forwarded;
+    echo.setPathHashCount(1);
+    memcpy(echo.path, route + width * 2, width);
+    node.receivePacket(&echo);
+    expectIdle();
+
+    auto* last_hop = node.createRawData(payload.data(), payload.size());
+    ASSERT_NE(nullptr, last_hop);
+    last_hop->header |= ROUTE_TYPE_DIRECT;
+    last_hop->setPathHashSizeAndCount(width, 1);
+    memcpy(last_hop->path, route, width);
+    ASSERT_NE(ACTION_RELEASE, node.receivePacket(last_hop));
+    EXPECT_EQ(0, last_hop->getPathHashCount());
+    ASSERT_TRUE(node.sendPacket(last_hop, 0));
+    transmitNext();
+    expectIdle();
+  }
+  EXPECT_EQ(9U, radio.transmitted_crs.size()); // initial, retry, final relay per width
+}
+
+TEST_P(TelemetryDirectRetryTest, EchoMustMatchPayloadRadioAndForwardProgress) {
+  auto* packet = queue(snapshot());
+  ASSERT_NE(nullptr, packet);
+  const mesh::Packet original = *packet;
+  transmitNext();
+  ASSERT_EQ(1, manager.getOutboundTotal());
+
+  auto wrong_payload = original;
+  wrong_payload.setPathHashCount(1);
+  wrong_payload.payload[wrong_payload.payload_len - 1] ^= 1;
+  node.receivePacket(&wrong_payload);
+  EXPECT_EQ(1, manager.getOutboundTotal());
+
+  auto wrong_radio = original;
+  wrong_radio.setPathHashCount(1);
+  wrong_radio.radio_profile = 1;
+  node.receivePacket(&wrong_radio);
+  EXPECT_EQ(1, manager.getOutboundTotal());
+
+  auto no_progress = original;
+  node.receivePacket(&no_progress);
+  EXPECT_EQ(1, manager.getOutboundTotal());
+
+  transmitNext();
+  EXPECT_EQ((std::vector<uint8_t>{5, 5}), radio.transmitted_crs);
+  auto valid_echo = original;
+  valid_echo.setPathHashCount(0);
+  node.receivePacket(&valid_echo);
+  expectIdle();
+}
+
+TEST_P(TelemetryDirectRetryTest, ZeroHopRemainsASingleTransmission) {
+  ASSERT_NE(nullptr, queue(snapshot(), 0));
+  transmitNext();
+  expectIdle();
+  EXPECT_EQ((std::vector<uint8_t>{5}), radio.transmitted_crs);
+}
+
+TEST_P(TelemetryDirectRetryTest, DirectRetrySettingStillGatesTelemetry) {
+  node.direct_enabled = false;
+  ASSERT_NE(nullptr, queue(snapshot()));
+  transmitNext();
+  expectIdle();
+  EXPECT_EQ((std::vector<uint8_t>{5}), radio.transmitted_crs);
+}
+
+TEST_P(TelemetryDirectRetryTest, LargestSnapshotOfEachFamilyCanRetry) {
+  const char* magic = GetParam();
+  const uint8_t maximum = magic[0] == 'N' ? 255 : magic[0] == 'I' ? 64 : 165;
+  auto* packet = queue(snapshot(maximum));
+  ASSERT_NE(nullptr, packet);
+  mesh::Packet echo = *packet;
+  transmitNext();
+  ASSERT_EQ(1, manager.getOutboundTotal());
+  transmitNext();
+  EXPECT_EQ((std::vector<uint8_t>{5, 5}), radio.transmitted_crs);
+  echo.setPathHashCount(1);
+  node.receivePacket(&echo);
+  expectIdle();
+}
+
+TEST_P(TelemetryDirectRetryTest, MalformedAndUnrelatedCustomPayloadsDoNotRetry) {
+  const auto valid = snapshot();
+  std::vector<std::vector<uint8_t>> invalid;
+  invalid.emplace_back(valid.begin(), valid.begin() + 3);
+  invalid.push_back(valid);
+  invalid.back().pop_back();
+  invalid.push_back(valid);
+  invalid.back().push_back(0);
+  invalid.push_back(valid);
+  invalid.back()[16] = invalid.back()[17] = 0;
+  invalid.push_back(valid);
+  invalid.back()[3] = '2';
+  invalid.push_back(valid);
+  invalid.back()[0] = 'X';
+  invalid.push_back(valid);
+  invalid.back()[1] = 'X';
+  invalid.push_back(valid);
+  invalid.back()[2] = 'X';
+  const bool external = GetParam()[0] == 'I';
+  invalid.push_back(valid);
+  invalid.back()[external ? 19 : 18] = 0;
+  invalid.back().resize(external ? 20 : 19);
+  if (external) {
+    invalid.push_back(valid);
+    invalid.back()[18] = 0;
+    invalid.push_back(valid);
+    invalid.back()[19] = 65;
+  } else if (GetParam()[0] == 'T') {
+    invalid.push_back(valid);
+    invalid.back()[18] = 166;
+  }
+  for (size_t i = 0; i < invalid.size(); ++i) {
+    SCOPED_TRACE(i);
+    ASSERT_NE(nullptr, queue(invalid[i]));
+    transmitNext();
+    expectIdle();
+  }
+  EXPECT_EQ(invalid.size(), radio.transmitted_crs.size());
+}
+
+INSTANTIATE_TEST_SUITE_P(TelemetryFamilies, TelemetryDirectRetryTest,
+                        testing::Values("TTB1", "TVB1", "IVB1", "N1B1", "N2B1"));
 
 static mesh::Packet makeOtaManifestFragment(uint8_t format_version) {
   mesh::Packet packet = makeFloodPacket(PAYLOAD_TYPE_OTA);

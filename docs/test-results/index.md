@@ -7,9 +7,25 @@
 Completed validation reports, experiments, and test guides are collected here. Older page addresses redirect to these copies. Results are tied to the hardware and firmware versions named in each report; they do not automatically qualify a newer build.
 
 - [1.17.1.8 Preview 1 qualification and raw reports](preview-1.17.1.8/index.md)
+- [PR17–21 remaining hardware acceptance checks](hardware_validation_checklist.md#pr1721-follow-up-qualification-2026-10-18-utc)
 
 ## Radio and RF
 
+- [Saved SPI option 9: native, build and V3/V4 persistence checks, 2026-10-23](saved_spi9_2026-10-23.md)
+- [Heltec V3/V4 8 MHz versus 8.889 MHz radio switching measurements, 2026-10-23](esp32_spi_clock_retune_2026-10-23.md)
+- [Five-board eight-peer WiFi UDP bridge hardware qualification, 2026-10-22](udp_bridge_hardware_2026-10-22.md)
+- [Eight-peer WiFi UDP bridge: V3/V4/R8 Full build and host validation, 2026-10-22](udp_bridge_2026-10-22.md)
+- [RS-232 bridge diagnostics: host/build checks and existing RAK Full RAM failure, 2026-10-22](rs232_bridge_diagnostics_2026-10-22.md)
+- [ESP-NOW bridge diagnostics: V4 and V4 R8 TFT Full build/host validation, 2026-10-22](espnow_bridge_diagnostics_2026-10-22.md)
+- [V3/V4/T096 radio2 with two fixed witnesses, matched SF7/BW62.5 at preamble 32, 2026-10-22](radio2_simultaneous_receivers_2026-10-22.md)
+- [SolarXiao Room Server power profiles and history build/host validation, 2026-10-21](solarxiao_room_2026-10-21.md)
+- [SolarXiao three power profiles build/host validation, 2026-10-21](solarxiao_basic_2026-10-21.md)
+- [SolarXiao automatic detection and Base support build/host validation, 2026-10-21](solarxiao_auto_2026-10-21.md)
+- [SolarXiao Advanced carrier profile build/host validation, 2026-10-21](solarxiao_advanced_2026-10-21.md)
+- [SolarXiao native MPPT and battery controls, 2026-10-21](solarxiao_power_2026-10-21.md)
+
+- [SolarXiao INA260 battery telemetry and carrier I2C fix, 2026-10-21](solarxiao_ina260_2026-10-21.md)
+- [SolarXiao 33S HEAD bootloader, LoRa OTA and repeater acceptance, 2026-10-21](solarxiao_33s_head_bootloader_lora_ota_2026-10-21.md)
 - [SX1262 channel-scanning hardware results](cad_scan_validation.md)
 - [CW and CW2 validation](carrier_wave_validation.md)
 - [Double center-frequency write: V4 transmitter / XIAO receiver](double_frequency_v4_validation.md)
@@ -23,6 +39,8 @@ Completed validation reports, experiments, and test guides are collected here. O
 - [Shared radio/radio2 chirp timing and preamble warnings](radio_chirp_math_validation.md)
 - [Automatic dwell policy: 4.6 chirps on both profiles](radio_dwell_policy_validation.md)
 - [SX1262 profile-switch validation](radio_profile_switch_validation.md)
+- [T-Deck radio2 scheduling during display redraw](tdeck_radio2_display.md)
+- [T-Deck retune command, priority and SPI experiments](tdeck_radio2_retune_experiments.md)
 - [Dual-profile receive validation](radio_profiles_validation.md)
 - [Radio receive calibration and recovery](radio_receive_calibration.md)
 - [Separated radios, normal XIAO RX gain, and unchanged-modulation timing](separated_radio_modulation_cache_validation.md)
@@ -40,6 +58,11 @@ Completed validation reports, experiments, and test guides are collected here. O
 
 ## Companion, USB, BLE, and display
 
+- [Mercerwood qualification: 12 active radios, 2026-10-20](hardware_validation_mercerwood_1_18_0_1_2026-10-20.md)
+- [Mercerwood Companion qualification follow-up, 2026-10-19](companion_qualification_followup_2026-10-19.md)
+- [ESP32 management password hardware check, 2026-10-19](esp32_management_password_2026-10-19.md)
+- [Companion lost-status replies](companion_lost_reply.md)
+- [Sensor dog tracker checks](sensor_dog_tracker.md)
 - [Contact-cache and NimBLE RAM qualification](companion_contact_cache_results.md)
 - [USB Companion ASCII default validation](companion_usb_ascii_validation.md)
 - [USB Companion client compatibility](companion_usb_client_validation.md)
@@ -54,6 +77,14 @@ Completed validation reports, experiments, and test guides are collected here. O
 
 ## Build, storage, memory, and checklists
 
+- [RAK4631 Full/Reduced RAM repair and RAK3401 Room Server radio/sleep qualification, 2026-10-22](rak_release_fixes_2026-10-22.md)
+- [Shared battery ADC calibration validation, 2026-10-22](battery_calibration_2026-10-22.md)
+- [Heltec V2 BLE RAM reserve repair, 2026-10-22](heltec_v2_ble_memory_2026-10-22.md)
+- [ESP32 Bluetooth shutdown and radio2 CPU idle, 2026-10-21](esp32_ble_radio2_sleep_2026-10-21.md)
+- [RAK3401 all firmware CPU sleep checks, 2026-10-21](rak3401_all_roles_cpu_sleep_2026-10-21.md)
+- [Shared contact RAM savings and RAK4631 Full qualification, 2026-10-19](contact_memory_2026-10-19.md)
+- [Heltec V3 Full memory qualification, 2026-10-19](heltec_v3_full_memory_2026-10-19.md)
+- [Personal room mailbox checks](room_mailboxes.md)
 - [Stock nRF52 bootloader version audit](bootloader_version_stock_audit.md)
 - [CLI setting dispatch audit](cli_settings_audit.md)
 - [Hardware validation checklist](hardware_validation_checklist.md)

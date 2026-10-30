@@ -6,7 +6,7 @@
 #include "IkokaNrf52Board.h"
 
 void IkokaNrf52Board::begin() {
-  NRF52Board::begin();
+  NRF52BoardDCDC::begin();
 
   // ensure we have pull ups on the screen i2c, this isn't always available
   // in hardware and it should only be 20k ohms. Disable the pullups if we
@@ -17,8 +17,10 @@ void IkokaNrf52Board::begin() {
   #endif
 
   pinMode(PIN_VBAT, INPUT);
+  // Seeed's XIAO charging guidance requires READ_BAT_ENABLE to stay LOW.
+  // Preload the safe latch before enabling the output; do not pulse HIGH.
+  digitalWrite(VBAT_ENABLE, LOW);
   pinMode(VBAT_ENABLE, OUTPUT);
-  digitalWrite(VBAT_ENABLE, HIGH);
 
   // required button pullup is handled as part of button initilization
   // in target.cpp

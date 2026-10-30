@@ -149,7 +149,7 @@ class RS232RuntimeTests(unittest.TestCase):
                 for uart in (0, 1):
                     image = work / f"{origin}-{uart}.bin"
                     run(origin, "write", image, 1, 0, uart)
-                    self.assertEqual(len(image.read_bytes()), 877)
+                    self.assertEqual(len(image.read_bytes()), 887)
                     for target in ("normal", "dedicated"):
                         with self.subTest(origin=origin, target=target, uart=uart):
                             run(target, "read", image, uart, 0, uart)
@@ -208,6 +208,7 @@ class RS232RuntimeTests(unittest.TestCase):
             "AbstractBridge* activeBridge() {", "const AbstractBridge* activeBridge() const {",
             "RS232Bridge* createRS232Bridge()", "bool beginRS232Bridge()",
             "bool endRS232Bridge()", "bool rs232BridgeEnabled() const",
+            "void serviceRs232BridgePower()", "void formatRs232Status(char* reply)",
             "bool isRs232BridgeRunning() const override", "bool setRs232BridgeState(bool enable)",
             "bool restartRs232Bridge()", "bool isBridgeRunning() const override",
             "bool setBridgeState(bool enable) override", "bool restartBridge() override",
@@ -221,13 +222,14 @@ class RS232RuntimeTests(unittest.TestCase):
         for name in ("logRx", "logTx"):
             start = implementation.index("void MyMesh::" + name + "(")
             start = implementation.index("#ifdef WITH_MQTT_BRIDGE\n", start)
-            end = implementation.index("  if (_logging)", start)
+            # Keep the complete bridge guards, stopping before file logging's guard.
+            end = implementation.index("#if MESH_ENABLE_PACKET_FILE_LOGGING\n", start)
             routing[name] = implementation[start:end]
         loop_start = implementation.index("#if defined(WITH_ESPNOW_BRIDGE)",
                                           implementation.index("MyMesh::servicePostMeshLoop()"))
         loop_end = implementation.index("  if (next_flood_advert", loop_start)
         pending_start = implementation.index("#if defined(WITH_BRIDGE)",
-                                             implementation.index("bool MyMesh::hasPendingWork()"))
+                                             implementation.index("mesh::powerdiag::Mask MyMesh::pendingWorkReason()"))
         pending_end = implementation.index("  if (radio_driver.isWatchdogObserving()", pending_start)
         # Preprocess complete dispatch methods before extracting branches.
         # Their feature guards cross the closing braces between else-if cases.

@@ -1,12 +1,12 @@
 #pragma once
 
-#if defined(STM32_PLATFORM) && defined(__GNUC__)
+#if (defined(STM32_PLATFORM) || defined(NRF52_PLATFORM)) && defined(__GNUC__)
 #include "NodePrefs.h"
 #include <cstddef>
 #include <type_traits>
 
 #if defined(TBEAM_1W) || defined(RP2040_PLATFORM)
-#error "The compact STM32 preference table needs an explicit board layout"
+#error "The compact preference table needs an explicit board layout"
 #endif
 
 namespace mesh {
@@ -17,7 +17,7 @@ enum : uint8_t { PrefsLat = 253, PrefsLon = 254, PrefsPad = 255 };
 static constexpr size_t MANDATORY_FIELDS = 21;
 
 // GNU supports offsetof for this adapter-bearing, non-standard-layout class.
-// Use it only on the STM32 GNU ABI, and verify every individual value field;
+// Use it only on the supported ARM GNU ABIs, and verify every individual value field;
 // neither the class padding nor either runtime adapter is a wire image.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
@@ -29,8 +29,8 @@ constexpr PrefField prefField() {
   static_assert(Offset < PrefsLat && Length <= UINT8_MAX,
                 "compact preference field bounds");
   static_assert(Offset + Length <=
-      __builtin_offsetof(CompanionNodePrefs, usb_debug_enabled)
-          + sizeof(CompanionNodePrefs::usb_debug_enabled),
+      __builtin_offsetof(CompanionNodePrefs, lost_reply)
+          + sizeof(CompanionNodePrefs::lost_reply),
       "preference field stays before runtime adapters");
   static_assert(Offset + Length <= sizeof(CompanionNodePrefs),
                 "preference field stays inside its object");
@@ -67,7 +67,11 @@ static constexpr PrefField PREF_FIELDS[] = {
   PREF_FIELD(advert_loc_policy, 1),
   PREF_FIELD(multi_acks, 1),
   PREF_FIELD(path_hash_mode, 1),
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  PREF_FIELD(leds_quiet, 1),
+#else
   prefSpecial<PrefsPad, 1>(),
+#endif
   PREF_FIELD(ble_pin, 4),
   PREF_FIELD(buzzer_quiet, 1),
   PREF_FIELD(gps_enabled, 1),
@@ -105,7 +109,7 @@ static constexpr PrefField PREF_FIELDS[] = {
   PREF_FIELD(direct_tx_delay_factor, 4),
   PREF_FIELD(interference_threshold, 1),
   PREF_FIELD(agc_reset_interval, 1),
-  PREF_FIELD(tz_offset, 1),
+  PREF_FIELD(tz_offset_legacy, 1),
   PREF_FIELD(flood_retry_attempts, 1),
   PREF_FIELD(flood_retry_max_path, 1),
   PREF_FIELD(flood_retry_group_max_path, 1),
@@ -114,6 +118,7 @@ static constexpr PrefField PREF_FIELDS[] = {
   PREF_FIELD(bluetooth_enabled, 1),
   PREF_FIELD(gps_sync_interval_hours, 2),
   PREF_FIELD(usb_debug_enabled, 1),
+  PREF_FIELD(lost_reply, 1),
 };
 #undef PREF_FIELD
 #pragma GCC diagnostic pop
@@ -122,16 +127,18 @@ constexpr size_t wireSize(size_t count) {
   return count == 0 ? 0 : PREF_FIELDS[count - 1].length + wireSize(count - 1);
 }
 static_assert(wireSize(MANDATORY_FIELDS) == 84, "published mandatory image size");
-static_assert(wireSize(FIELD_COUNT) == 235, "published STM32 preference image size");
+static_assert(wireSize(FIELD_COUNT) == 236, "published preference prefix size");
 
 static const void* prefValue(const PrefField& field,
                             const CompanionNodePrefs& values,
                             const double& lat, const double& lon,
-                            const uint8_t pad[4]) {
+                            const uint8_t pad[4],
+                            const int8_t* timezone = nullptr) {
   if (field.offset == PrefsLat) return &lat;
   if (field.offset == PrefsLon) return &lon;
   if (field.offset == PrefsPad) return pad;
-  return reinterpret_cast<const uint8_t*>(&values) + field.offset;
+  const void* value = reinterpret_cast<const uint8_t*>(&values) + field.offset;
+  return timezone && value == &values.tz_offset_legacy ? timezone : value;
 }
 
 }  // namespace companion_prefs

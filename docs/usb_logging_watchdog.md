@@ -60,6 +60,21 @@ configuration still use primary CDC (`*-if00`), whose stats queries do not
 prove a logging reader. Existing single-port bridges needing identity/CLI
 replies still require separate control-port support.
 
+The default nRF52 framework logger follows the same runtime USB logging and
+debug settings. Bluefruit flash-event diagnostics use the selected bounded
+logging stream, including dedicated CDC on Full Companion, so saving contacts
+does not insert ASCII into the primary Companion protocol. A disconnected or
+full logging endpoint drops diagnostic output without falling back to the
+control port. Explicit framework UART and RTT logger selections keep their
+existing destinations.
+
+On ESP32 USB-Serial/JTAG builds, ESP-IDF diagnostics also follow both
+`usb.logging` and `usb.debug`. Driver tasks submit bounded text; the USB owner
+emits it through the same session and writer guards as functional output.
+Logging-off, host changes and congestion discard pending diagnostics instead
+of falling back to the raw SDK console. Fragmented diagnostics from concurrent
+SDK tasks remain best effort. UART and native TinyUSB routes are unchanged.
+
 ## Recovery timing and safety
 
 For a physical host/reader outage, or pending TX with no real completion,
@@ -80,11 +95,19 @@ and the USB recovery grace periods. Tiers grow after reset authorization:
 stats outage cannot shorten a later physical fault's interval. Ten minutes
 of healthy monitored operation resets a raised tier to one hour.
 
-Native TX-completion events are the progress evidence. Queueing, purging,
+Native TX-completion events are progress evidence. On the pinned ESP32 HWCDC
+backend, an exclusive check of both the empty software queue and acknowledged
+hardware FIFO also completes a pending write: the SDK does not emit another
+TX event for the final FIFO acknowledgement. An empty software queue alone
+does not establish completion. Queueing, purging,
 reinitializing, or accepting the optional bounded minute probe is not proof
 of recovery. The watchdog never waits for a host. USB connection reports,
 especially HWCDC's host/reader flags, are SDK approximations and do not reliably
 identify an open TTY process.
+HWCDC therefore uses physical host presence with a 100 ms continuous-loss
+check rather than its unreliable open-reader heuristic. A brief status dip
+does not revoke a valid stats lease. A real USB bus reset invalidates the lease
+immediately; sustained host loss and actual TX stalls remain observable.
 
 Recovery waits for active Binary USB clients, mOTA/update owners, unsaved
 contacts, radio tests/calibration/temporary-radio operations, functional CLI
@@ -172,6 +195,13 @@ recovery and no verified persistence, ages, counters, or event. It preserves
 published hardware/logging/mode intent and protects a possibly active reader.
 This temporary fallback cannot authorize a reset. The separate awake hint keeps
 an already durable watchdog policy serviced while publication is busy.
+
+On nRF52, the CPU can wait for interrupts between watchdog checks in both
+`on` and `auto` modes. Its clock and wake interrupts continue running, so this
+does not restart recovery deadlines or disable the watchdog. Active USB work
+and unfinished transport detach/reattach still prevent that idle wait. Other
+platforms retain their existing sleep guard, including protection against
+sleep modes that restart the application clock.
 
 ## Verification
 

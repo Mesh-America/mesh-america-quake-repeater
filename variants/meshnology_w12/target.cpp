@@ -1,13 +1,16 @@
 #include <Arduino.h>
 #include "target.h"
+#include <helpers/radiolib/TunableRadioHal.h>
 
 MeshnologyW12Board board;
 
 #if defined(P_LORA_SCLK)
   static SPIClass spi;
-  RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi);
+  static TunableRadioHal radio_hal(spi, 2000000);
+  RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #else
-  RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+  static TunableRadioHal radio_hal(SPI, 2000000, true);
+  RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #endif
 
 WRAPPER_CLASS radio_driver(radio, board);
@@ -39,7 +42,7 @@ const uint32_t rfswitch_dios[] = {
 static const Module::RfSwitchMode_t rfswitch_table[] = {
   //                    DIO5   DIO6  DIO9  DIO10  DIO11
   { LR2021::MODE_STBY,  { LOW,  LOW,  LOW,  LOW,  LOW  } },  // everything off
-  { LR2021::MODE_RX,    { LOW,  LOW,  LOW,  LOW,  HIGH } },  // rx_lf: GC1109 LNA
+  { LR2021::MODE_RX,    { LOW,  LOW,  LOW,  HIGH, HIGH } },  // rx_lf: GC1109 LNA (CPS is don't-care in RX)
   { LR2021::MODE_TX,    { LOW,  LOW,  HIGH, HIGH, HIGH } },  // tx_lf: GC1109 full PA
   { LR2021::MODE_RX_HF, { LOW,  HIGH, LOW,  LOW,  LOW  } },  // rx_hf: 2G4 LNA, GC1109 off
   { LR2021::MODE_TX_HF, { HIGH, LOW,  LOW,  LOW,  LOW  } },  // tx_hf: 2G4 PA,  GC1109 off

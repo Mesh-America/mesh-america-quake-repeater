@@ -1,12 +1,21 @@
 #include "Mesh.h"
 #include <helpers/ManagementReport.h>
 #include <SHA256.h>
+#ifdef ESP_PLATFORM
+#include <helpers/esp32/ManagementPassword.h>
+#endif
 #include "helpers/ota/OtaFormat.h"   // request types used by TempRadio relay-pressure tracking
 //#include <Arduino.h>
 #if defined(ENABLE_OTA)
 #include "helpers/ota/OtaContext.h"   // OTA mesh-integration is centralized here so every role gets it
 #include "helpers/ota/OtaSpeedConfig.h"
 #include "helpers/ota/OtaProtocol.h"  // decode_adv -> the `ota neighbors` discovery table
+#if defined(OTA_BOOTLOADER_MIGRATION)
+#include "helpers/ota/BootloaderMigration.h"
+#endif
+#if MESH_ENABLE_OTA_KISS_DIRECT
+#include "helpers/ota/OtaDirectWire.h"
+#endif
 #if !defined(OTA_SEEDER_ONLY)
 #include "helpers/ota/OtaSelf.h"      // ota_self_firmware -> auto-advertise our own image
 #endif
@@ -50,6 +59,29 @@ static bool hasValidEncryptedPayloadLength(uint16_t payload_len, uint16_t clear_
   const uint16_t overhead = clear_prefix_len + CIPHER_MAC_SIZE;
   if (payload_len < overhead + CIPHER_BLOCK_SIZE) return false;
   return ((payload_len - overhead) % CIPHER_BLOCK_SIZE) == 0;
+}
+
+bool Mesh::isTelemetryHistoryPayload(const Packet* packet) {
+  const uint8_t* data = packet->payload;
+  const uint16_t length = packet->payload_len;
+  if ((uint16_t)(length - 20U) > MAX_PACKET_PAYLOAD - 20U
+      || data[2] != 'B' || data[3] != '1'
+      || (data[16] | data[17]) == 0 || data[18] == 0) return false;
+
+  // Recognize complete B1 history envelopes, not arbitrary custom traffic
+  // which happens to begin with a telemetry tag.
+  const uint16_t count = data[18];
+  if (data[0] == 'T' && (data[1] == 'T' || data[1] == 'V')) {
+    // The payload-size bound also caps these one-byte samples at 165.
+    return length == 19U + count;
+  }
+  if (data[0] == 'I' && data[1] == 'V') {
+    const uint16_t samples = data[19];
+    return samples != 0 && samples <= 64
+        && length == 20U + (samples * 15U + 7U) / 8U;
+  }
+  return data[0] == 'N' && (uint8_t)(data[1] - '1') <= 1
+      && length == 19U + (count * 5U + 7U) / 8U;
 }
 
 static uint8_t decodeTraceHashSize(uint8_t flags, uint8_t route_bytes) {
@@ -173,7 +205,8 @@ static uint8_t otaTrafficPriority(const uint8_t* msg, uint16_t len) {
 
 static bool isPacedOtaResponse(const uint8_t* msg, uint16_t len) {
   if (!msg || len == 0) return false;
-  return msg[0] == ota::OTA_DATA || msg[0] == ota::OTA_PROOF;
+  return msg[0] == ota::OTA_DATA || msg[0] == ota::OTA_PROOF
+      || msg[0] == ota::OTA_LEAVES || msg[0] == ota::OTA_MANIFEST;
 }
 
 #if defined(ENABLE_OTA)
@@ -191,10 +224,19 @@ static int queuedPacedOtaResponses(PacketManager* manager) {
 }
 
 // Adapter so the portable OtaManager can emit packets through the mesh (message-priority, hop-capped).
-// DATA/PROOF admission is credit-limited; false leaves the manager's response descriptor intact.
+// Transfer response admission is credit-limited; false retains the response descriptor.
 bool Mesh::otaSendAdapter(void* ctx, const uint8_t* msg, uint16_t len, bool /*flood*/) {
   Mesh* m = (Mesh*)ctx;
   if (!m->isAnyTempRadioActive()) return false;
+  const auto* context = ota::ota_context_if_active();
+  const auto route = context ? context->manager.replyRoute() : ota::OtaReplyRoute{};
+#if MESH_ENABLE_OTA_KISS_DIRECT
+  if (route.direct) {
+    // KISS/raw frames bypass the routed Packet pool entirely. The shared
+    // single-frame owner retains exact profile affinity until actual TxDone.
+    return m->queueDirectOtaRadioFrame(msg, len, route.profile, route.generation);
+  }
+#endif
   const bool paced = isPacedOtaResponse(msg, len);
   const int queued = paced ? queuedPacedOtaResponses(m->_mgr) : 0;
   // Routine OTA backpressure must not attempt an allocation, which would
@@ -204,16 +246,17 @@ bool Mesh::otaSendAdapter(void* ctx, const uint8_t* msg, uint16_t len, bool /*fl
   Packet* p = m->createOtaPacket(msg, len);
   if (!p) return false;
   p->radio_reply = len && ota::ota_is_response_message(msg[0]);
-  if (p->radio_reply) {
-    if (const auto* context = ota::ota_context_if_active()) {
-      const auto route = context->manager.replyRoute();
-      if (route.profile < 2) {
-        // DATA, PROOF and MANIFEST are emitted after the RX call stack ends.
-        // Restore origin only; normal reply policy still decides one/both TX.
-        p->radio_profile = p->radio_origin = route.profile;
-        p->radio_generation = p->radio_origin_generation = route.generation;
-        p->radio_local = false;
-      }
+  if (route.profile < 2) {
+    // DATA, PROOF and MANIFEST are emitted after the RX call stack ends.
+    // Restore origin only; normal reply policy still decides one/both TX.
+    p->radio_profile = p->radio_origin = route.profile;
+    p->radio_generation = p->radio_origin_generation = route.generation;
+    p->radio_local = false;
+    // A direct negotiation fallback stays on its original physical
+    // session instead of silently moving onto a replacement profile.
+    if (!p->radio_reply) {
+      p->radio_bound = true;
+      p->tx_radio = route.profile == 0 ? RADIO_TX_PRIMARY : RADIO_TX_SECONDARY;
     }
   }
   const uint8_t mask = m->getTransmitProfileMask(p);
@@ -232,6 +275,46 @@ bool Mesh::otaSendAdapter(void* ctx, const uint8_t* msg, uint16_t len, bool /*fl
 // Runtime OTA flood reach (`ota config hops`, persisted in NodePrefs): accept packets up to N hops away and
 // relay those still under N hops. 0 = direct only. Overridable per-role by subclassing.
 uint8_t Mesh::getOtaHopLimit() const { return ota::ota_hop_limit(); }
+
+#if MESH_ENABLE_OTA_KISS_DIRECT
+uint32_t Mesh::directOtaEpoch() const {
+  const auto* context = ota::ota_context_if_active();
+  return context ? context->manager.directTransportEpoch() : 0;
+}
+
+bool Mesh::allowDirectOtaTransmit(uint8_t profile, uint32_t generation) const {
+  if (!isAnyTempRadioActive() || !allowPacketTransmit(nullptr)) return false;
+  const auto* profiles = _radio->profiles();
+  if (!profiles || profile >= 2 || generation != profiles->generation[profile]
+      || profiles->params(profile).protocol != RadioProfileProtocol::MeshCore
+      || !profiles->canTransmit(profile)) return false;
+  // Never infer a normal-channel TX opportunity from a temporary window on
+  // the other tuple. Explicit cross policy retains its existing meaning.
+  return (profile == 0 ? (isTempRadioActive() || profiles->primary_temporary)
+                       : profiles->secondary_temporary)
+      || profiles->cross == RadioCrossMode::On;
+}
+
+bool Mesh::onDirectOtaRadioFrame(const uint8_t* bytes, size_t length,
+                                uint8_t profile, uint32_t generation) {
+  const uint8_t* message;
+  uint16_t message_len;
+  if (!allowDirectOtaTransmit(profile, generation)
+      || !ota::ota_direct_wire_decode(bytes, length, message, message_len)) return false;
+  auto* context = ota::ota_context_if_active();
+  if (!context) return false; // unsolicited bytes cannot allocate an OTA arena
+  syncOtaTiming(context->manager);
+  context->manager.set_direct_transport_enabled(true);
+  context->manager.note_rx_path_hops(0);
+  ota::OtaReplyRoute route;
+  route.profile = profile;
+  route.generation = generation;
+  route.direct = true;
+  context->manager.on_message(message, message_len, route);
+  context->track_session(context->manager.fetchState(), _ms->getMillis());
+  return true;
+}
+#endif
 #endif
 
 void Mesh::begin() {
@@ -244,31 +327,7 @@ void Mesh::begin() {
   _next_recent_advert_echo = 0;
   _next_direct_retry_timeout = 0;
   _next_flood_retry_timeout = 0;
-  for (int i = 0; i < TOTAL_DIRECT_RETRY_SLOTS; i++) {
-    _direct_retries[i].packet = NULL;
-    _direct_retries[i].trigger_packet = NULL;
-    _direct_retries[i].retry_started_at = 0;
-    _direct_retries[i].echo_wait_started_at = 0;
-    _direct_retries[i].retry_at = 0;
-    _direct_retries[i].retry_delay = 0;
-    _direct_retries[i].message_timestamp = 0;
-    _direct_retries[i].retry_attempts_sent = 0;
-    memset(_direct_retries[i].retry_key, 0, sizeof(_direct_retries[i].retry_key));
-    memset(_direct_retries[i].trace_replacement_key, 0, sizeof(_direct_retries[i].trace_replacement_key));
-    memset(_direct_retries[i].message_replacement_key, 0,
-           sizeof(_direct_retries[i].message_replacement_key));
-    memset(_direct_retries[i].next_hop_hash, 0, sizeof(_direct_retries[i].next_hop_hash));
-    _direct_retries[i].next_hop_hash_len = 0;
-    _direct_retries[i].payload_type = 0;
-    _direct_retries[i].priority = 0;
-    _direct_retries[i].progress_marker = 0;
-    _direct_retries[i].expect_path_growth = false;
-    _direct_retries[i].final_hop_retry = false;
-    _direct_retries[i].waiting_final_echo = false;
-    _direct_retries[i].queued = false;
-    _direct_retries[i].has_message_replacement_key = false;
-    _direct_retries[i].active = false;
-  }
+  memset(_direct_retries, 0, sizeof(_direct_retries));
   for (int i = 0; i < TOTAL_FLOOD_RETRY_SLOTS; i++) {
     _flood_retries[i].packet = NULL;
     _flood_retries[i].trigger_packet = NULL;
@@ -353,6 +412,9 @@ void Mesh::loop() {
   if (_ota_forwarded[0].valid && !isAnyTempRadioActive()) resetOtaForwardCache();
   Dispatcher::loop();
   serviceLoopMaintenance();
+#ifdef ESP_PLATFORM
+  esp32::managementPassword::service(millis());
+#endif
 #if defined(ENABLE_OTA) && defined(ESP32_PLATFORM) && \
     (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID))
   ota::WiFiOtaSeeder::loop();
@@ -360,6 +422,9 @@ void Mesh::loop() {
 }
 
 bool Mesh::hasPendingOtaApply() const {
+#if defined(OTA_BOOTLOADER_MIGRATION)
+  if (ota::bootloader_migration_pending()) return true;
+#endif
 #if defined(ENABLE_OTA) && !defined(OTA_SEEDER_ONLY)
   // A released dynamic context cannot hold a pending apply: the context is only
   // handed back once apply_pending is clear.
@@ -415,6 +480,18 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
     }
   }
 #if defined(ENABLE_OTA)
+#if defined(OTA_BOOTLOADER_MIGRATION)
+  if (ota::bootloader_migration_service_due()) {
+    // This bridge owns no OTA workspace. Service it even after a dynamic
+    // context has been released, and never allocate one just to poll it.
+    const ota::OtaContext* context = ota::ota_context_if_active();
+    const bool ota_idle = !context || context->embeddedBootloaderIdle();
+    const bool outbound_idle = !hasPendingRadioWork();
+    const bool ready = outbound_idle && ota_idle &&
+        (!ota::bootloader_migration_pending() || prepareForOtaReboot());
+    ota::bootloader_migration_tick(ready, ota_idle);
+  }
+#endif
 #if OTA_DYNAMIC_CONTEXT
   // Nothing below can run without storage, and a released context holds no
   // pending apply or egress. Bail before any ota_ctx() dereference.
@@ -462,6 +539,9 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
   if (!ota_active) {
     if (_ota_temp_was_active) {
       ota::ota_ctx().manager.clearPendingEgress();
+#if MESH_ENABLE_OTA_KISS_DIRECT
+      discardQueuedForeignRadioFrame(RadioProfileProtocol::MeshCore);
+#endif
       resetOtaRelayBackoff();
     }
     _ota_temp_was_active = false;
@@ -474,6 +554,12 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
     _ota_announce_count = 0;
   }
   const float ota_speed = getOtaSpeedFactor();
+  if (ota::ota_ctx().manager.takeSourceReadyAnnouncement()) {
+    // COUNT/DESCRIBE completed over the existing host data session. Reuse the
+    // bounded discovery burst even when host preparation outlasted boot.
+    _ota_announce_count = 0;
+    _ota_announce_timer.arm(_ms->getMillis(), 0, 1.0f);
+  }
   if (_ota_timer_speed != ota_speed) {
     _ota_announce_timer.rescale(_ms->getMillis(), _ota_timer_speed, ota_speed);
     _ota_timer_speed = ota_speed;
@@ -484,7 +570,11 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
   syncOtaTiming(ota::ota_ctx().manager);
   ota::ota_ctx().manager.serviceEgress([](void* ctx, const ota::OtaReplyRoute& route) {
     if (route.profile == 0xFF) return true;
-    const auto* profiles = static_cast<Mesh*>(ctx)->_radio->profiles();
+    const auto* mesh = static_cast<Mesh*>(ctx);
+    const auto* profiles = mesh->_radio->profiles();
+#if MESH_ENABLE_OTA_KISS_DIRECT
+    if (route.direct) return mesh->allowDirectOtaTransmit(route.profile, route.generation);
+#endif
     // A completed/reconfigured temp session must not leak its retained replies
     // onto the replacement channel, or pin a stale descriptor behind backpressure.
     return route.profile < 2 && (!profiles ? route.profile == 0
@@ -535,12 +625,13 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
 #if !defined(OTA_SEEDER_ONLY)
       if (oc.self_serve_supported && !oc.serving) oc.serving = ota::ota_serve_self(oc, 0);
 #endif
-      oc.manager.announce();
+      if (oc.manager.sourceCatalogComplete() && oc.manager.servedCount())
+        oc.manager.announce();
       if (_ota_announce_count < 250) _ota_announce_count++;
     }
     // Re-arm: tight spacing during the boot burst; afterwards the fixed cadence (default 24h). When periodic
     // advert is disabled (0), re-check on a slow timer so a later `ota config advert <mins>` takes effect live.
-    uint32_t gap = in_burst       ? OTA_ANNOUNCE_BURST_MS
+    uint32_t gap = _ota_announce_count < OTA_ANNOUNCE_BURST ? OTA_ANNOUNCE_BURST_MS
                  : (mins != 0)    ? mins * 60000UL
                                   : OTA_ANNOUNCE_DISABLED_POLL_MS;
     _ota_announce_timer.arm(_ms->getMillis(), gap, ota_speed);
@@ -1039,6 +1130,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
           && self_id.isHashMatch(&pkt->payload[i + offset], hash_size)
           && allowPacketForward(pkt) && !_tables->wasSeen(pkt)) {
         _tables->markSeen(pkt);
+        pkt->forwarded = true;
         // append SNR (Not hash!)
         pkt->path[pkt->path_len++] = (int8_t) (pkt->getSNR()*4);
 
@@ -1060,6 +1152,10 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
     return ACTION_RELEASE;
   }
 
+  if ((pkt->getPayloadType() == PAYLOAD_TYPE_GRP_TXT
+       || pkt->getPayloadType() == PAYLOAD_TYPE_GRP_DATA)
+      && !allowGroupPacketOnRadio(pkt)) return ACTION_RELEASE;
+
   if (pkt->isRouteDirect() && pkt->getPathHashCount() > 0) {
     // check for 'early received' ACK
     if (pkt->getPayloadType() == PAYLOAD_TYPE_ACK) {
@@ -1080,13 +1176,15 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
       removePathPrefix(pkt, pkt->getPathHashCount());
     } else if (self_id.isHashMatch(pkt->path, pkt->getPathHashSize()) || maybeShortCircuitDirect(pkt)) {
       if (allowPacketForward(pkt)) {
+        pkt->forwarded = true;
+        const uint32_t d = getDirectRetransmitDelay(pkt);
         if (pkt->getPayloadType() == PAYLOAD_TYPE_MULTIPART) {
-          return forwardMultipartDirect(pkt);
+          return forwardMultipartDirect(pkt, d);
         } else if (pkt->getPayloadType() == PAYLOAD_TYPE_ACK) {
           if (!_tables->wasSeen(pkt)) {  // don't retransmit!
             _tables->markSeen(pkt);
             removePathPrefix(pkt, 1);
-            routeDirectRecvAcks(pkt, 0);
+            routeDirectRecvAcks(pkt, d);
           }
           return ACTION_RELEASE;
         }
@@ -1098,7 +1196,6 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
               && hasValidEncryptedPayloadLength(pkt->payload_len, 2);
           removePathPrefix(pkt, 1);
 
-          uint32_t d = getDirectRetransmitDelay(pkt);
           maybeScheduleDirectRetry(pkt, 0, final_hop_retry);
           return ACTION_RETRANSMIT_DELAYED(0, d);  // Routed traffic is HIGHEST priority
         }
@@ -1261,7 +1358,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
         onGroupPacketRecv(pkt);
         // scan channels DB, for all matching hashes of 'channel_hash' (max 4 matches supported ATM)
         GroupChannel channels[4];
-        int num = searchChannelsByHash(&channel_hash, channels, 4);
+        int num = searchChannelsForPacket(pkt, &channel_hash, channels, 4);
         // for each matching channel, try to decrypt data
         for (int j = 0; j < num; j++) {
           // decrypt, checking MAC is valid
@@ -1407,6 +1504,12 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
         ota::OtaReplyRoute route;
         route.profile = pkt->radio_profile;
         route.generation = pkt->radio_generation;
+#if MESH_ENABLE_OTA_KISS_DIRECT
+        if (!context->manager.directFetchActive()) {
+          context->manager.set_direct_transport_enabled(
+              allowDirectOtaTransmit(route.profile, route.generation));
+        }
+#endif
         terminal_ota = context->manager.on_message(pkt->payload, pkt->payload_len, route);
         context->track_session(context->manager.fetchState(), _ms->getMillis());
         onOtaRecv(pkt);
@@ -1422,6 +1525,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
           && (n + 1) * pkt->getPathHashSize() <= MAX_PATH_SIZE
           && (primary_ota || _mgr->getFreeCount() > OTA_FWD_MIN_FREE)
           && allowPacketForward(pkt) && allowOtaForwardRetry(pkt)) {
+        pkt->forwarded = true;
         rememberOtaForward(pkt);  // record incoming hop count, before appending ourselves
         self_id.copyHashTo(&pkt->path[n * pkt->getPathHashSize()], pkt->getPathHashSize());
         pkt->setPathHashCount(n + 1);
@@ -1478,6 +1582,7 @@ DispatcherAction Mesh::routeRecvPacket(Packet* packet) {
       }
     }
     if (!allowPacketForward(packet)) return ACTION_RELEASE;
+    packet->forwarded = true;
     if (limiter) limiter->commit(packet->payload, hash, now);
     // append this node's hash to 'path'
     self_id.copyHashTo(&packet->path[n * packet->getPathHashSize()], packet->getPathHashSize());
@@ -1492,7 +1597,7 @@ DispatcherAction Mesh::routeRecvPacket(Packet* packet) {
   return ACTION_RELEASE;
 }
 
-DispatcherAction Mesh::forwardMultipartDirect(Packet* pkt) {
+DispatcherAction Mesh::forwardMultipartDirect(Packet* pkt, uint32_t delay_millis) {
   if (pkt == NULL || pkt->payload_len < 1) {
     return ACTION_RELEASE;
   }
@@ -1509,7 +1614,7 @@ DispatcherAction Mesh::forwardMultipartDirect(Packet* pkt) {
       tmp.payload_len = pkt->payload_len - 1;
       memcpy(tmp.payload, &pkt->payload[1], tmp.payload_len);
       removePathPrefix(&tmp, 1);
-      routeDirectRecvAcks(&tmp, ((uint32_t)remaining + 1) * 300);  // expect multipart ACKs 300ms apart (x2)
+      routeDirectRecvAcks(&tmp, delay_millis + ((uint32_t)remaining + 1) * 300);  // expect multipart ACKs 300ms apart (x2)
     }
   }
   return ACTION_RELEASE;
@@ -1519,15 +1624,16 @@ void Mesh::routeDirectRecvAcks(Packet* packet, uint32_t delay_millis) {
   if (!packet->isMarkedDoNotRetransmit()) {
     uint8_t extra = getExtraAckTransmitCount();
     while (extra > 0) {
-      delay_millis += getDirectRetransmitDelay(packet) + 300;
       auto a1 = createMultiAck(packet->payload, packet->payload_len, extra);
       if (a1) {
         a1->radio_reply = false;  // relayed ACK, not a local response
+        a1->forwarded = true;
         a1->path_len = Packet::copyPath(a1->path, packet->path, packet->path_len);
         a1->header &= ~PH_ROUTE_MASK;
         a1->header |= ROUTE_TYPE_DIRECT;
         maybeScheduleDirectRetry(a1, 0);
         sendPacket(a1, 0, delay_millis);
+        delay_millis += 300;
       }
       extra--;
     }
@@ -1535,6 +1641,7 @@ void Mesh::routeDirectRecvAcks(Packet* packet, uint32_t delay_millis) {
     auto a2 = createAck(packet->payload, packet->payload_len);
     if (a2) {
       a2->radio_reply = false;  // relayed ACK, not a local response
+      a2->forwarded = true;
       a2->path_len = Packet::copyPath(a2->path, packet->path, packet->path_len);
       a2->header &= ~PH_ROUTE_MASK;
       a2->header |= ROUTE_TYPE_DIRECT;
@@ -1555,29 +1662,7 @@ void Mesh::clearDirectRetrySlot(int idx) {
   if (_direct_retries[idx].active && _active_direct_retry_count > 0) {
     _active_direct_retry_count--;
   }
-  _direct_retries[idx].packet = NULL;
-  _direct_retries[idx].trigger_packet = NULL;
-  _direct_retries[idx].retry_started_at = 0;
-  _direct_retries[idx].echo_wait_started_at = 0;
-  _direct_retries[idx].retry_at = 0;
-  _direct_retries[idx].retry_delay = 0;
-  _direct_retries[idx].message_timestamp = 0;
-  _direct_retries[idx].retry_attempts_sent = 0;
-  memset(_direct_retries[idx].retry_key, 0, sizeof(_direct_retries[idx].retry_key));
-  memset(_direct_retries[idx].trace_replacement_key, 0, sizeof(_direct_retries[idx].trace_replacement_key));
-  memset(_direct_retries[idx].message_replacement_key, 0,
-         sizeof(_direct_retries[idx].message_replacement_key));
-  memset(_direct_retries[idx].next_hop_hash, 0, sizeof(_direct_retries[idx].next_hop_hash));
-  _direct_retries[idx].next_hop_hash_len = 0;
-  _direct_retries[idx].payload_type = 0;
-  _direct_retries[idx].priority = 0;
-  _direct_retries[idx].progress_marker = 0;
-  _direct_retries[idx].expect_path_growth = false;
-  _direct_retries[idx].final_hop_retry = false;
-  _direct_retries[idx].waiting_final_echo = false;
-  _direct_retries[idx].queued = false;
-  _direct_retries[idx].has_message_replacement_key = false;
-  _direct_retries[idx].active = false;
+  memset(&_direct_retries[idx], 0, sizeof(_direct_retries[idx]));
   if (rebuild_timeout) rebuildNextDirectRetryTimeout();
 }
 
@@ -1938,6 +2023,11 @@ void Mesh::clearPendingDirectRetryOnSendFail(const Packet* packet) {
 bool Mesh::getDirectRetryTarget(const Packet* packet, const uint8_t*& next_hop_hash, uint8_t& next_hop_hash_len,
                                 uint8_t& progress_marker, bool& expect_path_growth) const {
   switch (packet->getPayloadType()) {
+    case PAYLOAD_TYPE_RAW_CUSTOM:
+      if (!isTelemetryHistoryPayload(packet)) return false;
+      // Telemetry uses the same shrinking-path echo as other direct packets.
+      // Zero-hop sends have no forwarding echo and remain excluded below.
+      // fall through
     case PAYLOAD_TYPE_ACK:
     case PAYLOAD_TYPE_PATH:
     case PAYLOAD_TYPE_REQ:
@@ -1946,24 +2036,13 @@ bool Mesh::getDirectRetryTarget(const Packet* packet, const uint8_t*& next_hop_h
     case PAYLOAD_TYPE_ANON_REQ:
       // Allow retries even when only one downstream hop remains so fixed direct paths
       // (e.g. remote admin/login over 2-hop chains) use the same retry policy.
-      if (packet->getPathHashCount() == 0) {
-        return false;
-      }
-      next_hop_hash = packet->path;
-      next_hop_hash_len = packet->getPathHashSize();
-      progress_marker = packet->getPathHashCount();
-      expect_path_growth = false;
-      return true;
+      break;
 
     case PAYLOAD_TYPE_MULTIPART:
-      if (packet->payload_len < 1 || (packet->payload[0] & 0x0F) != PAYLOAD_TYPE_ACK || packet->getPathHashCount() == 0) {
+      if (packet->payload_len < 1 || (packet->payload[0] & 0x0F) != PAYLOAD_TYPE_ACK) {
         return false;
       }
-      next_hop_hash = packet->path;
-      next_hop_hash_len = packet->getPathHashSize();
-      progress_marker = packet->getPathHashCount();
-      expect_path_growth = false;
-      return true;
+      break;
 
     case PAYLOAD_TYPE_TRACE: {
       if (packet->payload_len < 9) {
@@ -1987,6 +2066,13 @@ bool Mesh::getDirectRetryTarget(const Packet* packet, const uint8_t*& next_hop_h
     default:
       return false;
   }
+
+  if (packet->getPathHashCount() == 0) return false;
+  next_hop_hash = packet->path;
+  next_hop_hash_len = packet->getPathHashSize();
+  progress_marker = packet->getPathHashCount();
+  expect_path_growth = false;
+  return true;
 }
 
 bool Mesh::canDecodeDirectPayloadForSelf(const Packet* packet) {
@@ -2112,27 +2198,21 @@ void Mesh::maybeScheduleDirectRetry(const Packet* packet, uint8_t priority, bool
 
   // Only store retry metadata here; allocate the retry packet after the initial TX really completes.
   uint32_t retry_delay = getDirectRetryAttemptDelay(packet, 0);
-  memcpy(_direct_retries[slot_idx].retry_key, retry_key, sizeof(retry_key));
-  memcpy(_direct_retries[slot_idx].trace_replacement_key, trace_replacement_key,
+  DirectRetryEntry& entry = _direct_retries[slot_idx];
+  memset(&entry, 0, sizeof(entry));
+  memcpy(entry.retry_key, retry_key, sizeof(retry_key));
+  memcpy(entry.trace_replacement_key, trace_replacement_key,
          sizeof(trace_replacement_key));
-  _direct_retries[slot_idx].packet = NULL;
-  _direct_retries[slot_idx].trigger_packet = const_cast<Packet*>(packet);
-  _direct_retries[slot_idx].retry_started_at = 0;
-  _direct_retries[slot_idx].echo_wait_started_at = 0;
-  _direct_retries[slot_idx].retry_at = 0;
-  _direct_retries[slot_idx].retry_delay = retry_delay;
-  _direct_retries[slot_idx].retry_attempts_sent = 0;
-  memset(_direct_retries[slot_idx].next_hop_hash, 0, sizeof(_direct_retries[slot_idx].next_hop_hash));
-  memcpy(_direct_retries[slot_idx].next_hop_hash, next_hop_hash, next_hop_hash_len);
-  _direct_retries[slot_idx].next_hop_hash_len = next_hop_hash_len;
-  _direct_retries[slot_idx].payload_type = packet->getPayloadType();
-  _direct_retries[slot_idx].priority = priority;
-  _direct_retries[slot_idx].progress_marker = progress_marker;
-  _direct_retries[slot_idx].expect_path_growth = expect_path_growth;
-  _direct_retries[slot_idx].final_hop_retry = final_hop_retry;
-  _direct_retries[slot_idx].waiting_final_echo = false;
-  _direct_retries[slot_idx].queued = false;
-  _direct_retries[slot_idx].active = true;
+  entry.trigger_packet = const_cast<Packet*>(packet);
+  entry.retry_delay = retry_delay;
+  memcpy(entry.next_hop_hash, next_hop_hash, next_hop_hash_len);
+  entry.next_hop_hash_len = next_hop_hash_len;
+  entry.payload_type = packet->getPayloadType();
+  entry.priority = priority;
+  entry.progress_marker = progress_marker;
+  entry.expect_path_growth = expect_path_growth;
+  entry.final_hop_retry = final_hop_retry;
+  entry.active = true;
   _active_direct_retry_count++;
 }
 
@@ -2295,6 +2375,29 @@ bool Mesh::cancelActiveRetries(const uint8_t retry_key[MAX_HASH_SIZE]) {
     cancelled = true;
   }
 
+  return cancelled;
+}
+
+bool Mesh::cancelActiveMessageRetries(const uint8_t message_key[MAX_HASH_SIZE],
+                                      uint32_t message_timestamp) {
+  if (message_key == NULL) return false;
+  uint8_t key[MAX_HASH_SIZE];
+  memcpy(key, message_key, sizeof(key));
+  bool cancelled = false;
+  for (int i = 0; i < TOTAL_DIRECT_RETRY_SLOTS; i++) {
+    if (_direct_retries[i].active && _direct_retries[i].has_message_replacement_key
+        && _direct_retries[i].message_timestamp == message_timestamp
+        && memcmp(key, _direct_retries[i].message_replacement_key, sizeof(key)) == 0) {
+      retireDirectRetrySlot(i); cancelled = true;
+    }
+  }
+  for (int i = 0; i < TOTAL_FLOOD_RETRY_SLOTS; i++) {
+    if (_flood_retries[i].active && _flood_retries[i].has_message_replacement_key
+        && _flood_retries[i].message_timestamp == message_timestamp
+        && memcmp(key, _flood_retries[i].message_replacement_key, sizeof(key)) == 0) {
+      retireFloodRetrySlot(i); cancelled = true;
+    }
+  }
   return cancelled;
 }
 

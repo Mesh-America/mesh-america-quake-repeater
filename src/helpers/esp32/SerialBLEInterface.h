@@ -17,6 +17,15 @@
 #else
   #define MESH_BLE_USES_NIMBLE 0
 #endif
+// Bluedroid AUTO mode rejects the manual Service Changed API. A small
+// asynchronous marker service requests its supported AUTO notification.
+#if defined(CONFIG_BLUEDROID_ENABLED) && !MESH_BLE_USES_NIMBLE && \
+    ((defined(CONFIG_BT_GATTS_SEND_SERVICE_CHANGE_AUTO) && CONFIG_BT_GATTS_SEND_SERVICE_CHANGE_AUTO) || \
+     (defined(CONFIG_GATTS_SEND_SERVICE_CHANGE_AUTO) && CONFIG_GATTS_SEND_SERVICE_CHANGE_AUTO))
+  #define MESH_BLE_AUTO_CACHE_REFRESH 1
+#else
+  #define MESH_BLE_AUTO_CACHE_REFRESH 0
+#endif
 #include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -29,14 +38,70 @@ class SerialBLEInterface : public BaseSerialInterface,
   BLEServer *pServer;
   BLEService *pService;
   BLECharacteristic * pTxCharacteristic;
+  BLECharacteristic *pRxCharacteristic;
+#if !MESH_BLE_USES_NIMBLE
+  struct OrderedGattCharacteristics;
+  OrderedGattCharacteristics* _orderedCharacteristics = nullptr;
+#endif
 #if !defined(MESH_USE_NIMBLE_ARDUINO)
   BLE2902 *pTxDescriptor;
+#endif
+#if MESH_BLE_AUTO_CACHE_REFRESH
+  enum class CacheOperation : uint8_t { None, Create, Start, Delete, Completing };
+  enum class CacheMarker : uint8_t { Absent, Created, Started };
+  static std::atomic<SerialBLEInterface*> _cacheEventOwner;
+  gatts_event_handler _previousGattsHandler = nullptr;
+  std::atomic<CacheOperation> _cacheOperation{CacheOperation::None};
+  std::atomic<CacheOperation> _cacheEvent{CacheOperation::None};
+  std::atomic<uint32_t> _cacheConnection{0};
+  std::atomic<uint32_t> _cacheNusVerifiedConnection{0};
+  std::atomic<bool> _cacheConnected{false};
+  std::atomic<bool> _cacheAuthenticated{false};
+  std::atomic<esp_gatt_if_t> _cacheGattsIf{ESP_GATT_IF_NONE};
+  std::atomic<uint8_t> _cacheRemoteAddress[6] = {};
+  uint8_t _cacheVerifiedPeer[6] = {};
+  bool _cacheVerifiedPeerValid = false;
+  CacheMarker _cacheMarker = CacheMarker::Absent;
+  std::atomic<uint16_t> _cacheMarkerHandle{0};
+  uint16_t _cacheEventHandle = 0;
+  bool _cacheEventSucceeded = false;
+  bool _cacheStalled = false;
+  uint8_t _cacheFailures = 0;
+  uint32_t _cacheAttemptConnection = 0;
+  uint32_t _cacheEncryptedConnection = 0;
+  uint32_t _cacheTriggeredConnection = 0;
+  uint32_t _cacheOperationConnection = 0;
+  uint32_t _cacheLastAttempt = 0;
+  uint32_t _cacheOperationStarted = 0;
+  static void cacheGattEvent(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
+                             esp_ble_gatts_cb_param_t* param);
+  void handleCacheGattEvent(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
+                            esp_ble_gatts_cb_param_t* param);
+  void installCacheGattHandler();
+  void retireCacheGattHandler();
+  void serviceGattCacheRefresh(uint32_t now);
 #endif
   bool deviceConnected;
   bool oldDeviceConnected;
   bool notifySucceeded;
   std::atomic<bool> notificationsEnabled{false};
   bool _isEnabled;
+  bool _enableRequested = false;
+  // This interface outlives each host/controller session. Disable callbacks
+  // before stopping the host, and only then destroy its GATT objects.
+  std::atomic<bool> _callbacksEnabled{false};
+  bool _stackActive = false;
+  bool _shutdownPending = false;
+  bool _nativeHostStopped = false;
+  bool _configured = false;
+  bool _powerAttempted = false;
+  uint32_t _lastPowerAttempt = 0;
+  char _deviceName[48] = {};
+  uint8_t _customAddress[mesh::companion::BLUETOOTH_MAC_BYTES] = {};
+  bool _hasCustomAddress = false;
+  bool _advertisingConfigured = false;
+  bool _hasBondedPeer = false;
+  mesh::companion::BluetoothPeerIdentity _bondedPeer;
   uint16_t last_conn_id;
   uint32_t _pin_code;
   uint32_t _last_write;
@@ -67,6 +132,11 @@ class SerialBLEInterface : public BaseSerialInterface,
   Frame send_queue[FRAME_QUEUE_SIZE];
 
   void clearBuffers();
+  bool startBluetoothStack(bool clear_bonds);
+  bool stopBluetoothStack();
+  void forgetGattPointers();
+  void startServiceAndAdvertising();
+  bool hasRequiredReplyCapacity() const;
   void servicePendingTxReset();
   void scheduleAdvertisingRestart(uint32_t now);
   void recoverStalledTx(const char* cause);
@@ -130,6 +200,7 @@ public:
     pServer = NULL;
     pService = NULL;
     pTxCharacteristic = NULL;
+    pRxCharacteristic = NULL;
 #if !defined(MESH_USE_NIMBLE_ARDUINO)
     pTxDescriptor = NULL;
 #endif
@@ -170,6 +241,12 @@ public:
   void enable() override;
   void disable() override;
   bool isEnabled() const override { return _isEnabled; }
+  // Call from the application task even while the logical interface is off.
+  // Disconnects are asynchronous; never stop a host from its own callback.
+  void servicePowerState();
+  bool isPowerTransitionPending() const {
+    return _shutdownPending || (_stackActive != _enableRequested);
+  }
 
   bool isConnected() const override;
 

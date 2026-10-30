@@ -51,6 +51,7 @@ bool radio_init() {
   #endif
 
   radio.setCRC(1);
+  radio_driver.setDeepInitCallback(radio_init);
   
   return true;  // success
 }

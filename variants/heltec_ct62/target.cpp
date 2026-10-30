@@ -1,9 +1,11 @@
 #include <Arduino.h>
 #include "target.h"
+#include <helpers/radiolib/SX126xBufferedRadioHal.h>
 
 Heltec_CT62_Board board;
 
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+static SX126xBufferedRadioHal radio_hal(SPI, MC_SX1262_SPI_HZ, true);
+RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 WRAPPER_CLASS radio_driver(radio, board);
 
 ESP32RTCClock fallback_clock;

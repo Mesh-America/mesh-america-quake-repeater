@@ -21,6 +21,8 @@ public:
   void onBeforeTransmit(void) override;
   void onAfterTransmit(void) override;
   void shutdownPeripherals() override;
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
   const char* getManufacturerName() const override ;
   bool setLoRaFemLnaEnabled(bool enable) override;

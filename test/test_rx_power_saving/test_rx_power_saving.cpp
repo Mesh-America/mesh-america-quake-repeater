@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <cmath>
 #include <helpers/radiolib/RXPowerSaving.h>
+#include <helpers/radiolib/RXPowerSavingCLI.h>
 #include <helpers/CLICommandUtils.h>
 
 TEST(RxPowerSaving, WirePreamblesStayCompatibleRegardlessOfLocalPowerSaving) {
@@ -143,6 +144,151 @@ TEST(RxPowerSavingCLI, ParsesNewNamesAndRejectsTrailingJunk) {
   for (const char* text : {"maxx", "max extra", "max preamble 32 extra", "riskyworkingmax",
                            "level 4294967296", "overdrive preamble nope"}) {
     EXPECT_FALSE(mesh::cli::parseRxPowerSavingArgumentsStrict(text, args)) << text;
+  }
+}
+
+namespace {
+class RxPowerSavingTestControl : public RxPowerSavingControl {
+public:
+  bool accept = true;
+  bool enabled = false;
+  bool config_error = false;
+  uint32_t transition_us = 1000;
+  float capture_cost = 8;
+  uint32_t rx_us = 0, sleep_us = 0;
+  RxPowerSavingStatus status;
+  RxPowerSavingStatus getRxPowerSavingStatus() const override { return status; }
+  bool setRxPowerSaving(bool on, uint32_t rx, uint32_t sleep) override {
+    if (!accept) return false;
+    enabled = on; rx_us = rx; sleep_us = sleep;
+    return true;
+  }
+  void setRxPowerSavingConfigError(bool invalid) override { config_error = invalid; }
+  float rxPowerSavingCaptureCostSymbols() const override { return capture_cost; }
+  uint32_t rxPowerSavingTransitionUs() const override { return transition_us; }
+};
+}
+
+TEST(RxPowerSaving, RepeatedArmFailuresStopUntilResetOrSuccess) {
+  RxPowerSavingArmRetryState retry;
+  for (unsigned i = 0; i < 3; ++i) {
+    EXPECT_TRUE(retry.canAttempt());
+    retry.recordFailure();
+  }
+  EXPECT_FALSE(retry.canAttempt());
+  retry.recordFailure();
+  EXPECT_EQ(3, retry.consecutiveFailures());
+  retry.reset();
+  EXPECT_TRUE(retry.canAttempt());
+  retry.recordFailure();
+  retry.recordSuccess();
+  EXPECT_EQ(0, retry.consecutiveFailures());
+}
+
+TEST(RxPowerSaving, ConfigUsesRuntimeRadioTimingAndKeepsWirePreamble) {
+  RxPowerSavingTestControl control;
+  RxPowerSavingConfig config;
+  config.enabled = 1;
+  ASSERT_TRUE(applyRxPowerSavingConfig(&config, 6, 500, &control));
+  EXPECT_TRUE(control.enabled);
+  EXPECT_FALSE(control.config_error);
+  EXPECT_FALSE(rxPowerSavingUsesContinuousFallback(control.rx_us, control.sleep_us));
+  EXPECT_EQ(16, config.preamble);
+  uint32_t rx = 0, sleep = 0;
+  ASSERT_TRUE(recalcRxPowerSavingFromLevel(config.level, 6, 500, 16, &rx, &sleep,
+      nullptr, nullptr, control.transition_us, control.capture_cost));
+  EXPECT_EQ(rx, control.rx_us);
+  EXPECT_EQ(sleep, control.sleep_us);
+}
+
+TEST(RxPowerSaving, InvalidConfigFallsBackWithoutOverwritingRequestedPolicy) {
+  RxPowerSavingTestControl control;
+  RxPowerSavingConfig config;
+  config.enabled = 1;
+  config.level = 0;
+  config.rx_us = 500;
+  EXPECT_FALSE(applyRxPowerSavingConfig(&config, 8, 62.5f, &control));
+  EXPECT_EQ(1, config.enabled);
+  EXPECT_EQ(500U, config.rx_us);
+  EXPECT_FALSE(control.enabled);
+  EXPECT_TRUE(control.config_error);
+  EXPECT_FALSE(normalizeRxPowerSavingConfig(&config, 8, NAN));
+}
+
+TEST(RxPowerSavingCLI, RejectedCommandsNeverOverwriteSavedConfig) {
+  RxPowerSavingTestControl control;
+  RxPowerSavingConfig config;
+  char reply[160];
+  for (const char* invalid : {"max extra", "level 4294967296", "level 256", "500 1000",
+                            "max preamble 65552", "riskyworkingmax", "level 8 preamble 24"}) {
+    EXPECT_FALSE(RXPowerSavingCLI::set(invalid, 8, 62.5f, &config, &control, reply, sizeof(reply))) << invalid;
+    EXPECT_EQ(0, config.enabled);
+    EXPECT_EQ(RX_POWERSAVING_BALANCED_LEVEL, config.level);
+  }
+  control.accept = false;
+  EXPECT_FALSE(RXPowerSavingCLI::set("max", 8, 62.5f, &config, &control, reply, sizeof(reply)));
+  EXPECT_EQ(0, config.enabled);
+}
+
+TEST(RxPowerSavingCLI, OffPreservesRequestedLevelAndManualPeriods) {
+  RxPowerSavingTestControl control;
+  RxPowerSavingConfig config;
+  char reply[160];
+  ASSERT_TRUE(RXPowerSavingCLI::set("max preamble 64", 5, 500, &config, &control, reply, sizeof(reply)));
+  EXPECT_EQ(8, config.level);
+  EXPECT_EQ(64, config.preamble);
+  ASSERT_TRUE(RXPowerSavingCLI::set("off", 5, 500, &config, &control, reply, sizeof(reply)));
+  EXPECT_EQ(0, config.enabled);
+  EXPECT_EQ(8, config.level);
+  ASSERT_TRUE(RXPowerSavingCLI::set("12000 5000", 8, 62.5f, &config, &control, reply, sizeof(reply)));
+  EXPECT_EQ(0, config.level);
+  EXPECT_EQ(12000U, config.rx_us);
+  EXPECT_EQ(5000U, config.sleep_us);
+}
+
+TEST(RxPowerSavingCLI, StatusUsesLiveWirePreambleAndReportsHardwareClamp) {
+  RxPowerSavingTestControl control;
+  control.status.supported = control.status.armed = true;
+  control.status.effective_rx_us = 78000;
+  control.status.effective_sleep_us = 60000;
+  RxPowerSavingConfig config;
+  config.enabled = 1;
+  char reply[160];
+  RXPowerSavingCLI::get(&config, &control, 8, 62.5f, reply, sizeof(reply), 32);
+  EXPECT_NE(nullptr, strstr(reply, "effective=armed"));
+  EXPECT_NE(nullptr, strstr(reply, "catch=17.4"));
+  EXPECT_NE(nullptr, strstr(reply, "erx=78000,eslp=60000"));
+  control.status.armed = false;
+  RXPowerSavingCLI::get(&config, &control, 8, 62.5f, reply, sizeof(reply), 32);
+  EXPECT_EQ(nullptr, strstr(reply, "catch="));
+}
+
+TEST(RxPowerSavingCLI, StatusCatchRejectsInvalidBandwidthAndBoundsMaximumPeriods) {
+  RxPowerSavingTestControl control;
+  control.status.supported = control.status.armed = true;
+  RxPowerSavingConfig config;
+  config.sleep_us = config.rx_us = RX_POWERSAVING_MAX_PERIOD_US;
+  control.status.effective_rx_us = config.rx_us;
+  control.status.effective_sleep_us = config.sleep_us;
+  char reply[160];
+  for (float bw : {NAN, INFINITY, 0.0f, -1.0f, 501.0f}) {
+    RXPowerSavingCLI::get(&config, &control, 5, bw, reply, sizeof(reply), 65535);
+    EXPECT_EQ(nullptr, strstr(reply, "catch="));
+  }
+  RXPowerSavingCLI::get(&config, &control, 5, 500.0f, reply, sizeof(reply), 65535);
+  EXPECT_NE(nullptr, strstr(reply, "catch=-403215.0"));
+  EXPECT_LT(strlen(reply), sizeof(reply));
+}
+
+TEST(RxPowerSavingCLI, CompactStatusKeepsExperimentalWarningAndFullSetterNames) {
+  RxPowerSavingTestControl control;
+  RxPowerSavingConfig config;
+  char reply[160];
+  for (const char* name : {"overdrive", "riskyWorkingMax"}) {
+    ASSERT_TRUE(RXPowerSavingCLI::set(name, 8, 62.5f, &config, &control, reply, sizeof(reply)));
+    EXPECT_NE(nullptr, strstr(reply, name));
+    RXPowerSavingCLI::get(&config, &control, 8, 62.5f, reply, sizeof(reply));
+    EXPECT_NE(nullptr, strstr(reply, config.level == 9 ? "level=9(!)" : "level=10(!)"));
   }
 }
 

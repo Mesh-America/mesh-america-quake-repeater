@@ -77,7 +77,52 @@ def embedded_page():
 
 
 class WebConfigUiRuntimeTest(unittest.TestCase):
-    def test_four_display_controls_and_pairing_capability(self):
+    def test_saved_network_recovery_requires_login_before_setup_wizard(self):
+        status, config = self.setup_values()
+        status.update(auth=False, mode="setup", needs_setup=False,
+                      needs_password=False, password_supported=True)
+        prelude = r'''<script>
+(function(){
+  var status=%s,config=%s,configReads=0,logins=0;
+  window.fetch=function(path,options){
+    var value=config;
+    if(path==="/api/status")value=status;
+    else if(path==="/api/config")configReads++;
+    else if(path==="/api/login"){
+      logins++;
+      if(JSON.parse(options.body).password!=="existing-secret")throw new Error("wrong password submitted");
+      value={ok:true};
+    }else if(path.indexOf("/api/scan")===0)value={networks:[]};
+    return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(value)}});
+  };
+  window.addEventListener("load",function(){
+    setTimeout(function(){
+      var body=document.body;
+      body.setAttribute("data-test-recovery-login-visible",!document.getElementById("v-login").classList.contains("hide"));
+      body.setAttribute("data-test-recovery-wizard-before",!document.getElementById("v-wizard").classList.contains("hide"));
+      body.setAttribute("data-test-recovery-config-before",configReads);
+      document.getElementById("login-pwd").value="existing-secret";
+      document.getElementById("login-form").dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));
+    },200);
+    setTimeout(function(){
+      var body=document.body;
+      body.setAttribute("data-test-recovery-wizard-after",!document.getElementById("v-wizard").classList.contains("hide"));
+      body.setAttribute("data-test-recovery-app-after",!document.getElementById("v-app").classList.contains("hide"));
+      body.setAttribute("data-test-recovery-logins",logins);
+      body.setAttribute("data-test-recovery-config-after",configReads);
+      body.setAttribute("data-test-recovery-password-cleared",document.getElementById("login-pwd").value==="");
+    },800);
+  });
+})();
+</script>''' % (json.dumps(status), json.dumps(config))
+        dom = self.run_page(prelude)
+        for attribute, value in (("login-visible", "true"), ("wizard-before", "false"),
+                                 ("config-before", "0"), ("wizard-after", "true"),
+                                 ("app-after", "false"), ("logins", "1"),
+                                 ("config-after", "1"), ("password-cleared", "true")):
+            self.assertIn('data-test-recovery-%s="%s"' % (attribute, value), dom)
+
+    def test_display_power_controls_and_pairing_capability(self):
         status, config = self.setup_values()
         config["display"] = {
             "mode": "button", "timeout": 23,
@@ -98,6 +143,8 @@ window.addEventListener("load",function(){
     body.setAttribute("data-test-usb-timeout",card.querySelector('[data-k="display.usb.timeout"]').value);
     body.setAttribute("data-test-usb-disabled",card.querySelector('[data-k="display.usb.timeout"]').disabled);
     body.setAttribute("data-test-pairing-disabled",card.querySelector('option[value="pairing"]').disabled);
+    body.setAttribute("data-test-rotation-hidden",document.getElementById("display-rotation-setting").classList.contains("hide"));
+    body.setAttribute("data-test-rotation-disabled",card.querySelector('[data-k="display.rotation"]').disabled);
     var mode=card.querySelector('[data-k="display.mode"]');
     mode.value="off";mode.dispatchEvent(new Event("input",{bubbles:true}));
     body.setAttribute("data-test-battery-disabled",card.querySelector('[data-k="display.timeout"]').disabled);
@@ -107,12 +154,44 @@ window.addEventListener("load",function(){
 </script>''' % (json.dumps(status), json.dumps(config))
         dom = self.run_page(prelude)
         for attribute, value in (
-            ("display-visible", "true"), ("display-count", "4"),
+            ("display-visible", "true"), ("display-count", "5"),
             ("battery-timeout", "23"), ("usb-timeout", "55"),
             ("usb-disabled", "true"), ("pairing-disabled", "true"),
+            ("rotation-hidden", "true"), ("rotation-disabled", "true"),
             ("battery-disabled", "true"), ("dirty-display", "off"),
         ):
             self.assertIn('data-test-%s="%s"' % (attribute, value), dom)
+
+    def test_supported_rotation_loads_saved_value_and_can_be_changed(self):
+        status, config = self.setup_values()
+        config["display"] = {
+            "mode": "button", "timeout": 15, "usb_mode": "on",
+            "usb_timeout": 15, "pairing": False,
+            "rotation_supported": True, "rotation": 270,
+        }
+        prelude = r'''<script>
+window.fetch=function(path){
+  var value=path==="/api/status"?%s:%s;
+  return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(value)}});
+};
+window.addEventListener("load",function(){
+  setTimeout(function(){enterApp()},50);
+  setTimeout(function(){
+    var select=document.querySelector('[data-k="display.rotation"]'),body=document.body;
+    body.setAttribute("data-test-rotation-visible",!document.getElementById("display-rotation-setting").classList.contains("hide"));
+    body.setAttribute("data-test-rotation-enabled",!select.disabled);
+    body.setAttribute("data-test-rotation-loaded",select.value);
+    body.setAttribute("data-test-rotation-values",Array.from(select.options).map(function(o){return o.value}).join(","));
+    select.value="90";select.dispatchEvent(new Event("input",{bubbles:true}));
+    body.setAttribute("data-test-rotation-dirty",st.dirty["display.rotation"]);
+  },650);
+});
+</script>''' % (json.dumps(status), json.dumps(config))
+        dom = self.run_page(prelude)
+        for attribute, value in (("visible", "true"), ("enabled", "true"),
+                                 ("loaded", "270"), ("values", "0,90,180,270"),
+                                 ("dirty", "90")):
+            self.assertIn('data-test-rotation-%s="%s"' % (attribute, value), dom)
 
     def setup_values(self):
         sys.path.insert(0, str(ROOT / "scripts"))
@@ -154,8 +233,13 @@ window.addEventListener("load",function(){
         self.assertIsNotNone(marker)
         page = source.replace(marker, prelude + marker, 1)
 
+        # Snap Chromium has a private /tmp. Keep the page and profile in the
+        # shared workspace so every supported browser can read them.
+        cache_root = ROOT / ".pio"
+        cache_root.mkdir(exist_ok=True)
         for attempt in range(2):
             with tempfile.TemporaryDirectory(prefix="meshcore-webconfig-runtime-",
+                                             dir=cache_root,
                                              ignore_cleanup_errors=True) as tmp:
                 tmp_path = Path(tmp)
                 html = tmp_path / "index.html"
@@ -186,6 +270,7 @@ window.addEventListener("load",function(){
         stderr = result.stderr.decode("utf-8", "replace")
         self.assertEqual(result.returncode, 0, stderr)
         dom = result.stdout.decode("utf-8", "replace")
+        self.assertTrue(dom, stderr)
         self.assertNotIn("data-test-error=", dom)
         return dom
 
@@ -917,6 +1002,357 @@ window.addEventListener("load",function(){
         self.assertIn('data-test-field-ssid="AppNet"', dom)
         self.assertIn('data-test-scan-hidden="true"', dom)
         self.assertIn('data-test-capture="clear"', dom)
+
+
+    def test_password_save_receipt_reauth_preserves_results_and_never_resends(self):
+        for case in ("saved", "partial", "failed", "legacy401", "login_retry", "reboot"):
+            with self.subTest(case=case):
+                status, config = self.setup_values()
+                status.update(mode="setup" if case == "legacy401" else "lan")
+                prelude = r'''<script>
+(function(){
+  var kind=%s,status=%s,config=%s,submitted=null,posts=0,polls=0,logins=0;
+  var authorized=true,wrongLogin=false,earlyRefresh=0,storageWrites=0,late=null;
+  if(window.Storage)Storage.prototype.setItem=function(){storageWrites++;throw new Error("persistent password storage")};
+  function response(value,code){code=code||200;return Promise.resolve({ok:code<400,status:code,json:function(){return Promise.resolve(value)}})}
+  window.fetch=function(path,options){
+    if(path==="/api/status")return response(status);
+    if(path==="/api/late")return new Promise(function(resolve){late=resolve});
+    if(path==="/api/config"&&options&&options.method==="POST"){
+      posts++;submitted=JSON.parse(options.body);authorized=kind==="failed";
+      return response({state:"pending",reqid:submitted.reqid},202);
+    }
+    if(path.indexOf("/api/config/result?")===0){
+      polls++;
+      if(path.indexOf("reqid="+submitted.reqid)<0)throw new Error("lost request id");
+      if(kind==="legacy401"&&!authorized)return response({error:"auth"},401);
+      if(polls===1)return response({state:"pending",reqid:submitted.reqid});
+      return response({state:"done",reqid:submitted.reqid,all_ok:kind!=="partial"&&kind!=="failed",
+        reboot:kind==="reboot",reauth_required:kind!=="failed"&&!authorized,results:[
+          {key:"password",reply:kind==="failed"?"Error: save unconfirmed; reboot may differ":"OK"},
+          {key:"name",reply:kind==="partial"?(authorized?"Error: rejected name":"Error"):"OK"}]});
+    }
+    if(path==="/api/login"){
+      logins++;
+      if(JSON.parse(options.body).password!=="new-admin")wrongLogin=true;
+      if(kind==="login_retry"&&logins===1)return response({error:"try the current password"},401);
+      authorized=true;return response({ok:true});
+    }
+    if(path==="/api/config"){
+      if(submitted&&!authorized){earlyRefresh++;return response({error:"auth"},401)}
+      return response(config);
+    }
+    if(path.indexOf("/api/scan")===0)return response({state:"done",networks:[]});
+    return response({},404);
+  };
+  window.addEventListener("load",function(){
+    setTimeout(function(){
+      if(kind==="saved")api("/api/late").catch(function(){});
+      st.dirty.password="new-admin";st.dirty.name="ChangedName";
+      document.querySelectorAll('[data-k="password"],[data-cfm="password"]').forEach(function(el){el.value="new-admin"});
+      saveChanges({reboot:kind==="partial"||kind==="failed"});
+    },120);
+    setTimeout(function(){
+      if(late)late({ok:false,status:401,json:function(){return Promise.resolve({error:"auth"})}});
+      if(kind==="login_retry"){
+        document.body.setAttribute("data-test-intermediate-note",document.getElementById("login-note").textContent);
+        document.body.setAttribute("data-test-intermediate-login",!document.getElementById("v-login").classList.contains("hide"));
+        document.getElementById("login-pwd").value="new-admin";
+        document.getElementById("login-form").dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));
+      }
+    },950);
+    setTimeout(function(){
+      var body=document.body,fields=document.querySelectorAll('[data-k="password"],[data-cfm="password"]');
+      body.setAttribute("data-test-posts",posts);body.setAttribute("data-test-polls",polls);
+      body.setAttribute("data-test-logins",logins);body.setAttribute("data-test-wrong-login",wrongLogin);
+      body.setAttribute("data-test-early-refresh",earlyRefresh);body.setAttribute("data-test-storage-writes",storageWrites);
+      body.setAttribute("data-test-login-visible",!document.getElementById("v-login").classList.contains("hide"));
+      body.setAttribute("data-test-wizard-visible",!document.getElementById("v-wizard").classList.contains("hide"));
+      body.setAttribute("data-test-password-cleared",Array.prototype.every.call(fields,function(el){return el.value===""}));
+      body.setAttribute("data-test-password-dirty",Object.prototype.hasOwnProperty.call(st.dirty,"password"));
+      body.setAttribute("data-test-name-dirty",Object.prototype.hasOwnProperty.call(st.dirty,"name"));
+      body.setAttribute("data-test-name-error",!!document.querySelector('#v-app [data-k="name"]').closest(".f").querySelector(".chip.err"));
+      body.setAttribute("data-test-name-detail",document.querySelector('#v-app [data-k="name"]').closest(".f").textContent.indexOf("rejected name")>=0);
+      body.setAttribute("data-test-password-error",!!document.querySelector('#v-app [data-k="password"]').closest(".f").querySelector(".chip.err"));
+      body.setAttribute("data-test-reboot",document.getElementById("reboot-ov").classList.contains("show"));
+      body.setAttribute("data-test-login-note",document.getElementById("login-note").textContent);
+    },1500);
+  });
+})();
+</script>''' % (json.dumps(case), json.dumps(status), json.dumps(config))
+                dom = self.run_page(prelude, virtual_time=1900)
+                for attr, expected in (("posts", "1"), ("wrong-login", "false"),
+                                       ("early-refresh", "0"), ("storage-writes", "0"),
+                                       ("login-visible", "false")):
+                    self.assertIn(f'data-test-{attr}="{expected}"', dom)
+                self.assertIn('data-test-logins="%s"' % (
+                    "0" if case == "failed" else "2" if case == "login_retry" else "1"), dom)
+                self.assertIn('data-test-polls="%s"' % ("2" if case in ("failed", "legacy401") else "3"), dom)
+                self.assertIn('data-test-reboot="%s"' % str(case == "reboot").lower(), dom)
+                self.assertIn('data-test-password-cleared="%s"' % str(case != "failed").lower(), dom)
+                self.assertIn('data-test-password-dirty="%s"' % str(case == "failed").lower(), dom)
+                self.assertIn('data-test-wizard-visible="%s"' % str(case == "legacy401").lower(), dom)
+                if case == "partial":
+                    self.assertIn('data-test-name-dirty="true"', dom)
+                    self.assertIn('data-test-name-error="true"', dom)
+                    self.assertIn('data-test-name-detail="true"', dom)
+                    self.assertIn("some settings were rejected. The node will not reboot.", dom)
+                if case == "failed":
+                    self.assertIn('data-test-password-error="true"', dom)
+                if case == "login_retry":
+                    self.assertIn('data-test-intermediate-login="true"', dom)
+                    self.assertIn('data-test-intermediate-note="Settings saved.', dom)
+
+    def test_cli_password_receipt_uses_last_success_and_stream_never_replays(self):
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming):
+                status, config = self.setup_values()
+                status.update(mode="lan", cli=True, terminal_stream=streaming)
+                prelude = r'''<script>
+(function(){
+  var streaming=%s,status=%s,config=%s,submitted=null,posts=0,logins=0,wrongLogin=false,authorized=true,earlyRefresh=0;
+  function response(value,code){code=code||200;return Promise.resolve({ok:code<400,status:code,json:function(){return Promise.resolve(value)}})}
+  window.fetch=function(path,options){
+    if(path==="/api/status")return response(status);
+    if(path==="/api/config"){
+      if(!authorized){earlyRefresh++;throw new Error("config read before reauthentication")}
+      return response(config);
+    }
+    if((path==="/api/cli"||path==="/api/terminal")&&options&&options.method==="POST"){
+      posts++;submitted=JSON.parse(options.body);authorized=false;return response({state:"pending"},202);
+    }
+    if(path.indexOf("/api/terminal?")===0)return response({error:"auth"},401);
+    if(path.indexOf("/api/cli/result?")===0){
+      var second=path.indexOf("from=2")>=0;
+      return response({state:second?"done":"running",reqid:submitted.reqid,reauth_required:!authorized,
+        all_ok:!second,reboot:false,reboot_withheld:second,results:second?[
+          {ok:false,reply:authorized?"Error: rejected password":"Error"},{ok:true,reply:"OK - reboot queued"}]:[
+          {ok:true,reply:"OK"},{ok:true,reply:"> ******** (sign in again)"}]});
+    }
+    if(path==="/api/login"){
+      logins++;wrongLogin=wrongLogin||JSON.parse(options.body).password!=="first-new";
+      authorized=true;return response({ok:true});
+    }
+    return response({},404);
+  };
+  window.addEventListener("load",function(){
+    setTimeout(function(){cliRun(streaming?["password first-new","set freq 123"]:["password first-new","get wifi.pwd","password rejected-new","reboot"])},120);
+    setTimeout(function(){
+      var body=document.body;
+      body.setAttribute("data-test-posts",posts);body.setAttribute("data-test-logins",logins);body.setAttribute("data-test-early-refresh",earlyRefresh);
+      body.setAttribute("data-test-wrong-login",wrongLogin);body.setAttribute("data-test-busy",cli.busy);
+      body.setAttribute("data-test-login-visible",!document.getElementById("v-login").classList.contains("hide"));
+      body.setAttribute("data-test-reboot",document.getElementById("reboot-ov").classList.contains("show"));
+      body.setAttribute("data-test-stream-reset",!cliStream.session&&!cliStream.job);
+      body.setAttribute("data-test-withheld",document.getElementById("term-out").textContent.indexOf("Not rebooting")>=0);
+      body.setAttribute("data-test-error-detail",document.getElementById("term-out").textContent.indexOf("rejected password")>=0);
+    },1400);
+  });
+})();
+</script>''' % (json.dumps(streaming), json.dumps(status), json.dumps(config))
+                dom = self.run_page(prelude, virtual_time=1800)
+                for attr, expected in (("posts", "1"), ("logins", "1"),
+                                       ("wrong-login", "false"), ("early-refresh", "0"), ("busy", "false"),
+                                       ("login-visible", "false"), ("reboot", "false")):
+                    self.assertIn(f'data-test-{attr}="{expected}"', dom)
+                self.assertIn('data-test-stream-reset="true"', dom)
+                if not streaming:
+                    self.assertIn('data-test-withheld="true"', dom)
+                    self.assertIn('data-test-error-detail="true"', dom)
+
+    def test_typed_and_pasted_cli_password_preserves_argument_bytes_for_reauth(self):
+        for entry in ("typed", "whole_paste", "partial_single", "partial_block"):
+            with self.subTest(entry=entry):
+                status, config = self.setup_values()
+                status.update(mode="lan", cli=True, terminal_stream=False)
+                prelude = r'''<script>
+(function(){
+  var entry=%s,status=%s,config=%s,submitted=null,posts=0,logins=0,polls=0,authorized=true;
+  var expected=entry==="typed"?["password  typed  "]:entry==="whole_paste"?["PaSsWoRd  pasted  ","get name"]
+    :entry==="partial_single"?["password suffix  "]:["password suffix  ","get name"];
+  var exactCommands=false,exactLogin=false,exactContext=false;
+  function response(value,code){code=code||200;return Promise.resolve({ok:code<400,status:code,json:function(){return Promise.resolve(value)}})}
+  window.fetch=function(path,options){
+    if(path==="/api/status")return response(status);
+    if(path==="/api/config")return response(config);
+    if(path==="/api/cli"&&options&&options.method==="POST"){
+      posts++;submitted=JSON.parse(options.body);authorized=false;
+      exactCommands=JSON.stringify(submitted.cmds)===JSON.stringify(expected);
+      exactContext=cliPasswordContext(submitted.cmds).password===expected[0].slice(9);
+      return response({state:"pending",reqid:submitted.reqid},202);
+    }
+    if(path.indexOf("/api/cli/result?")===0){
+      polls++;
+      if(path.indexOf("reqid="+submitted.reqid)<0)throw new Error("lost request id");
+      return response({state:"done",reqid:submitted.reqid,all_ok:true,reauth_required:!authorized,
+        results:submitted.cmds.map(function(){return{ok:true,reply:"OK"}})});
+    }
+    if(path==="/api/login"){
+      logins++;exactLogin=JSON.parse(options.body).password===expected[0].slice(9);
+      authorized=exactLogin;return response(exactLogin?{ok:true}:{error:"wrong password"},exactLogin?200:401);
+    }
+    return response({},404);
+  };
+  window.addEventListener("load",function(){
+    setTimeout(function(){
+      var input=document.getElementById("term-in");
+      if(entry!=="typed"){
+        input.value=entry==="whole_paste"?"":"password ";
+        var event=new Event("paste",{bubbles:true,cancelable:true});
+        Object.defineProperty(event,"clipboardData",{value:{getData:function(){return entry==="whole_paste"
+          ?"  > PaSsWoRd  pasted  \r\n  get name  \t\r\n # comment\r\n"
+          :entry==="partial_single"?"suffix  \n":"suffix  \nget name"}}});
+        input.dispatchEvent(event);
+        if(entry==="partial_single")input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true,cancelable:true}));
+      }else{
+        input.value="  password  typed  ";
+        input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true,cancelable:true}));
+      }
+      var go=document.querySelector(".term-cfm .go");if(go)go.click();
+    },120);
+    setTimeout(function(){
+      var body=document.body;
+      body.setAttribute("data-test-posts",posts);body.setAttribute("data-test-logins",logins);body.setAttribute("data-test-polls",polls);
+      body.setAttribute("data-test-exact-commands",exactCommands);body.setAttribute("data-test-exact-context",exactContext);
+      body.setAttribute("data-test-exact-login",exactLogin);body.setAttribute("data-test-busy",cli.busy);
+      body.setAttribute("data-test-login-visible",!document.getElementById("v-login").classList.contains("hide"));
+      body.setAttribute("data-test-normal-trim",cliCommandLine("  get name  \t")==="get name");
+      body.setAttribute("data-test-empty-password",cliParse("  PASSWORD   \n")[0]==="PASSWORD   ");
+      body.setAttribute("data-test-mixedcase-risk",cliRisks(["PaSsWoRd secret  "]).length===1);
+      body.setAttribute("data-test-password-seen",cli.pwd===true);
+    },600);
+  });
+})();
+</script>''' % (json.dumps(entry), json.dumps(status), json.dumps(config))
+                dom = self.run_page(prelude, virtual_time=900)
+                for attr, expected in (("posts", "1"), ("logins", "1"), ("polls", "2"),
+                                       ("exact-commands", "true"), ("exact-context", "true"),
+                                       ("exact-login", "true"), ("busy", "false"),
+                                       ("login-visible", "false"), ("normal-trim", "true"),
+                                       ("empty-password", "true"), ("mixedcase-risk", "true"),
+                                       ("password-seen", "true")):
+                    self.assertIn(f'data-test-{attr}="{expected}"', dom)
+
+    def test_setup_security_banner_and_live_password_preview(self):
+        banners = {
+            "admin_password": "Setup WiFi uses this node's admin password.",
+            "open_admin_login": "Setup WiFi is open; web configuration and firmware uploads still require this node's admin password.",
+            "open_no_password": "Setup WiFi is open. This build has no admin password configured.",
+            "unavailable": "Setup WiFi security is unavailable.",
+            "missing": "Setup WiFi security is unavailable.",
+            "pending": "Setup WiFi restart pending. Reconnect after the hotspot restarts to check its security.",
+            "lan": "Setup WiFi uses this node's admin password.",
+        }
+        for security, banner in banners.items():
+            with self.subTest(security=security):
+                status, config = self.setup_values()
+                status.update(mode="lan" if security == "lan" else "setup")
+                if security != "missing":
+                    status["ap_security"] = "admin_password" if security in ("lan", "pending") else security
+                status["ap_restart_pending"] = security == "pending"
+                vectors = ["abcdefgh", "a" * 15, "a" * 7, "a" * 16,
+                           "é" * 4, "abc\x1fdefg", "~~~~~~~~", " " * 8, "abcd\x7fefg", ""]
+                prelude = r'''<script>
+(function(){
+  var status=%s,config=%s,values=%s;
+  window.fetch=function(path){var value=path==="/api/status"?status:path==="/api/config"?config:{};return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(value)}})};
+  window.addEventListener("load",function(){setTimeout(function(){
+    var body=document.body,input=document.querySelector('#v-wizard [data-k="password"]');
+    var previews=values.map(function(value){
+      input.value=value;input.dispatchEvent(new Event("input",{bubbles:true}));
+      var hints=Array.prototype.slice.call(document.querySelectorAll("[data-admin-ap-hint]"));
+      var hidden=hints.every(function(h){return h.classList.contains("hide")});
+      return hidden?"hidden":hints.every(function(h){return h.textContent==="Setup WiFi will use this password."})?"protected":hints.every(function(h){return h.textContent==="WiFi will be open; web configuration and firmware uploads still require this password."})?"open":"wrong";
+    });
+    body.setAttribute("data-test-banner",document.getElementById("setup-security").textContent);
+    body.setAttribute("data-test-banner-hidden",document.getElementById("setup-security").classList.contains("hide"));
+    body.setAttribute("data-test-previews",previews.join(","));
+    body.setAttribute("data-test-login-default",document.querySelector("#v-login code").textContent);
+  },200)});
+})();
+</script>''' % (json.dumps(status), json.dumps(config), json.dumps(vectors))
+                dom = self.run_page(prelude, virtual_time=500)
+                self.assertIn('data-test-banner="%s"' % banner, dom)
+                self.assertIn('data-test-banner-hidden="%s"' % str(security == "lan").lower(), dom)
+                self.assertIn('data-test-previews="%s"' % (
+                    ",".join(["hidden"] * 10) if security == "lan" else
+                    "protected,protected,open,open,open,open,protected,protected,open,hidden"), dom)
+                self.assertIn('data-test-login-default="password"', dom)
+
+    def test_setup_password_receipt_reconnect_guidance_matches_new_ap_policy(self):
+        for password, protected, legacy in (("new-admin", True, False), ("éééé", False, False),
+                                            ("éééé", False, True)):
+            with self.subTest(protected=protected, legacy=legacy):
+                status, config = self.setup_values()
+                status.update(mode="setup", ap_security="admin_password")
+                prelude = r'''<script>
+(function(){
+  var status=%s,config=%s,password=%s,legacy=%s,submitted=null,authSeen=null,posts=0,logins=0,polls=0,authorized=true;
+  function response(value,code){code=code||200;return Promise.resolve({ok:code<400,status:code,json:function(){return Promise.resolve(value)}})}
+  window.fetch=function(path,options){
+    if(path==="/api/status")return response(status);
+    if(path==="/api/config"&&options&&options.method==="POST"){
+      posts++;submitted=JSON.parse(options.body);authorized=false;return response({state:"pending",reqid:submitted.reqid},202);
+    }
+    if(path.indexOf("/api/config/result?")===0){
+      polls++;if(legacy&&!authorized)return response({error:"auth"},401);
+      return response({state:"done",reqid:submitted.reqid,all_ok:true,reauth_required:!authorized,results:[{key:"password",reply:"OK"}]});
+    }
+    if(path==="/api/login"){
+      logins++;authorized=JSON.parse(options.body).password===password;return response(authorized?{ok:true}:{error:"wrong password"},authorized?200:401);
+    }
+    if(path==="/api/config")return response(config);
+    if(path.indexOf("/api/scan")===0)return response({state:"done",networks:[]});
+    return response({},404);
+  };
+  window.addEventListener("load",function(){
+    setTimeout(function(){
+      var realReauth=reauthenticateOnce;reauthenticateOnce=function(auth,note,resume,keepView){authSeen=auth;return realReauth(auth,note,resume,keepView)};
+      st.dirty.password=password;saveChanges();
+    },120);
+    setTimeout(function(){
+      var body=document.body;
+      body.setAttribute("data-test-posts",posts);body.setAttribute("data-test-logins",logins);body.setAttribute("data-test-polls",polls);
+      body.setAttribute("data-test-pending-banner",document.getElementById("setup-security").textContent);
+      body.setAttribute("data-test-note",document.getElementById("login-note").textContent);
+      body.setAttribute("data-test-ram-secret-cleared",!!authSeen&&authSeen.password==="");
+      body.setAttribute("data-test-ap-protected",authSeen&&authSeen.apProtected);
+    },500);
+  });
+})();
+</script>''' % (json.dumps(status), json.dumps(config), json.dumps(password), json.dumps(legacy))
+                dom = self.run_page(prelude, virtual_time=800)
+                for attr, expected in (("posts", "1"), ("logins", "1"), ("polls", "2"),
+                                       ("ram-secret-cleared", "true"), ("ap-protected", str(protected).lower())):
+                    self.assertIn(f'data-test-{attr}="{expected}"', dom)
+                reconnect = ("Rejoin it with the new admin password." if protected else
+                             "Join it without a WiFi password, then sign in with the new admin password.")
+                initial_note = ("Settings were sent. Sign in to read the saved result." if legacy else
+                                "Settings saved. The admin password changed.")
+                self.assertIn('data-test-note="%s The setup WiFi may restart. %s"' %
+                              (initial_note, reconnect), dom)
+                target = ("rejoin with the new admin password." if protected else
+                          "join without a WiFi password; web configuration and firmware uploads still require the new admin password.")
+                self.assertIn('data-test-pending-banner="Setup WiFi restart pending. '
+                              'After it restarts, %s"' % target, dom)
+
+    def test_admin_password_validation_counts_utf8_bytes(self):
+        status, config = self.setup_values()
+        status.update(mode="lan")
+        vectors = ["", "a" * 15, "a" * 16, "é" * 7 + "a", "é" * 8,
+                   "🙂" * 3 + "abc", "🙂" * 4, "line\nbreak", "line\rbreak", "\ud800"]
+        prelude = r'''<script>
+(function(){
+  var status=%s,config=%s,values=%s;
+  window.fetch=function(path){var value=path==="/api/status"?status:path==="/api/config"?config:{};return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(value)}})};
+  window.addEventListener("load",function(){setTimeout(function(){
+    var result=values.map(function(value){st.dirty.password=value;document.querySelectorAll('[data-cfm="password"]').forEach(function(el){el.value=value});return adminPwdError(false)?"invalid":"valid"});
+    document.body.setAttribute("data-test-password-validation",result.join(","));
+  },200)});
+})();
+</script>''' % (json.dumps(status), json.dumps(config), json.dumps(vectors))
+        dom = self.run_page(prelude)
+        self.assertIn('data-test-password-validation="valid,valid,invalid,valid,invalid,valid,invalid,invalid,invalid,invalid"', dom)
 
 
 if __name__ == "__main__":

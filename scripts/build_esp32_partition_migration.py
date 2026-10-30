@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build verified in-place Wi-Fi and LoRa ESP32 partition-migration ZIPs.
+"""Build verified in-place Wi-Fi, USB and LoRa ESP32 partition-migration ZIPs.
 
 Run in Linux/WSL with PlatformIO installed. PlatformIO steps are deliberately
 serial: build.sh cleans the shared .pio/build tree between Full targets.
@@ -20,7 +20,7 @@ import sys
 import tempfile
 import zipfile
 
-from package_esp32_partition_migration import BOARDS, resolve_pio_build_dir
+from package_esp32_partition_migration import BOARDS, USB_BRIDGE_PROFILES, resolve_pio_build_dir
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,13 +47,52 @@ def build_steps(boards: list[str], version: str, radio_preset: str,
     # Full builds can clear .pio/build; every bridge must be built afterwards.
     built_bridges: set[str] = set()
     for name in boards:
-        for key in ("wifi_bridge", "lora_bridge", "expander_bridge"):
+        for key in ("wifi_bridge", "usb_bridge", "lora_bridge", "expander_bridge"):
             bridge = BOARDS[name].get(key)
             if bridge and bridge not in built_bridges:
                 steps.append((["pio", "run", "-e", bridge,
                                "-j", str(jobs)], False))
                 built_bridges.add(bridge)
     return steps
+
+
+def usb_build_steps(jobs: int) -> list[list[str]]:
+    """Build only the complete USB utility set, serially, without any Full app."""
+    return [["pio", "run", "-e", environment, "-j", str(jobs)]
+            for _, environment in sorted(USB_BRIDGE_PROFILES.items())]
+
+
+def build_usb_only(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if args.board or args.role:
+        parser.error("--usb-only builds all six chip/capacity utilities; do not select a board/role")
+    source = git_output("rev-parse", "--short=8", "HEAD")
+    requested_root = args.output_root or Path(".releases") / f"esp32-usb-bridges-{source}"
+    output_root = (requested_root if requested_root.is_absolute()
+                   else ROOT / requested_root).resolve()
+    output_file = output_root / "meshcore-usb-partition-bridges.zip"
+    steps = usb_build_steps(args.jobs)
+    for command in steps:
+        print(shlex.join(command), flush=True)
+    print(f"Package all six USB utilities into {output_file}", flush=True)
+    if args.dry_run:
+        return
+    if not shutil.which("pio"):
+        parser.error("pio is unavailable in this environment")
+    environment = os.environ.copy()
+    try:
+        utility_build_dir = resolve_pio_build_dir(environment=environment, project_dir=ROOT)
+    except ValueError as error:
+        parser.error(str(error))
+    environment["PLATFORMIO_BUILD_DIR"] = str(utility_build_dir)
+    for command in steps:
+        subprocess.run(command, cwd=ROOT, env=environment, check=True)
+    # Unlike exact Full release packages, this independent utility set records
+    # its actual dirty state and runtime-source hashes instead of pretending
+    # its binaries came from an older Full app's release commit.
+    subprocess.run([
+        sys.executable, "-B", "scripts/package_usb_partition_bridges.py",
+        "--pio-build-dir", str(utility_build_dir), "--output-file", str(output_file),
+    ], cwd=ROOT, env=environment, check=True)
 
 
 def verify_archive(path: Path, board: str, version: str, source: str) -> None:
@@ -142,21 +181,27 @@ def main() -> None:
                         help="show the build order without writing files")
     parser.add_argument("--list-boards", action="store_true",
                         help="print configured board/role keys and exit")
+    parser.add_argument("--usb-only", action="store_true",
+                        help="build/package all six independent USB utilities only; "
+                             "no Full app, version or radio preset is needed")
     args = parser.parse_args()
     if args.list_boards:
         for name in BOARDS:
             print(name)
         return
+    if args.jobs < 1:
+        parser.error("--jobs must be positive")
+    if os.name == "nt" and not args.dry_run:
+        parser.error("run this recipe inside Linux/WSL, where bash and pio are available")
+    if args.usb_only:
+        build_usb_only(args, parser)
+        return
     if not args.version or not args.radio_preset:
         parser.error("--version and --radio-preset are required for a build")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+\-]*", args.version):
         parser.error("--version must be a filename-safe version token")
-    if args.jobs < 1:
-        parser.error("--jobs must be positive")
     if args.board and args.role:
         parser.error("choose --board or --role, not both")
-    if os.name == "nt" and not args.dry_run:
-        parser.error("run this recipe inside Linux/WSL, where bash and pio are available")
 
     source = git_output("rev-parse", "--short=8", "HEAD")
     if args.role:

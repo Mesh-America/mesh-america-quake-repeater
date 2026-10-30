@@ -4,6 +4,7 @@
 #include <cstring>
 #include <string>
 #include <helpers/ConfigSerializer.h>
+#include <helpers/bridges/RS232PowerSettings.h>
 
 struct NodePrefs : ConfigSerializer {
   uint8_t bridge_enabled = 0, bridge_uart = 2, espnow_bridge_enabled = 0, rs232_bridge_enabled = 0;
@@ -11,6 +12,9 @@ struct NodePrefs : ConfigSerializer {
   uint8_t bridge_pkt_src = 1, bridge_channel = 1, bridge_format = 0;
   uint32_t bridge_baud = 115200;
   uint8_t usb_logging_enabled = 0, usb_debug_enabled = 0;
+  uint8_t rs232_autosleep = 1;
+  uint8_t rs232_heartbeat = 1;
+  uint16_t rs232_idle_seconds = 300;
   char bridge_secret[16] = "test-secret", node_name[32] = "before import";
   @BRIDGE_SCHEMA@
   BridgePrefs bridge;

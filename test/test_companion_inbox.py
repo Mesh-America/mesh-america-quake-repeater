@@ -49,6 +49,8 @@ public:
   int getOfflineQueueCapacity() const { return 4; }
   Frame& offlineQueueFrameAt(int index) { return frames[(offline_queue_head + index) % 4]; }
   bool addToOfflineQueue(const uint8_t*, int);
+  int peekOfflineQueue(uint8_t*);
+  void popOfflineQueue();
   int getFromOfflineQueue(uint8_t*);
   bool receive(const char* text, uint8_t kind = 17) {
     uint8_t bytes[2] = {kind, uint8_t(text[0])};
@@ -233,7 +235,11 @@ int main() {
 
     def test_home_history_pending_and_connections_fit(self):
         source = (ROOT / "examples/companion_radio/ui-new/UITask.cpp").read_text()
-        first_page = extract_braced(source, "if (_page == HomePage::FIRST)")
+        # Pocket rendering also tests FIRST, including unbraced conditions.
+        # Bound the page extraction to the complete standard render method.
+        home_screen = extract_braced(source, "class HomeScreen :")
+        render = extract_braced(home_screen, "int render(DisplayDriver& display) override")
+        first_page = extract_braced(render, "if (_page == HomePage::FIRST) {")
         first_page = first_page.rsplit("#if UI_MESSAGES_HOME_PAGE == 1", 1)[0] + "}"
         first_page = first_page.replace("if (_page == HomePage::FIRST)", "")
         preamble = PREAMBLE.replace("int getMsgCount() const { return 0; }", UI_MEMBERS)
@@ -312,7 +318,8 @@ int main() {
                           "const char* UITask::inboxTitle("):
             implementation += extract_braced(ui, signature) + "\n"
         implementation += QUEUE
-        for signature in ("bool MyMesh::addToOfflineQueue(", "int MyMesh::getFromOfflineQueue("):
+        for signature in ("bool MyMesh::addToOfflineQueue(", "int MyMesh::peekOfflineQueue(",
+                          "void MyMesh::popOfflineQueue(", "int MyMesh::getFromOfflineQueue("):
             implementation += extract_braced(mesh, signature) + "\n"
         for reader_enabled in (0, 1):
             with self.subTest(reader_enabled=reader_enabled):

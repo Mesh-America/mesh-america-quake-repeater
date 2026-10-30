@@ -27,6 +27,7 @@ ARDUINO = r'''
 #define HIGH 1
 #define LOW 0
 #define OUTPUT 1
+#define INPUT 0
 inline uint32_t now_ms=0;
 inline uint32_t delay_count=0;
 inline uint32_t millis(){return now_ms;}
@@ -61,28 +62,47 @@ public:
 NMEA = r'''
 #pragma once
 #include <Arduino.h>
+#include <ctime>
 class MicroNMEA {
  bool valid=false;
+ uint32_t last_ms=now_ms;
+ uint64_t elapsed_ms=0;
+ mutable char sentence[100]={};
+ std::tm utc()const{
+  const std::time_t epoch=1790942400U+elapsed_ms/1000;
+  return *std::gmtime(&epoch);
+ }
 public:
  inline static unsigned clears=0;
  MicroNMEA(char*,size_t){}
  void clear(){++clears;valid=false;}
- bool process(char c){if(c=='\n'){valid=true;return true;}return false;}
+ bool process(char c){
+  if(c!='\n')return false;
+  elapsed_ms+=static_cast<uint32_t>(now_ms-last_ms);last_ms=now_ms;
+  valid=true;return true;
+ }
  static bool testChecksum(const char*){return true;}
  static void sendSentence(Stream&,const char*){}
- const char* getSentence()const{return "$GPRMC,valid*00";}
+ const char* getSentence()const{
+  const std::tm value=utc();
+  std::snprintf(sentence,sizeof(sentence),
+   "$GPRMC,%02d%02d%02d.00,A,4807.038,N,01131.000,E,0.0,0.0,%02d%02d%02d,,,A*00",
+   value.tm_hour,value.tm_min,value.tm_sec,value.tm_mday,value.tm_mon+1,
+   (value.tm_year+1900)%100);
+  return sentence;
+ }
  const char* getMessageID()const{return "RMC";}
  bool isValid()const{return valid;}
  long getLatitude()const{return 47610000;}
  long getLongitude()const{return -122330000;}
  bool getAltitude(long& value)const{value=125000;return valid;}
  long getNumSatellites()const{return valid?8:0;}
- uint16_t getYear()const{return valid?2026:0;}
- uint8_t getMonth()const{return valid?10:0;}
- uint8_t getDay()const{return valid?2:0;}
- uint8_t getHour()const{return 12;}
- uint8_t getMinute()const{return 0;}
- uint8_t getSecond()const{return 0;}
+ uint16_t getYear()const{return valid?utc().tm_year+1900:0;}
+ uint8_t getMonth()const{return valid?utc().tm_mon+1:0;}
+ uint8_t getDay()const{return valid?utc().tm_mday:0;}
+ uint8_t getHour()const{return utc().tm_hour;}
+ uint8_t getMinute()const{return utc().tm_min;}
+ uint8_t getSecond()const{return utc().tm_sec;}
 };
 '''
 
@@ -90,9 +110,20 @@ RTC = r'''
 #pragma once
 #include <cstdint>
 class DateTime {
+ uint16_t year;
+ uint8_t month,day,hour,minute,second;
+ static bool leap(uint16_t value){return value%4==0&&(value%100!=0||value%400==0);}
 public:
- DateTime(uint16_t,uint8_t,uint8_t,uint8_t,uint8_t,uint8_t){}
- uint32_t unixtime()const{return 1790942400U;}
+ DateTime(uint16_t y,uint8_t m,uint8_t d,uint8_t h,uint8_t n,uint8_t s)
+  :year(y),month(m),day(d),hour(h),minute(n),second(s){}
+ uint32_t unixtime()const{
+  uint32_t days=0;
+  for(uint16_t value=1970;value<year;++value)days+=leap(value)?366:365;
+  const uint8_t lengths[]={31,28,31,30,31,30,31,31,30,31,30,31};
+  for(uint8_t value=1;value<month;++value)
+   days+=lengths[value-1]+(value==2&&leap(year)?1:0);
+  return (days+day-1)*86400U+hour*3600U+minute*60U+second;
+ }
 };
 '''
 
@@ -190,7 +221,7 @@ int main(){
 
  // Successful production NMEA sync marks monotonic time and leaves the edge
  // notification available for existing mesh clock consumers.
- now_ms=1100;gps.loop();now_ms=2200;gps.loop();
+ now_ms=1100;uart.fix();gps.loop();now_ms=2200;uart.fix();gps.loop();
  assert(!gps.waitingTimeSync());
  assert(gps.consumeTimeSyncApplied());assert(!gps.consumeTimeSyncApplied());
  now_ms=62199;assert(!gps.requestTimeSync(60));
@@ -280,6 +311,7 @@ struct SerialMock {
  unsigned begins=0,polls=0;
  void setPins(int,int){}
  void begin(int){++begins;start=millis();}
+ void end(){}
  int available(){++polls;return arrival!=UINT32_MAX&&static_cast<uint32_t>(millis()-start)>=arrival;}
 } Serial1;
 struct Location {
@@ -289,12 +321,15 @@ struct Location {
 struct EnvironmentSensorManager {
  Location* _location;
  bool gps_serial_transport_blocked=false,gps_serial_transport=false;
+ bool gps_serial_open=false;
  bool gps_detected=false,gps_active=false,user_enabled=false;
  unsigned transport_resets=0;
  explicit EnvironmentSensorManager(Location& p):_location(&p){}
  void resetGpsTelemetryTransportState(){++transport_resets;}
  void setGpsTelemetryUserEnabled(bool enabled){user_enabled=enabled;}
  void initBasicGPS();
+ void startGpsSerialTransport();
+ void stopGpsSerialTransport();
 };
 @INIT@
 int main(){
@@ -401,11 +436,11 @@ class GpsUpstreamAdaptationsTest(unittest.TestCase):
         if cls.compiler is None:
             raise unittest.SkipTest("a host C++17 compiler is required")
 
-    def compile_run(self, source, defines=(), extra_sources=()):
+    def compile_run(self, source, defines=(), extra_sources=(), *, arduino=ARDUINO):
         with tempfile.TemporaryDirectory(prefix="meshcore-gps-upstream-") as directory:
             path = Path(directory)
             for name, text in {
-                "Arduino.h": ARDUINO, "Mesh.h": MESH, "MicroNMEA.h": NMEA,
+                "Arduino.h": arduino, "Mesh.h": MESH, "MicroNMEA.h": NMEA,
                 "RTClib.h": RTC, "CayenneLPP.h": CAYENNE,
                 "Wire.h": "#pragma once\nclass TwoWire {};\n",
             }.items():
@@ -450,9 +485,44 @@ int main(){SensorManager sensors;assert(!sensors.requestGpsTelemetryTimeSync(UIN
     def test_bounded_discovery_fast_cold_absent_bypass_and_uart_owner(self):
         source = (ROOT / "src/helpers/sensors/EnvironmentSensorManager.cpp").read_text()
         init = extract_braced(source, "void EnvironmentSensorManager::initBasicGPS()")
+        init += "\n" + "\n".join(extract_braced(source, signature) for signature in (
+            "void EnvironmentSensorManager::startGpsSerialTransport()",
+            "void EnvironmentSensorManager::stopGpsSerialTransport()"))
         for defines in ((), ("ENV_SKIP_GPS_DETECT=1",), ("PERSISTANT_GPS=1",)):
             with self.subTest(defines=defines):
                 self.compile_run(COLD.replace("@INIT@", init), defines)
+
+    def test_provider_repeated_begin_stop_preserves_shared_power_owners(self):
+        arduino = ARDUINO.replace(
+            "inline void digitalWrite(int,int){}\ninline int digitalRead(int){return HIGH;}",
+            "inline int pin_values[64]={};\n"
+            "inline void digitalWrite(int pin,int value){pin_values[pin]=value;}\n"
+            "inline int digitalRead(int pin){return pin_values[pin];}")
+        self.compile_run(r'''
+#include <cassert>
+#include <helpers/sensors/MicroNMEALocationProvider.h>
+void LocationProvider::sendSentence(const char*) {}
+int main() {
+  Stream serial; RefCountedDigitalPin rail(5); rail.begin();
+  MicroNMEALocationProvider gps(serial, nullptr, 7, 6, &rail);
+  gps.stop(); assert(digitalRead(5)==LOW);
+  rail.claim(); // An external owner powers a receiver never begun here.
+  for (unsigned attempt=0; attempt<2; ++attempt) {
+    digitalWrite(6, HIGH); digitalWrite(7, HIGH);
+    gps.stop();
+    assert(digitalRead(5)==HIGH && digitalRead(6)==LOW && digitalRead(7)==LOW);
+  }
+  rail.release(); assert(digitalRead(5)==LOW);
+  for (unsigned cycle=0; cycle<300; ++cycle) {
+    rail.claim(); // Another peripheral owns the same supply.
+    gps.begin(); gps.begin();
+    assert(digitalRead(5)==HIGH && digitalRead(6)==HIGH && digitalRead(7)==HIGH);
+    gps.stop(); gps.stop();
+    assert(digitalRead(5)==HIGH && digitalRead(6)==LOW && digitalRead(7)==LOW);
+    rail.release(); assert(digitalRead(5)==LOW);
+  }
+}
+''', arduino=arduino)
 
     def run_rak_uart_probe(self, *, negative=False):
         source = (ROOT / "src/helpers/sensors/EnvironmentSensorManager.cpp").read_text()
@@ -496,33 +566,54 @@ int main(){SensorManager sensors;assert(!sensors.requestGpsTelemetryTimeSync(UIN
         self.run_rak_uart_probe(negative=True)
 
     def test_ble_led_optout_preserves_default_and_begin_order(self):
+        from test_nrf52_led_policy import compile_run as run_led_policy
+
         source = (ROOT / "src/helpers/nrf52/SerialBLEInterface.cpp").read_text()
         begin = extract_braced(source, "bool SerialBLEInterface::begin(")
-        block = re.search(r"#ifdef DISABLE_BLE_LED[\s\S]*?#endif", begin).group()
-        self.assertLess(begin.index(block), begin.index("Bluefruit.configPrphConn("))
-        self.assertLess(begin.index(block), begin.index("if (!Bluefruit.begin())"))
-        self.assertLess(begin.index("if (_begin_attempted)"), begin.index(block))
+        policy = "mesh_nrf52::applyBluetoothLedPolicy();"
+        self.assertEqual(begin.count(policy), 1)
+        self.assertLess(begin.index(policy), begin.index("Bluefruit.configPrphConn("))
+        self.assertLess(begin.index(policy), begin.index("if (!Bluefruit.begin())"))
+        self.assertLess(begin.index("if (_begin_attempted)"), begin.index(policy))
         harness = r'''
-#include <cassert>
-struct BluefruitMock {
- bool controlled=true;unsigned calls=0;
- void autoConnLed(bool enabled){controlled=enabled;++calls;}
-} Bluefruit;
-void configure(){
-@BLOCK@
-}
+#include <helpers/nrf52/BluetoothLed.h>
+MockBluefruit Bluefruit;
+int led_level = LED_STATE_ON, writes = 0;
 int main(){
- configure();
 #ifdef DISABLE_BLE_LED
- assert(!Bluefruit.controlled&&Bluefruit.calls==1);
+ const bool default_enabled = false;
 #else
- assert(Bluefruit.controlled&&Bluefruit.calls==0);
+ const bool default_enabled = true;
 #endif
- Bluefruit.controlled=false;configure();assert(!Bluefruit.controlled);
+ assert(mesh::leds::enabled());
+ mesh_nrf52::applyBluetoothLedPolicy();
+ assert(Bluefruit.automatic == default_enabled);
+ // Before begin(), configuring the owner must not query a connection or use
+ // the advertising timer that Bluefruit has not created yet.
+ assert(!Bluefruit.ready && Bluefruit.connection_queries == 0);
+ assert(Bluefruit.timer_starts == 0 && Bluefruit.timer_stops == 0);
+ mesh::leds::setEnabled(false);
+ mesh_nrf52::applyBluetoothLedPolicy();
+ assert(!Bluefruit.automatic && led_level == !LED_STATE_ON);
+ assert(Bluefruit.connection_queries == 0 && Bluefruit.timer_starts == 0);
+ // The shared saved policy now explicitly restores enabled LEDs; the compile
+ // time opt-out continues to override that choice.
+ mesh::leds::setEnabled(true);
+ mesh_nrf52::applyBluetoothLedPolicy();
+ assert(Bluefruit.automatic == default_enabled);
+ assert(Bluefruit.connection_queries == 0 && Bluefruit.timer_starts == 0);
+ mesh::leds::setEnabled(false);
+ Bluefruit.ready = true;
+ mesh_nrf52::bluetoothLedStarted();
+ assert(!Bluefruit.automatic && Bluefruit.timer_starts == 0);
 }
-'''.replace("@BLOCK@", block)
-        self.compile_run(harness)
-        self.compile_run(harness, ("DISABLE_BLE_LED=1",))
+'''
+        for disabled in (False, True):
+            with self.subTest(disabled=disabled):
+                defines = ["LED_BLUE=12", "LED_STATE_ON=1"]
+                if disabled:
+                    defines.append("DISABLE_BLE_LED=1")
+                run_led_policy(self, harness, defines)
 
     def test_shared_success_mark_and_rak_discovery_reset_are_wired(self):
         provider = (ROOT / "src/helpers/sensors/MicroNMEALocationProvider.h").read_text()
@@ -533,7 +624,12 @@ int main(){
         self.assertIn("resetTimeSyncRequestState();", rak_provider)
         # Explicit CLI sync remains forced; scheduled power cycles honor the
         # configured hourly cadence, with force-sync retained for legacy0.
-        self.assertIn("void syncTime() override { nmea.clear(); LocationProvider::syncTime(); }", provider)
+        force_sync = extract_braced(provider, "void syncTime() override")
+        self.assertIn("nmea.clear();", force_sync)
+        self.assertIn("time_valid = 0;", force_sync)
+        self.assertIn("_fresh_clock_sample = false;", force_sync)
+        self.assertLess(force_sync.index("nmea.clear();"),
+                        force_sync.index("LocationProvider::syncTime();"))
         self.assertIn("_location->syncTimeForPowerSavingCycle();", extract_braced(rak, "void EnvironmentSensorManager::armGpsPowerSavingCycle()"))
 
 

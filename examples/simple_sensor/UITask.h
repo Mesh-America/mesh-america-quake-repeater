@@ -5,18 +5,24 @@
 
 class UITask {
   DisplayDriver* _display;
-  unsigned long _next_read, _next_refresh;
+  // Completion timestamps keep periodic work due across millis() rollover.
+  uint32_t _last_read, _last_refresh;
   int _prevBtnState;
   NodePrefs* _node_prefs;
   char _version_info[32];
   uint32_t _radio_profile_page_started_at = 0;
   bool _dual_radio_enabled_seen = false;
+  bool _startup_complete = false;
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) && HELTEC_TFT_RUNTIME_ROTATION == 1
+  uint16_t _rotation_seen = 0xFFFF;
+  void applyDisplayRotation();
+#endif
 
   void resetRadioProfileDisplayPage();
   bool showingSecondaryRadioProfilePage();
   void renderCurrScreen();
 public:
-  UITask(DisplayDriver& display) : _display(&display) { _next_read = _next_refresh = 0; }
+  UITask(DisplayDriver& display) : _display(&display) { _last_read = _last_refresh = 0; }
   void begin(NodePrefs* node_prefs, const char* build_date, const char* firmware_version);
 
   void loop();

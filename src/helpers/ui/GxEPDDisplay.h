@@ -15,6 +15,10 @@
 #include <CRC32.h>
 
 #include "DisplayDriver.h"
+#include "PocketGuiConfig.h"
+#if UI_POCKET_GUI
+  #include "MeshPocketEinkPanel.h"
+#endif
 
 #ifndef EINK_MAX_PARTIAL_REFRESH
   // 60 to prevent ghosting when refreshing every minute ...
@@ -26,42 +30,89 @@
   #define DISPLAY_ROTATION 3
 #endif
 
+#if defined(LILYGO_TECHO_LITE) && defined(TECHO_LITE_DISPLAY_AUTODETECT) \
+    && TECHO_LITE_DISPLAY_AUTODETECT == 1
+  #define MESHCORE_TECHO_LITE_DISPLAY_DETECTION 1
+#endif
+
 class GxEPDDisplay : public DisplayDriver {
 
-#if defined(EINK_DISPLAY_MODEL)
-  GxEPD2_BW<EINK_DISPLAY_MODEL, EINK_DISPLAY_MODEL::HEIGHT> display;
-#else
-  GxEPD2_BW<GxEPD2_150_BN, 200> display;
-#endif
-#if defined(EINK_DISPLAY_MODEL)
+#if UI_POCKET_GUI
+  using Panel = MeshPocketEinkPanel;
+  static int partialRefreshLimit(int count) { return count < 0 || count > 10 ? 10 : count; }
+#elif defined(EINK_DISPLAY_MODEL)
   using Panel = EINK_DISPLAY_MODEL;
 #else
   using Panel = GxEPD2_150_BN;
 #endif
+  GxEPD2_BW<Panel, Panel::HEIGHT> display;
   static constexpr int kWidth = (DISPLAY_ROTATION & 1) ? Panel::HEIGHT : Panel::WIDTH;
   static constexpr int kHeight = (DISPLAY_ROTATION & 1) ? Panel::WIDTH : Panel::HEIGHT;
   int _text_ascent = 13;
   int _line_height = 22;
   bool _init = false;
   bool _isOn = false;
+#ifdef MESHCORE_TECHO_LITE_DISPLAY_DETECTION
+  bool _probe_complete = false;
+  bool _present = false;
+#endif
   uint16_t _curr_color;
   CRC32 display_crc;
   int last_display_crc_value = 0;
-  int _cycles_before_full_refresh;
-  int max_partial_refresh = EINK_MAX_PARTIAL_REFRESH; // so this can be changed by an option after
+#if UI_POCKET_GUI
+  int _cycles_before_full_refresh = partialRefreshLimit(EINK_MAX_PARTIAL_REFRESH);
+  int max_partial_refresh = partialRefreshLimit(EINK_MAX_PARTIAL_REFRESH);
+#else
+  int _cycles_before_full_refresh = EINK_MAX_PARTIAL_REFRESH;
+  int max_partial_refresh = EINK_MAX_PARTIAL_REFRESH;
+#endif
+#if UI_POCKET_GUI
+  bool _full_frame = false;
+#endif
 
 public:
 #if defined(EINK_DISPLAY_MODEL)
-  GxEPDDisplay() : DisplayDriver(kWidth, kHeight), display(EINK_DISPLAY_MODEL(PIN_DISPLAY_CS, PIN_DISPLAY_DC, PIN_DISPLAY_RST, PIN_DISPLAY_BUSY)) {}
+  GxEPDDisplay() : DisplayDriver(kWidth, kHeight), display(Panel(PIN_DISPLAY_CS, PIN_DISPLAY_DC, PIN_DISPLAY_RST, PIN_DISPLAY_BUSY)) {}
 #else
   GxEPDDisplay() : DisplayDriver(kWidth, kHeight), display(GxEPD2_150_BN(DISP_CS, DISP_DC, DISP_RST, DISP_BUSY)) {}
 #endif
 
   bool begin();
+#if UI_POCKET_GUI
+  Adafruit_GFX& gfx() { return display; }
+  void crcAdd(const void* bytes, size_t length) {
+    display_crc.update(static_cast<const uint8_t*>(bytes), length);
+  }
+  void setMaxPartialRefresh(int count) {
+    count = partialRefreshLimit(count);
+    if (count == max_partial_refresh) return;
+    max_partial_refresh = count;
+    // Keep a clean refresh that is already due or explicitly requested.
+    if (!_full_frame && _cycles_before_full_refresh != 0) resetPartialRefreshCounter();
+  }
+  void setNativeRotation(int rotation) {
+    rotation &= 3;
+    if (display.getRotation() == rotation) return;
+    display.setRotation(rotation);
+    setDimensions(display.width(), display.height());
+    display.setFullWindow();
+    _full_frame = true;
+    forceFullRefresh();
+  }
+  void setFlipped(bool flipped) override {
+    setNativeRotation((DISPLAY_ROTATION + (flipped ? 2 : 0)) & 3);
+  }
+#endif
 
   bool isOn() override { return _isOn; }
   bool isEink() override { return true; }
-  void forceFullRefresh() override { _cycles_before_full_refresh = 0; };
+  void forceFullRefresh() override {
+    _cycles_before_full_refresh = 0;
+#if UI_POCKET_GUI
+    // Rotation and GUI changes can request this after startFrame().
+    _full_frame = true;
+#endif
+  }
   void resetPartialRefreshCounter() { _cycles_before_full_refresh = max_partial_refresh; };
   void turnOn() override;
   void turnOff() override;

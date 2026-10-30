@@ -16,13 +16,18 @@ public:
  int _active_format=0,_rx_mux=0,_rx_head=0,_rx_tail=0,_rx_count=0,_rx_dropped=0,_rx_dropped_reported=0;
  int _tx_mux=0,_tx_head=0,_tx_tail=0,_tx_count=0,_tx_waiting=0,_tx_callback_done=0;
  int _tx_callback_status=0,_tx_dropped=0,_tx_dropped_reported=0;
+ uint32_t _tx_started_at=0,_tx_retry_at=0;
+ bool _sdk_teardown_failed=false;
+ mesh::bridge::diag::Stats _stats;
+ std::atomic<bool> _debug_dirty{false};
  mesh::espnow::ESPNowRawReassembler _raw_reassembler;
- struct QueuedTransmit {bool started=false;int packet=0;};
+ struct QueuedTransmit {bool started=false,diagnostic=false;int seen_key=0;};
  static constexpr int TX_QUEUE_DEPTH=2;
  QueuedTransmit _tx_queue[TX_QUEUE_DEPTH];
- struct {void clear(const int*){}} _seen_packets;
+ struct {void clearSeenKey(const int&){}} _seen_packets;
  static void recv_cb(){}static void send_cb(){}
  void begin();void end();
+ void recordError(mesh::bridge::diag::Stage,int32_t);void emitDebug();
 };
 """
 WEB_CLASS = r"""
@@ -73,6 +78,8 @@ int main(int argc,char** argv){
   Bridge bridge;sdk_mode=WIFI_AP_STA;WiFi.facade_started=false;
   assert(mesh::wifi::accessPointCompatibleWithLongRange());
   bridge.begin();assert(!bridge._initialized&&!sdk_active&&init_calls==0);
+  assert(bridge._stats.error.stage==mesh::bridge::diag::Stage::WiFiProtocol);
+  assert(bridge._stats.error.code==ESP_ERR_INVALID_STATE&&bridge._debug_dirty.load());
   assert(sdk_mode==WIFI_AP_STA&&station_writes==0&&storage_writes==0);check_ap();
   // Saved raw intent is unchanged; the normal retry can start after AP stops.
   sdk_mode=WIFI_STA;bridge.begin();
@@ -172,7 +179,8 @@ def build_and_run(scenario, *, mutation=None, full=True):
     bridge_source = (ROOT / 'src/helpers/bridges/ESPNowBridge.cpp').read_text()
     bridge = method(bridge_source, 'static void stopBridgeWiFiIfUnused(') + '\n'
     bridge += '\n'.join(method(bridge_source, f'void ESPNowBridge::{name}(')
-                        .replace('ESPNowBridge::', 'Bridge::') for name in ('begin', 'end'))
+                        .replace('ESPNowBridge::', 'Bridge::')
+                        for name in ('begin', 'end', 'recordError', 'emitDebug'))
     stop = method((ROOT / 'src/helpers/esp32/WiFiAccessPointPolicy.h').read_text(),
                   'inline void stopTemporaryAccessPointRadio(')
     web_source = (ROOT / 'src/helpers/esp32/WebConfigServer.cpp').read_text()
@@ -207,7 +215,8 @@ def build_and_run(scenario, *, mutation=None, full=True):
         for name in ('esp_err.h', 'esp_wifi.h', 'WiFi.h', 'Preferences.h'):
             (folder / name).write_text('#pragma once\n')
         fixture = (ROOT / 'test/fixtures/wifi_ap_shared_lr_sdk.h').read_text()
-        source = fixture + '\n#include <helpers/esp32/WiFiRadioPolicy.h>\n'
+        source = fixture + '\n#include <atomic>\n#include <helpers/bridges/ESPNowBridgeDiagnostics.h>\n'
+        source += 'constexpr int ESP_ERR_INVALID_ARG=-4;\n#include <helpers/esp32/WiFiRadioPolicy.h>\n'
         source += '#include <helpers/esp32/WiFiStationPolicy.h>\n'
         source += 'namespace mesh {namespace wifi {\n' + stop + '\n}}\n'
         web = WEB_CLASS.replace('@PROMOTE@', promotion).replace('@IDLE@', idle)

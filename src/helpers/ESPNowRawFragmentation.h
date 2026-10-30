@@ -35,20 +35,47 @@ static constexpr size_t ESPNOW_RAW_FRAGMENT_MAGIC_SIZE =
 static constexpr size_t ESPNOW_RAW_FRAGMENT_HEADER_SIZE = 13;
 static constexpr size_t ESPNOW_RAW_FRAGMENT_DATA_SIZE =
     ESPNOW_RAW_MAX_FRAME_SIZE - ESPNOW_RAW_FRAGMENT_HEADER_SIZE;
+static constexpr size_t ESPNOW_RAW_MAX_SECOND_FRAME_SIZE =
+    ESPNOW_RAW_FRAGMENT_HEADER_SIZE + ESPNOW_RAW_MAX_PACKET_SIZE
+    - ESPNOW_RAW_FRAGMENT_DATA_SIZE;
 
 static_assert(ESPNOW_RAW_FRAGMENT_DATA_SIZE < ESPNOW_RAW_MAX_FRAME_SIZE,
               "ESP-NOW fragment header must leave room for data");
 static_assert(ESPNOW_RAW_FRAGMENT_DATA_SIZE * ESPNOW_RAW_FRAGMENT_COUNT >=
                   ESPNOW_RAW_MAX_PACKET_SIZE,
               "two ESP-NOW fragments must hold one maximum MeshCore packet");
+static_assert(ESPNOW_RAW_FRAGMENT_COUNT == 2
+                  && ESPNOW_RAW_MAX_SECOND_FRAME_SIZE <= ESPNOW_RAW_MAX_FRAME_SIZE,
+              "compact frame storage requires one full frame and one bounded tail");
+
+// Only the first frame can reach 250 bytes. The second holds a 13-byte header
+// and at most 18 remaining packet bytes. Keep both frames owned by the queue
+// without reserving another full frame for each of its six transmit slots.
+struct ESPNowRawFrameData {
+  uint8_t first[ESPNOW_RAW_MAX_FRAME_SIZE];
+  uint8_t second[ESPNOW_RAW_MAX_SECOND_FRAME_SIZE];
+
+  uint8_t* operator[](size_t index) {
+    return index == 0 ? first : index == 1 ? second : nullptr;
+  }
+  const uint8_t* operator[](size_t index) const {
+    return index == 0 ? first : index == 1 ? second : nullptr;
+  }
+  static constexpr size_t capacity(size_t index) {
+    return index == 0 ? ESPNOW_RAW_MAX_FRAME_SIZE
+        : index == 1 ? ESPNOW_RAW_MAX_SECOND_FRAME_SIZE : 0;
+  }
+};
 
 struct ESPNowRawFrames {
   uint8_t count;
   uint16_t lengths[ESPNOW_RAW_FRAGMENT_COUNT];
-  uint8_t data[ESPNOW_RAW_FRAGMENT_COUNT][ESPNOW_RAW_MAX_FRAME_SIZE];
+  ESPNowRawFrameData data;
 
   ESPNowRawFrames() : count(0), lengths{0, 0}, data{} {}
 };
+static_assert(sizeof(ESPNowRawFrames) <= 288,
+              "raw transmit frames must retain compact second-frame storage");
 
 inline uint32_t espNowRawCrc32(const uint8_t* data, size_t len) {
   if (data == nullptr && len != 0) return 0;
@@ -152,10 +179,10 @@ class ESPNowRawReassemblerT {
  public:
   static_assert(SlotCount > 0, "ESP-NOW reassembly needs at least one slot");
 
-  explicit ESPNowRawReassemblerT(uint32_t timeout_ms = 2000)
-      : _timeout_ms(timeout_ms) {
-    reset();
-  }
+  // Constant initialization also lets the linker discard the primary-radio
+  // workspace when this shared source is compiled into a LoRa-only image.
+  explicit constexpr ESPNowRawReassemblerT(uint32_t timeout_ms = 2000)
+      : _timeout_ms(timeout_ms), _slots{} {}
 
   void reset() {
     memset(_slots, 0, sizeof(_slots));

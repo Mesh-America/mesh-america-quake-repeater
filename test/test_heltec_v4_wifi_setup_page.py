@@ -83,8 +83,49 @@ class HeltecV4WiFiSetupPageTest(unittest.TestCase):
         page = ui[page_start:page_end]
         self.assertLess(
             page.index("drawCompactCompanionWiFiSetupPage("),
-            page.index("buildWiFiSetupQrPayload("),
+            page.index("buildCurrentWiFiSetupQrPayload("),
         )
+
+    def test_qr_payload_uses_live_ap_password_and_refuses_unknown_state(self):
+        header = (ROOT / "src/helpers/ui/WiFiSetupQrDisplay.h").read_text()
+        helper = extract_braced(header, "inline bool buildCurrentWiFiSetupQrPayload(")
+        source = r'''
+#include <cassert>
+#include <cstring>
+#include <helpers/ui/WiFiSetupQrPayload.h>
+#define WEBCONFIG_AP_PASSWORD "compiled-other"
+static bool known = true;
+static const char* live_password = "old;pass";
+namespace mesh { namespace wifi {
+bool accessPointJoinPassword(const char* ssid, char* out, size_t capacity) {
+  if (!known || strcmp(ssid, "setup") || strlen(live_password) >= capacity) return false;
+  strcpy(out, live_password); return true;
+}
+} namespace ui {
+@HELPER@
+} }
+int main() {
+  char payload[256] = {};
+#if defined(ESP32_PLATFORM)
+  assert(mesh::ui::buildCurrentWiFiSetupQrPayload(payload, sizeof(payload), "setup"));
+  assert(!strcmp(payload, "WIFI:T:WPA;S:setup;P:old\\;pass;;"));
+  live_password = "new-admin";
+  assert(mesh::ui::buildCurrentWiFiSetupQrPayload(payload, sizeof(payload), "setup"));
+  assert(!strcmp(payload, "WIFI:T:WPA;S:setup;P:new-admin;;"));
+  live_password = "";
+  assert(mesh::ui::buildCurrentWiFiSetupQrPayload(payload, sizeof(payload), "setup"));
+  assert(!strcmp(payload, "WIFI:S:setup;;"));
+  assert(!mesh::ui::buildCurrentWiFiSetupQrPayload(payload, sizeof(payload), "wrong"));
+  known = false;
+  assert(!mesh::ui::buildCurrentWiFiSetupQrPayload(payload, sizeof(payload), "setup"));
+#else
+  assert(mesh::ui::buildCurrentWiFiSetupQrPayload(payload, sizeof(payload), "setup"));
+  assert(!strcmp(payload, "WIFI:T:WPA;S:setup;P:compiled-other;;"));
+#endif
+}
+'''.replace("@HELPER@", helper)
+        self.compile_and_run(source, "-DESP32_PLATFORM=1")
+        self.compile_and_run(source)
 
     def test_short_click_leaves_page_and_hold_toggles_session_ap(self):
         ui = UI.read_text(encoding="utf-8")
@@ -104,6 +145,7 @@ class HeltecV4WiFiSetupPageTest(unittest.TestCase):
 #include <cstdint>
 #include <cstddef>
 #include <helpers/WirelessControl.h>
+#include <helpers/WiFiNetworkPowerPolicy.h>
 #define UI_WIFI_SETUP_HOME_PAGE 1
 #define UI_NO_DISCOVER_SCREEN 1
 #define UI_NO_HIBERNATE 1
@@ -140,22 +182,37 @@ struct HomeScreen : UIScreen {
 };
 int main() {
   UITask task; HomeScreen home(&task);
+  auto& network_power = mesh::wifi::networkPower();
+  network_power.setManaged(true);
+  network_power.setSuspended(true);
+  assert(network_power.backgroundSuspended());
+  assert(!network_power.consumeProbeRequest());
   assert(home.handleInput(static_cast<char>(KEY_NEXT)));
   assert(home._page == HomeScreen::FIRST);
   assert(!companion_wifi_setup_requested && !companion_wifi_setup_stop_requested);
+  assert(!network_power.consumeProbeRequest());
   assert(home.handleInput(static_cast<char>(KEY_PREV)));
   assert(home._page == HomeScreen::WIFI_SETUP);
+  assert(!network_power.consumeProbeRequest());
   assert(home.handleInput(KEY_ENTER));
   assert(companion_wifi_setup_requested && !companion_wifi_setup_stop_requested);
+  assert(network_power.consumeProbeRequest());
+  assert(!network_power.consumeProbeRequest());
+  // The UI hands off a probe; only the network owner may resume transports.
+  assert(network_power.backgroundSuspended());
   WebConfigServer::active = true;
   assert(home.handleInput(KEY_ENTER));
   assert(!companion_wifi_setup_requested && companion_wifi_setup_stop_requested);
+  assert(!network_power.consumeProbeRequest());
   assert(home.handleInput(static_cast<char>(KEY_RIGHT)));
   assert(home._page == HomeScreen::FIRST);
   assert(!companion_wifi_setup_requested && companion_wifi_setup_stop_requested);
+  assert(!network_power.consumeProbeRequest());
   assert(home.handleInput(static_cast<char>(KEY_LEFT)));
   assert(home._page == HomeScreen::WIFI_SETUP);
+  assert(!network_power.consumeProbeRequest());
   requestCompanionWiFiSetupStop();
+  assert(!network_power.consumeProbeRequest());
   struct Backend : mesh::wireless::Backend {
     uint8_t available() const override { return mesh::wireless::WiFi; }
     uint8_t enabled() const override { return mesh::wireless::WiFi; }
@@ -168,6 +225,8 @@ int main() {
   mesh::wireless::control().service(250);
   requestCompanionWiFiSetup();
   assert(!companion_wifi_setup_requested && companion_wifi_setup_stop_requested);
+  assert(!network_power.consumeProbeRequest());
+  assert(network_power.backgroundSuspended());
 }
 '''
         source = (source.replace("@REQUESTS@", requests).replace("@PAGES@", page_enum)
@@ -226,6 +285,8 @@ int main() {
         source = r'''
 #include <cassert>
 #define UI_WIFI_SETUP_HOME_PAGE 1
+#include <cstdint>
+#include <cstddef>
 unsigned long now = 4000;
 unsigned long millis() { return now; }
 struct Screen {};
@@ -242,6 +303,8 @@ struct UITask {
   Screen* home;
   Screen* msg_preview;
   unsigned long ui_started_at = 0;
+  bool _startup_complete = false;
+  Screen* _display = nullptr;
   char handleLongPress(char c);
 };
 ''' + ui[start:end] + r'''
@@ -249,6 +312,7 @@ int main() {
   HomeScreen home;
   Screen reader;
   UITask task{&reader, &home, &reader};
+  task._display = &home;
   assert(task.handleLongPress('E') == 'E');
   assert(the_mesh.rescue_calls == 0);
   task.curr = &home;
