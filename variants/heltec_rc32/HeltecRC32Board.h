@@ -23,6 +23,8 @@ public:
   void powerOff() override;
   void onBeforeTransmit() override;
   void onAfterTransmit() override;
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
   bool setAdcMultiplier(float multiplier) override;
   float getAdcMultiplier() const override { return adc_mult; }

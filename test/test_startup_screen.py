@@ -2,6 +2,7 @@
 """Startup ordering and cooperative radio entropy/display integration."""
 
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -17,6 +18,16 @@ class StartupScreenTest(unittest.TestCase):
             with self.subTest(role=role):
                 main = (ROOT / "examples" / role / "main.cpp").read_text()
                 setup = extract_braced(main, "void setup()")
+                if role == "companion_radio":
+                    # A failed required PSRAM allocation never reaches normal
+                    # startup. Keep its terminal error loop out of the checks
+                    # for delays on the successful display/radio startup path.
+                    failure = extract_braced(
+                        setup, "if (!initializeCompanionMeshStorage())")
+                    body = failure[failure.index("{") + 1:-1]
+                    self.assertEqual(re.sub(r"//[^\n]*|\s+", "", body),
+                                     "for(;;)delay(1000);")
+                    setup = setup.replace(failure, "", 1)
                 frame = setup.index("startup_screen.begin(")
                 self.assertLess(setup.index("board.begin()"), frame)
                 self.assertLess(setup.index("loadDisplayPowerSettings("), frame)

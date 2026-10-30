@@ -12,13 +12,20 @@ public:
   void begin();
 
 #if defined(P_LORA_TX_LED)
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED on
   }
   void onAfterTransmit() override {
     digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED off
   }
 #endif
+
+  bool supportsBatteryCalibration() const override { return true; }
 
   uint16_t getBattMilliVolts() override {
     // Please read before going further ;)
@@ -26,14 +33,14 @@ public:
 
     // We can't drive VBAT_ENABLE to HIGH as long
     // as we don't know whether we are charging or not ...
-    // this is a 3mA loss (4/1500)
+    // About 3 uA through the 1 MOhm + 510 kOhm divider, not 3 mA.
     digitalWrite(VBAT_ENABLE, LOW);
     int adcvalue = 0;
     analogReadResolution(12);
     analogReference(AR_INTERNAL_3_0);
     delay(10);
     adcvalue = analogRead(PIN_VBAT);
-    return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096;
+    return calibrateBatteryMillivolts((adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096);
   }
 
   const char* getManufacturerName() const override {

@@ -48,6 +48,9 @@ class SensorManager {
   unsigned long gps_acquire_started_at = 0;
   unsigned long gps_stable_started_at = 0;
   uint32_t gps_update_interval_sec = 0;
+  bool gps_tracker_enabled = false;
+  bool gps_tracker_fix_ready = false;
+  uint32_t gps_tracker_sync_generation = 0;
 
   bool gpsTelemetryHoldActive(unsigned long now) const;
   bool gpsTelemetryCacheFresh(unsigned long now) const;
@@ -69,10 +72,12 @@ protected:
   void setGpsTelemetryTransportAvailable(bool available);
   void resetGpsTelemetryTransportState();
   bool isGpsTelemetryUserEnabled() const { return gps_user_enabled; }
+  bool isTrackerGpsModeEnabled() const { return gps_tracker_enabled; }
   bool isGpsTelemetryTransportAvailable() const {
     return gps_transport_available;
   }
   bool gpsTelemetryReceiverRequired(unsigned long now) const {
+    if (gps_tracker_enabled) return gps_acquiring;
     return gps_acquiring || gpsTelemetryHoldActive(now);
   }
   bool setGpsUpdateIntervalValue(const char* value) {
@@ -121,12 +126,21 @@ public:
   }
   virtual void loop() { }
   virtual void setTelemetryLocationAccessAvailable(bool available);
+  // Read the existing fresh cache without acquiring GPS, changing power, or
+  // taking a UART. Sleeping/off receivers may retain a recent valid fix.
+  bool getCachedGpsPosition(double& latitude, double& longitude) const;
+  // Runtime tracker ownership leaves the saved manual GPS preference intact.
+  // Each acquisition needs a new fix and validated clock sync, bounded to 120s.
+  void setTrackerGpsModeEnabled(bool enabled);
+  bool beginTrackerGpsAcquisition();
+  bool isTrackerGpsAcquisitionPending() const;
+  bool takeTrackerGpsPosition(double& latitude, double& longitude);
   bool requestGpsTelemetryTimeSync(uint64_t min_interval_secs) {
 #if ENV_INCLUDE_GPS
     // A denied request must not consume the provider's throttle or reclaim a
     // bridge-owned UART. Shared GPS rails make isEnabled() an unsafe substitute
     // for the manager's established transport ownership.
-    if (!gps_transport_available || !telemetryGpsDetected()) return false;
+    if (gps_tracker_enabled || !gps_transport_available || !telemetryGpsDetected()) return false;
     LocationProvider* location = getLocationProvider();
     if (location != nullptr && location->getTimeSyncIntervalHours() != 0) {
       min_interval_secs = static_cast<uint64_t>(location->getTimeSyncIntervalHours()) * 3600UL;
@@ -160,6 +174,19 @@ public:
     return false;
   }
   virtual LocationProvider* getLocationProvider() { return NULL; }
+  // Terminal deep sleep only. Providers may cut power without ending their
+  // UART; a concrete manager can release its own transport before pad hold.
+  virtual void shutdownGpsTransportForDeepSleep() { }
+  // WisBlock slot power is a boot-time choice, separate from logical GPS on/off.
+  virtual bool supportsSharedPeripheralMode() const { return false; }
+  virtual void configureSharedPeripheralMode(bool shared) { (void)shared; }
+  // Terminal rail removal must not interrupt external storage or its retained
+  // recovery state. Unknown managers/discovery fail closed; no probing here.
+  virtual bool canRemoveSharedStoragePowerForDeepSleep() const { return false; }
+  virtual bool isGpsPowered() const {
+    LocationProvider* location = const_cast<SensorManager*>(this)->getLocationProvider();
+    return location != NULL && location->isEnabled();
+  }
   virtual void setPowerSavingEnabled(bool enabled) { powersaving_enabled = enabled; }
   // Runtime bridges may temporarily own the UART used by a GPS receiver. A
   // sensor manager that actually detected a GPS on that UART overrides these

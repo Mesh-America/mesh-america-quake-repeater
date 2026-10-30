@@ -66,6 +66,11 @@ public:
   void begin(Backend& backend) { backend_ = &backend; }
   bool blocked(uint8_t service) const { return (blocked_.load() & service) != 0; }
   bool pending() const { return pending_; }
+  // New background owners must honor the reply-drain grace period before
+  // the backend actually shuts down a requested service.
+  bool pendingDisable(uint8_t service) const {
+    return pending_ && (scope_ & service) && !(target_ & service);
+  }
   bool masterOff() const { return master_off_; }
   bool allowService(uint8_t service) {
     if (master_off_ || pending_) return false;

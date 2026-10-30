@@ -37,6 +37,7 @@ class FastProfileSwitchTests(unittest.TestCase):
         state = (ROOT / "src/helpers/radiolib/SX1262ProfileSwitchState.h").read_text()
         harness = r'''
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cstddef>
 #include <cstdint>
 @STATE@
@@ -66,7 +67,8 @@ int main() {
     def test_owned_rx_window_commands_errors_and_lifecycle_invalidation(self):
         src = (ROOT / "src/helpers/radiolib/CustomSX1262.h").read_text()
         state = (ROOT / "src/helpers/radiolib/SX1262ProfileSwitchState.h").read_text().replace("#pragma once", "")
-        signatures = ["void setProfileSwitchOptimization(", "void beginProfileSwitch(",
+        signatures = ["uint8_t defaultProfileSwitchFeatures(", "uint8_t profileSwitchCapabilities(", "uint8_t getProfileSwitchFeatures(",
+                      "void setProfileSwitchFeatures(", "void setProfileSwitchOptimization(", "void beginProfileSwitch(",
                       "void endProfileSwitch(", "bool profileSwitchFailed(", "int16_t restoreTcxoAfterSleep(",
                       "int16_t standby()", "int16_t standby(uint8_t", "int16_t sleep()",
                       "int16_t sleep(bool", "int16_t reset(bool", "int16_t stageMode(",
@@ -77,10 +79,14 @@ int main() {
         methods = "\n".join(method(src, signature).replace(" override", "") for signature in signatures)
         harness = r'''
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cstdint>
 #include <cstddef>
 #include <string>
 @STATE@
+#define MC_SX1262_FAST_PROFILE_SWITCH 1
+#define MC_SX1262_FAST_IQ_CACHE 0
+#define MC_SX1262_FAST_MODEM_CACHE 0
 #define MC_SX1262_FAST_FS @FS@
 #define MC_SX1262_FAST_PACKET_CACHE @PACKET@
 #define RADIOLIB_ERR_NONE 0
@@ -141,7 +147,9 @@ struct SX1262 {
   int16_t setRx(uint32_t timeout) { assert(timeout==0xffffff);return call('R'); }
 };
 struct Radio: SX1262 {
-  SX1262ProfileSwitchState _profileSwitch{true};bool _rx_ps_rf_rx_disabled=false;uint32_t _profileFastResumes=0;
+  uint32_t _activityAt=0;bool _headerSeen=false;
+  SX1262ProfileSwitchState _profileSwitch{true};
+  uint8_t _profileSwitchFeatures=defaultProfileSwitchFeatures();bool _rx_ps_rf_rx_disabled=false;uint32_t _profileFastResumes=0;
   bool _coldStandby=true;
   bool _tcxoWakePending=false;
   @METHODS@
@@ -231,6 +239,27 @@ int main() {
   fault.errors=32;fault.trace.clear();assert(fault.standby()==0 && fault.trace=="UEV");
   assert(!fault._tcxoWakePending);
   Radio wrong;wrong.modem=0;assert(wrong.startReceive()==0 && !wrong._profileSwitch.rxValid);
+  // Every supported feature is independently selectable. Unsupported request
+  // bits are masked before ownership changes; setters issue no radio command.
+  for(unsigned requested=0;requested<256;++requested) {
+    Radio x;x.setProfileSwitchFeatures(uint8_t(requested));
+    const uint8_t features=requested & x.profileSwitchCapabilities();
+    assert(x.getProfileSwitchFeatures()==features && x.trace.empty());
+    assert(x._profileSwitch.enabled==bool(features & mesh::RadioSwitchTuning::Warm));
+    assert(!x._profileSwitch.rxValid && !x._profileSwitch.packetValid
+        && !x._profileSwitch.modulationValid);
+    assert(x.startReceive()==0);x.trace.clear();x.beginProfileSwitch(true);
+    assert(x.standby()==0);
+    const bool warm=features & mesh::RadioSwitchTuning::Warm;
+    const bool fs=features & mesh::RadioSwitchTuning::Fs;
+    assert(x.trace==(warm ? (fs ? "If":"s") : "S"));x.trace.clear();
+    assert(x.startReceive()==0);
+    const bool packet=features & mesh::RadioSwitchTuning::Packet;
+    assert(x.trace==(warm ? (packet ? "CWR":"CPWR") : "GSF"));
+    x.endProfileSwitch(true);x.trace.clear();
+    x.setProfileSwitchFeatures(features);
+    assert(x.trace.empty() && !x._profileSwitch.rxValid && !x._profileSwitch.packetValid);
+  }
   Radio off;off.setProfileSwitchOptimization(false);assert(off.startReceive()==0);
   assert(off.trace=="GUF" && !off._profileSwitch.rxValid);
 }

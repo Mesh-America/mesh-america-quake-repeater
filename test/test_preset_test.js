@@ -265,6 +265,10 @@ assert.strictEqual(
   "set tempradioat 910.1,500,8,7,+1,+2880\nget tempradioat"
 );
 assert.strictEqual(commands.primaryCancel, "get tempradioat\ndel tempradioat all");
+assert.strictEqual(commands.companionCancelBefore,
+  "get tempradioat2\ndel tempradioat2 all\nset radio2.cross off");
+assert.strictEqual(commands.companionCancelDuring,
+  "set tempradio2 off\nset radio2.cross off");
 assert.strictEqual(
   commands.companionNow,
   "set radio2.cross on\nset tempradio2 910.1,500,8,7,rxtx,2880"

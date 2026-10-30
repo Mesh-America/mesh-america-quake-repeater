@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise real contact handles, cache policy and persistence under sanitizers."""
 from pathlib import Path
+import configparser
+import re
 import subprocess
 import tempfile
 import unittest
@@ -22,6 +24,170 @@ def crypto_objects(temp):
 
 
 class ContactCacheTest(unittest.TestCase):
+    def test_empty_path_pool_has_no_flash_load_image(self):
+        # The 390-handle pool must occupy zero-initialized storage, not a
+        # multi-KiB initialized-data image containing repeated empty markers.
+        # Compile a real static instance; source-shape checks cannot establish
+        # whether the compiler emits a flash initializer for it.
+        with tempfile.TemporaryDirectory(prefix="mesh-path-pool-image-") as directory:
+            source = Path(directory) / "pool.cpp"
+            obj = Path(directory) / "pool.o"
+            source.write_text('''#include <helpers/ContactPathCache.h>
+mesh::ContactPathStorage& testPathStorage() {
+  static mesh::ContactPathPool<390> pool;
+  return pool;
+}
+''', encoding="ascii")
+            compiled = subprocess.run([
+                "c++", "-std=c++17", "-Os", "-fno-threadsafe-statics",
+                "-fno-rtti", "-fno-exceptions", "-I", str(ROOT / "src"),
+                "-c", str(source), "-o", str(obj),
+            ], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+            symbols = subprocess.run(["nm", "-S", "-C", "--defined-only", str(obj)],
+                                     capture_output=True, text=True)
+            self.assertEqual(symbols.returncode, 0, symbols.stdout + symbols.stderr)
+            match = re.search(r"^\S+\s+([0-9a-fA-F]+)\s+(\w) testPathStorage\(\)::pool$",
+                              symbols.stdout, re.MULTILINE)
+            self.assertIsNotNone(match, symbols.stdout)
+            self.assertGreater(int(match[1], 16), 5000)
+            self.assertEqual(match[2].lower(), "b", symbols.stdout)
+
+    def test_default_policy_covers_high_contact_nrf52_without_full(self):
+        cases = (
+            ({"NRF52_PLATFORM": 1, "MAX_CONTACTS": 350}, 1),
+            ({"NRF52_PLATFORM": 1, "MAX_CONTACTS": 301}, 1),
+            ({"NRF52_PLATFORM": 1, "MAX_CONTACTS": 300}, 0),
+            ({"NRF52_PLATFORM": 1}, 0),
+            ({"ESP32_PLATFORM": 1, "MAX_CONTACTS": 350}, 0),
+            ({"ESP32_PLATFORM": 1, "MAX_CONTACTS": 160}, 0),
+            ({"ESP32_PLATFORM": 1, "MAX_CONTACTS": 160, "MESH_CONTACT_CACHE": 1}, 1),
+            ({"NRF52_PLATFORM": 1, "COMPANION_RADIO_FULL": 1}, 1),
+            ({"ESP32_PLATFORM": 1, "COMPANION_RADIO_FULL": 1}, 1),
+            ({"NRF52_PLATFORM": 1, "MAX_CONTACTS": 350, "BOARD_HAS_PSRAM": 1}, 0),
+            ({"ESP32_PLATFORM": 1, "COMPANION_RADIO_FULL": 1, "BOARD_HAS_PSRAM": 1}, 0),
+            ({"NRF52_PLATFORM": 1, "MAX_CONTACTS": 350, "MESH_CONTACT_CACHE": 0}, 0),
+            ({"NRF52_PLATFORM": 1, "MAX_CONTACTS": 100, "MESH_CONTACT_CACHE": 1}, 1),
+        )
+        for defines, expected in cases:
+            with self.subTest(defines=defines):
+                result = subprocess.run([
+                    "c++", "-E", "-P", "-x", "c++", "-",
+                    "-I", str(ROOT / "src"),
+                    *("-D%s=%s" % item for item in defines.items()),
+                ], input='#include <helpers/ContactCachePolicy.h>\nMESH_CONTACT_CACHE\n',
+                    text=True, capture_output=True, check=True)
+                self.assertEqual(result.stdout.strip(), str(expected))
+
+    def test_v2_ble_recipe_preserves_bluedroid_capacities_and_cache_isolation(self):
+        config = configparser.ConfigParser(interpolation=None, inline_comment_prefixes=(";",))
+        config.read(ROOT / "variants/heltec_v2/platformio.ini")
+        target = "env:Heltec_v2_companion_radio_ble"
+        self.assertEqual(config[target]["extends"], "Heltec_lora32_v2")
+        flags = config[target]["build_flags"]
+        for define in ("MESH_CONTACT_CACHE=1", "MAX_CONTACTS=160", "MAX_GROUP_CHANNELS=8",
+                       "OFFLINE_QUEUE_SIZE=128", "BLE_PIN_CODE=123456"):
+            self.assertRegex(flags, r"(?m)^\s*-D\s*" + re.escape(define) + r"\s*$")
+        self.assertEqual(config["env:Heltec_v2_companion_radio_ble_ps"]["extends"], target)
+        for section in config:
+            if section != target:
+                self.assertNotIn("MESH_CONTACT_CACHE", config[section].get("build_flags", ""), section)
+            for option in ("build_flags", "lib_deps", "lib_ignore"):
+                self.assertNotRegex(config[section].get(option, ""), r"(?i)nimble")
+
+    def test_v2_non_full_160_contacts_eviction_frames_durability_and_cold_secrets(self):
+        self.run_cache_test("ESP32_PLATFORM", classic_esp32=True,
+                            fixture_transform=self.classic_esp32_fixture,
+                            expected_marker="PASS: V2 non-Full 160-contact cache and cold secrets")
+
+    def classic_esp32_fixture(self, temp):
+        fixture = (ROOT / "test/fixtures/contact_cache/test_contact_cache.cpp").read_text()
+        # Reuse the existing hardware/filesystem seams and real extracted
+        # production methods. Its older 350-contact scenarios require flash
+        # secrets, so this exact recipe supplies its own bounded scenario.
+        prefix = fixture[:fixture.index("static void restored_zero_paths_need_no_flash_or_resident_entries()")]
+        for declaration in (
+                ", public mesh::ContactSecretBackend",
+                "  uint16_t secretSlot(const uint8_t[32]) const;\n",
+                "  bool readSavedSecret(const uint8_t[32], const uint8_t[32], uint8_t[32]) override;\n",
+                "  bool saveSecret(const uint8_t[32], const uint8_t[32], const uint8_t[32]) override;\n"):
+            self.assertEqual(prefix.count(declaration), 1)
+            prefix = prefix.replace(declaration, "", 1)
+        secret_fixture = (ROOT / "test/fixtures/contact_cache/test_secret_power.cpp").read_text()
+        prefix += method(secret_fixture, "class NoIoBackend :") + ";\n"
+        prefix += method(secret_fixture, "int main()").replace(
+            "int main()", "static void cold_secrets_recalculate_without_flash()", 1) + "\n"
+        prefix += method(fixture, "static unsigned drain_cooperative_save(") + "\n"
+        scenario = r'''
+#ifdef COMPANION_RADIO_FULL
+#error "The V2 BLE cache must work without Full Companion"
+#endif
+#ifdef MESH_USE_NIMBLE_ARDUINO
+#error "The V2 BLE cache must retain its existing Bluetooth host"
+#endif
+static_assert(MESH_CONTACT_CACHE == 1 && MESH_CONTACT_SECRET_FLASH_CACHE == 0);
+static_assert(MAX_CONTACTS == 160 && MAX_GROUP_CHANNELS == 8 && OFFLINE_QUEUE_SIZE == 128);
+static_assert(sizeof(ContactInfo) <= 92);
+int main() {
+  cold_secrets_recalculate_without_flash();
+  Fixture f(MAX_CONTACTS);
+  f.host.capacity = MAX_CONTACTS;
+  assert(f.host.contacts.size() == MAX_CONTACTS);
+  assert(!f.host.onContactLoaded(f.host.contacts[0])); // Capacity is still exactly 160.
+  const auto original = SPIFFS.files.at("/contacts3");
+  for (unsigned i = 0; i < MAX_CONTACTS; ++i) f.check(i, route(i));
+  const unsigned reads = SPIFFS.reads;
+  f.check(0, route(0)); // Cold after more than the 16 resident paths.
+  assert(SPIFFS.reads == reads + 1);
+  f.check(0, route(0));
+  assert(SPIFFS.reads == reads + 1);
+
+  ContactFrameSink sink;
+  MyMesh app;
+  app._serial = &sink;
+  for (unsigned i = 0; i < MAX_CONTACTS; ++i) {
+    assert(app.writeContactRespFrame(3, f.host.contacts[i]));
+    assert(sink.frame == expected_contact_frame(original.data() + i * 152));
+  }
+  assert(f.store.saveContacts(&f.host, cachedContactFilter));
+  assert(SPIFFS.files.at("/contacts3") == original); // No format migration.
+  {
+    const ContactInfo pending = f.host.contacts[MAX_CONTACTS - 1];
+    assert(f.host.contacts[MAX_CONTACTS - 1].setRawPath(route(980).data()));
+    assert(f.store.markContactDirty(f.host.contacts[MAX_CONTACTS - 1]));
+    assert(drain_cooperative_save(f) > MAX_CONTACTS);
+    Path path;
+    assert(pending.copyPathTo(path.data()) && path == route(MAX_CONTACTS - 1));
+    f.check(MAX_CONTACTS - 1, route(980));
+  }
+  const auto committed = SPIFFS.files.at("/contacts3");
+  assert(committed.size() == MAX_CONTACTS * 152 && committed != original);
+  {
+    const ContactInfo previous = f.host.contacts[0];
+    assert(f.host.contacts[0].setRawPath(route(810).data()));
+    SPIFFS.max_write = 13;
+    assert(!f.store.saveContacts(&f.host, cachedContactFilter));
+    assert(SPIFFS.files.at("/contacts3") == committed);
+    f.host.contacts[0] = previous;
+    SPIFFS.max_write = std::numeric_limits<size_t>::max();
+    assert(f.store.saveContacts(&f.host, cachedContactFilter));
+  }
+  f.host.contacts.clear();
+  f.store.loadContacts(&f.host);
+  assert(!f.store.hasIncompleteContactLoad() && f.host.contacts.size() == MAX_CONTACTS);
+  for (unsigned i = 0; i < MAX_CONTACTS; ++i) {
+    f.check(i, route(i == MAX_CONTACTS - 1 ? 980 : i));
+    assert(app.writeContactRespFrame(3, f.host.contacts[i]));
+    assert(sink.frame == expected_contact_frame(committed.data() + i * 152));
+  }
+  for (const auto& file : SPIFFS.files) assert(file.first.find("/csecret") != 0);
+  puts("PASS: V2 non-Full 160-contact cache and cold secrets");
+}
+'''
+        path = temp / "classic_esp32.cpp"
+        path.write_text(prefix + scenario, encoding="ascii")
+        return path
+
     def test_esp32_misses_recalculate_without_flash_io(self):
         with tempfile.TemporaryDirectory(prefix="mesh-secret-power-") as temp:
             temp = Path(temp)
@@ -44,16 +210,44 @@ class ContactCacheTest(unittest.TestCase):
     def test_nrf52_paged_store_migration_and_snapshots(self):
         self.run_cache_test("NRF52_PLATFORM")
 
+    def test_standard_nrf52_policy_preserves_migration_and_snapshots(self):
+        # No Full or explicit cache flag: exercise the ordinary 350-contact
+        # recipe's default through the same real cache/persistence harness.
+        self.run_cache_test("NRF52_PLATFORM", standard_nrf52=True)
+
     def test_esp32_default_crc_cadence_is_detected(self):
         self.run_cache_test("ESP32_PLATFORM", disable_crc_batch=True)
 
-    def run_cache_test(self, platform, disable_crc_batch=False):
+    def test_esp32_disabled_contact_recovery_is_detected(self):
+        self.run_cache_test("ESP32_PLATFORM", disable_recovery=True)
+
+    def test_esp32_unconditional_contact_reset_is_detected(self):
+        self.run_cache_test("ESP32_PLATFORM", disable_raw_recovery=True)
+
+    def test_nrf52_unconditional_contact_reset_is_detected(self):
+        self.run_cache_test("NRF52_PLATFORM", disable_raw_recovery=True)
+
+    def test_nrf52_unsafe_legacy_discovery_recovery_is_detected(self):
+        self.run_cache_test("NRF52_PLATFORM", unsafe_legacy_discovery=True)
+
+    def test_nrf52_unsafe_page_discovery_recovery_is_detected(self):
+        self.run_cache_test("NRF52_PLATFORM", unsafe_page_discovery=True)
+
+    def run_cache_test(self, platform, disable_crc_batch=False, disable_recovery=False,
+                       disable_raw_recovery=False,
+                       unsafe_legacy_discovery=False, unsafe_page_discovery=False,
+                       fixture_transform=None, expected_failure=None,
+                       expected_marker='PASS: 114 shared request/login payload and routing traces',
+                       standard_nrf52=False, classic_esp32=False):
         with tempfile.TemporaryDirectory(prefix="mesh-contact-cache-") as temp:
             temp = Path(temp)
             store = (ROOT / "examples/companion_radio/DataStore.cpp").read_text()
             functions = [
                 "static bool serializeContactRecord(",
                 "static bool deserializeContactRecord(",
+                "void DataStore::clearContactLoadFailure(",
+                "void DataStore::recoverContacts(",
+                "bool DataStore::hasIncompleteContactLoad() const",
                 "void DataStore::loadContacts(",
                 "bool DataStore::saveContacts(",
                 "bool DataStore::flushContactWrites(",
@@ -63,10 +257,22 @@ class ContactCacheTest(unittest.TestCase):
                 "bool DataStore::readSavedSecret(",
                 "bool DataStore::saveSecret(",
             ]
+            if classic_esp32:
+                self.assertEqual(platform, "ESP32_PLATFORM")
+                functions = [signature for signature in functions if signature not in (
+                    "uint16_t DataStore::secretSlot(", "bool DataStore::readSavedSecret(",
+                    "bool DataStore::saveSecret(")]
             helper_start = store.index("namespace {\nbool cachedContactFilter")
             helper_end = store.index("bool DataStore::readStoredPath(", helper_start)
             implementation = store[helper_start:helper_end]
             header = (ROOT / "examples/companion_radio/DataStore.h").read_text()
+            recovery_start = header.index("  // Contact-only recovery")
+            recovery_end = header.index("#if defined(ESP32_PLATFORM)", recovery_start)
+            (temp / "contact_recovery_state_under_test.h").write_text(
+                header[recovery_start:recovery_end])
+            (temp / "contact_recovery_api_under_test.h").write_text(
+                method(header, "  bool contactRecoveryPending() const") + "\n" +
+                method(header, "  bool contactsAreVolatile() const"))
             state_start = header.index("  mesh::ContactFileTransaction* _contact_write")
             state_end = header.index("\n#endif", state_start)
             (temp / "contact_write_state_under_test.h").write_text(
@@ -74,6 +280,9 @@ class ContactCacheTest(unittest.TestCase):
             functions.append("DataStore::~DataStore()")
             if platform == "ESP32_PLATFORM":
                 functions.extend((
+                    "static bool readableContactFile(",
+                    "const char* DataStore::selectContactFile(",
+                    "bool DataStore::prepareContactSave(",
                     "void DataStore::cancelContactWrite(",
                     "bool DataStore::cancelCooperativeWrite(",
                     "bool DataStore::serviceContactWrite(",
@@ -89,7 +298,43 @@ class ContactCacheTest(unittest.TestCase):
                 implementation += method(store, "static void discardInvalidContactPage(") + "\n"
                 functions.append("bool DataStore::writeContactPage(")
                 functions.append("bool DataStore::loadContactPages(")
+                functions.append("void DataStore::resetContactPageState(")
             implementation += "\n".join(method(store, signature) for signature in functions)
+            if disable_recovery:
+                recovery = method(store, "void DataStore::recoverContacts(")
+                self.assertIn(recovery, implementation)
+                implementation = implementation.replace(
+                    recovery, "void DataStore::recoverContacts(DataStoreHost*) {}")
+            if disable_raw_recovery:
+                # Restore the exact pre-fix unconditional host-reset path,
+                # leaving fault classification and bounded fallback unchanged.
+                raw_retry = method(store, "if (_contact_recovery & ContactRecoveryRawOnly) {")
+                self.assertEqual(implementation.count(raw_retry), 1)
+                implementation = implementation.replace(raw_retry, "")
+            if unsafe_legacy_discovery:
+                discovery = method(store,
+                    'if (!contactPathPresence(contacts_fs, "/contacts3", legacy_exists))')
+                self.assertEqual(discovery.count("queueContactRecovery();"), 1)
+                self.assertEqual(implementation.count(discovery), 1)
+                implementation = implementation.replace(discovery, discovery.replace(
+                    "queueContactRecovery();", "queueContactRecovery(true);"))
+            if unsafe_page_discovery:
+                discovery = method(store,
+                    "if (!contactPathPresence(contacts_fs, path, page_exists))")
+                self.assertNotIn("_unread_contact_pages.mark(page);", discovery)
+                self.assertEqual(discovery.count("queueContactRecovery();"), 1)
+                self.assertEqual(implementation.count(discovery), 1)
+                implementation = implementation.replace(discovery, discovery.replace(
+                    "queueContactRecovery();",
+                    "_unread_contact_pages.mark(page);\n      queueContactRecovery();"))
+            if platform == "NRF52_PLATFORM":
+                # Fault only the page snapshot allocation; keep production
+                # loading/recovery logic and unrelated crypto allocations.
+                allocation = "(uint8_t*)malloc(mesh::storage::CONTACT_PAGE_PAYLOAD_SIZE)"
+                self.assertEqual(implementation.count(allocation), 1)
+                implementation = implementation.replace(
+                    allocation,
+                    "(uint8_t*)allocateContactPagePayload(mesh::storage::CONTACT_PAGE_PAYLOAD_SIZE)")
             if disable_crc_batch:
                 self.assertIn("_contact_write->serviceCommit(true, 8, true)", implementation)
                 implementation = implementation.replace(
@@ -102,37 +347,72 @@ class ContactCacheTest(unittest.TestCase):
                     "Packet::Packet()", "int Packet::getRawLength() const",
                     "bool Packet::isValidPathLen(", "size_t Packet::writePath(",
                     "uint8_t Packet::copyPath(")) + "\n}\n")
+            companion = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
+            text_helpers = (ROOT / "src/helpers/TxtDataHelpers.cpp").read_text()
+            (temp / "contact_frame_under_test.h").write_text(
+                method(text_helpers, "void StrHelper::strzcpy(") + "\n" +
+                method(companion, "bool MyMesh::writeContactRespFrame("))
             chat = (ROOT / "src/helpers/BaseChatMesh.cpp").read_text()
             mesh = (ROOT / "src/Mesh.cpp").read_text()
             (temp / "send_under_test.h").write_text(
                 "namespace mesh {\n" + method(mesh, "bool Mesh::sendDirect(") + "\n}\n"
                 + "\n".join(method(chat, signature) for signature in (
+                    "int BaseChatMesh::sendContactPacket(",
                     "int BaseChatMesh::sendLogin(", "int BaseChatMesh::sendAnonReq(",
                     "bool BaseChatMesh::allocateRequestTag(",
                     "int  BaseChatMesh::sendRequest(const ContactInfo& recipient, const uint8_t*",
                     "int  BaseChatMesh::sendRequest(const ContactInfo& recipient, uint8_t"))
             )
             binary = temp / "test"
+            fixture = ROOT / "test/fixtures/contact_cache/test_contact_cache.cpp"
+            if fixture_transform is not None:
+                fixture = fixture_transform(temp)
+            if classic_esp32:
+                policy = ["-DMESH_CONTACT_CACHE=1", "-DMAX_CONTACTS=160",
+                          "-DMAX_GROUP_CHANNELS=8", "-DOFFLINE_QUEUE_SIZE=128",
+                          "-DBLE_PIN_CODE=123456", "-DCONFIG_IDF_TARGET_ESP32=1",
+                          "-DHELTEC_LORA_V2=1"]
+            else:
+                policy = ([] if standard_nrf52 else ["-DMESH_CONTACT_CACHE=1", "-DCOMPANION_RADIO_FULL=1"])
+                policy += ["-DMESH_CONTACT_SECRET_FLASH_CACHE=1", "-DMAX_CONTACTS=350"]
             result = subprocess.run([
                 "c++", "-std=c++17", "-O1", "-g", "-Wall", "-Wextra",
                 "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
-                "-DMESH_CONTACT_CACHE=1", "-DCOMPANION_RADIO_FULL=1",
-                "-DMESH_CONTACT_SECRET_FLASH_CACHE=1",
-                "-D" + platform + "=1", "-DMAX_CONTACTS=350",
+                *policy, "-D" + platform + "=1",
+                "-I", str(ROOT / "test/fixtures/contact_cache"),
                 "-I", str(ROOT / "test/fixtures/contact_cache/mocks"),
                 "-I", str(ROOT / "lib/ed25519"),
                 "-I", str(ROOT / "src"), "-I", str(temp),
-                str(ROOT / "test/fixtures/contact_cache/test_contact_cache.cpp"),
+                str(fixture),
                 str(ROOT / "src/helpers/ContactInfo.cpp"), *crypto_objects(temp),
                 "-lcrypto", "-o", str(binary),
             ], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([str(binary)], capture_output=True, text=True)
-            if disable_crc_batch:
+            if expected_failure is not None:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected_failure, result.stdout + result.stderr)
+            elif disable_raw_recovery:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("raw_read_recovery_preserves_accepted_ram_state", result.stderr)
+                self.assertIn("f.host.recovery_resets == 0", result.stderr)
+            elif unsafe_page_discovery:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("nrf52_unknown_page_stat_preserves_contact_authority", result.stderr)
+                self.assertIn("f.host.contacts.size()", result.stderr)
+            elif unsafe_legacy_discovery:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("nrf52_unknown_legacy_stat_preserves_contact_authority", result.stderr)
+                self.assertIn("SPIFFS.files == durable", result.stderr)
+            elif disable_recovery:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("!f.store.contactRecoveryPending()", result.stderr)
+            elif disable_crc_batch:
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("crc_read_passes == 104", result.stderr)
             else:
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(expected_marker, result.stdout)
 
 
 if __name__ == "__main__":

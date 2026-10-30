@@ -81,7 +81,7 @@ BUILD_BACKGROUND_HANDOFF_STATE=""
 BUILD_SCRIPT_LOCK_FD=""
 INTERACTIVE_BUILD_SELECTION=0
 
-ENV_VARIANT_SUFFIX_PATTERN='companion_radio_(wifi_mqtt|serial|wifi|usb|ble|full)(_ps)?(_fem(on|off))?|companion_radio_ethernet|comp_radio_usb|companion_usb|companion_ble|repeater_bridge_rs232_serial1_lora_ota_no_external_sensors|repeater_bridge_rs232_serial2_lora_ota_no_external_sensors|repeater_bridge_rs232_lora_ota_no_external_sensors|repeater_rak13302_w25q16_lora_ota|repeater_rak15001_slot_c_lora_ota|repeater_w25q16_lora_ota|repeater_lora_ota_no_external_sensors|repeater_bridge_rs232_serial1|repeater_bridge_rs232_serial2|repeater_bridge_rs232|repeater_bridge_espnow|repeater_observer_mqtt|repeater_ethernet|room_server_ethernet_lora_ota_no_external_sensors|room_server_lora_ota_no_external_sensors|room_svr_lora_ota_no_external_sensors|room_server_lora_ota|room_server_observer_mqtt|room_server_ethernet|terminal_chat|room_server|room_svr|kiss_modem|sensor_lora_ota_no_external_sensors|sensor|repeatr|repeater'
+ENV_VARIANT_SUFFIX_PATTERN='companion_radio_(wifi_mqtt|serial|wifi|usb|ble|full)(_ps)?(_fem(on|off))?|companion_radio_ethernet|comp_radio_usb|companion_usb|companion_ble|repeater_bridge_rs232_serial1_lora_ota_no_external_sensors|repeater_bridge_rs232_serial2_lora_ota_no_external_sensors|repeater_bridge_rs232_lora_ota_no_external_sensors|repeater_rak13302_w25q16_lora_ota|repeater_rak15001_slot_c_lora_ota|repeater_w25q16_lora_ota|repeater_lora_ota_no_external_sensors|repeater_lora_ota|repeater_bridge_rs232_serial1|repeater_bridge_rs232_serial2|repeater_bridge_rs232|repeater_bridge_espnow|repeater_observer_mqtt|repeater_ethernet|room_server_ethernet_lora_ota_no_external_sensors|room_server_lora_ota_no_external_sensors|room_svr_lora_ota_no_external_sensors|room_server_lora_ota|room_server_observer_mqtt|room_server_ethernet|terminal_chat|room_server|room_svr|kiss_modem|sensor_lora_ota_no_external_sensors|sensor|repeatr|repeater'
 BOARD_MODIFIER_WITHOUT_DISPLAY="_without_display"
 BOARD_MODIFIER_LOGGING="_logging"
 BOARD_MODIFIER_TFT="_tft"
@@ -149,6 +149,8 @@ Options:
                  Default for Option 3; Companion USB updates remain supported.
                  Cable-only infrastructure platforms are reported and omitted.
   --allow-no-ota: Include cable-only development targets instead.
+  --with-bootloader <2.4.12>: Build a separate nRF52 Repeater/Room variant
+                carrying the exact-board OTAFIX bootloader for authenticated activation.
   --background: Run the selected build as a persistent detached job. Its log
                 and status live outside OUTPUT_DIR so --clean cannot erase them.
 
@@ -216,8 +218,9 @@ Environment Variables:
                            A single custom version suffix found in existing OUTPUT_DIR
                            artifacts is carried forward after the new numeric version.
   DISABLE_DEBUG=1: Disables build-time debug logging. Full Companion retains its
-                   runtime-gated diagnostics; canonical XIAO QSPI repeaters retain
-                   runtime-gated USB packet logging while MESH_DEBUG stays disabled.
+                   runtime-gated diagnostics; canonical XIAO QSPI repeaters and
+                   qualified RAK/Tower sensor-OTA pairs retain runtime-gated USB
+                   packet logging while MESH_DEBUG stays disabled.
                    If not set, debug flags from variant platformio.ini files are used.
   RESUME_BUILD_OUTPUT=1: Preserves out/ and skips targets whose expected output
                          artifacts already exist. Option 3 resumes by default.
@@ -285,6 +288,7 @@ for section, options in data:
     ota_enabled = False
     ota_disabled = False
     sd_ota = False
+    rak15002_sd_store = False
     qspi_ota = False
     admin_enabled = False
     espnow_enabled = "bridge_espnow" in env_name.lower()
@@ -317,11 +321,19 @@ for section, options in data:
                 ota_disabled = True
             if "OTA_SD_STORE" in str(flag):
                 sd_ota = True
+            if "OTA_RAK15002_SD_STORE" in str(flag):
+                rak15002_sd_store = True
             if "OTA_QSPI_STORE" in str(flag):
                 qspi_ota = True
             match = pattern.search(str(flag))
             if match and platform is None:
                 platform = match.group(0)
+    # RAK15002 STORE is an optional member of the adaptive RAK recipe, not an
+    # SD-primary image.  Keep the old CACHE-only and all other SD profiles in
+    # the SD-primary bucket so their release/bootloader safeguards remain
+    # unchanged.
+    if rak15002_sd_store:
+        sd_ota = False
     if platform:
         full_enabled = platform == "ESP32_PLATFORM" and (
             mqtt_enabled or espnow_enabled or admin_enabled
@@ -1041,6 +1053,13 @@ parse_cli_options() {
       --require-ota)
         REQUIRE_OTA_UPDATES=1
         shift
+        ;;
+      --with-bootloader)
+        if [ "$#" -lt 2 ] || [ "$2" != "2.4.12" ]; then
+          echo "--with-bootloader requires the pinned release 2.4.12"; return 1
+        fi
+        export MESHCORE_NRF52_EMBED_BOOTLOADER="$2"
+        shift 2
         ;;
       --allow-no-ota)
         REQUIRE_OTA_UPDATES=0
@@ -1971,6 +1990,13 @@ print_release_firmware_targets() {
       ;;
     get-repeater-firmwares-to-build)
       get_pio_envs_ending_with_string "_repeater"
+      local qspi_target
+      for qspi_target in "${SUPPORTED_PIO_ENVS[@]}"; do
+        if [[ "$qspi_target" == *_repeater_lora_ota ]] \
+            && ! is_redundant_bulk_build_target "$qspi_target"; then
+          printf '%s\n' "$qspi_target"
+        fi
+      done
       # MeshTower keeps its deployed SD target identity as the one canonical
       # repeater recipe, including when SD staging falls back to internal staging.
       if is_supported_build_env "Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors"; then
@@ -2012,8 +2038,9 @@ print_release_firmware_targets() {
       get_pio_envs_ending_with_string "_room_server"
       for env_name in "${SUPPORTED_PIO_ENVS[@]}"; do
         if is_room_server_role_target "$env_name" \
-            && { is_lora_ota_no_external_sensors_target "$env_name" \
-                 || [[ "$env_name" == solarxiao_*_room_server_lora_ota ]]; }; then
+        && { is_lora_ota_no_external_sensors_target "$env_name" \
+          || [[ "$env_name" == *_room_server_lora_ota ]]; } \
+        && ! is_redundant_bulk_build_target "$env_name"; then
           printf '%s\n' "$env_name"
         fi
       done
@@ -2155,11 +2182,11 @@ is_rak_gps_retaining_ota_target() {
 
   if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ]; then
     case "$target_lc" in
-      rak_4631_*bridge_rs232_serial1*) return 1 ;;
+      rak_3401_*bridge_rs232_serial1*|rak_4631_*bridge_rs232_serial1*) return 1 ;;
       rak_3401_*|rak_4631_*) return 0 ;;
     esac
   fi
-  # Serial1 is the RAK12501 UART on RAK4631. The Serial1 RS-232 bridge owns
+  # Serial1 is the RAK12501 UART on RAK3401/RAK4631. The RS-232 bridge owns
   # that port instead, so its reduced profile intentionally uses the INA-only
   # recipe and must not promise or require the WisBlock GPS provider.
   case "$target_lc" in
@@ -2546,8 +2573,11 @@ supports_esp32_full_shared_espnow() {
     && { is_mqtt_bridge_target "$env_name" || is_repeater_role_target "$env_name"; } || return 1
   # Primary ESP-NOW radios already own the SDK callbacks and packet transport.
   # A second bridge instance would conflict with that radio, not add a mode.
-  ! pio_env_option_contains "$env_name" build_flags "MESH_PRIMARY_ESPNOW" \
-    && ! pio_env_option_contains "$env_name" build_flags "MESH_ESPNOW_RADIO"
+  # The Indicator LoRa board inherits the ESP-NOW board's original declaration
+  # followed by -UMESH_PRIMARY_ESPNOW. Inspect effective definitions rather
+  # than mistaking that overridden declaration for a live radio owner.
+  ! pio_env_has_effective_define "$env_name" MESH_PRIMARY_ESPNOW \
+    && ! pio_env_has_effective_define "$env_name" MESH_ESPNOW_RADIO
 }
 
 apply_esp32_full_shared_bridge_profile() {
@@ -2566,6 +2596,14 @@ apply_esp32_full_shared_bridge_profile() {
   export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DWITH_ESPNOW_BRIDGE=1"
   append_platformio_build_src_filter "+<helpers/bridges/ESPNowBridge.cpp>"
   record_build_capability "bridge.espnow"
+  # UDP is a default-off infrastructure repeater service. It shares saved
+  # station credentials and never belongs to companions or room servers.
+  if is_repeater_role_target "$env_name"; then
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DWITH_UDP_BRIDGE=1"
+    append_platformio_build_src_filter "+<helpers/bridges/UDPBridge.cpp>"
+    append_platformio_build_src_filter "+<helpers/UDPBridgeSettings.cpp>"
+    record_build_capability "bridge.udp"
+  fi
 }
 
 configure_unified_full_infrastructure_output() {
@@ -2704,7 +2742,9 @@ disable_debug_flags() {
   # apparent order in PLATFORMIO_BUILD_FLAGS.
   if [ -n "$env_name" ] && is_companion_radio_full_target "$env_name"; then
     usb_logging_undefs=""
-  elif [ -n "$env_name" ] && is_xiao_qspi_canonical_repeater_build "$env_name"; then
+  elif [ -n "$env_name" ] \
+      && { is_xiao_qspi_canonical_repeater_build "$env_name" \
+           || is_nrf52_paired_runtime_logging_build "$env_name"; }; then
     # Its combined artifact promises runtime USB packet logging. Keep the
     # logger linked without retaining optional MESH_DEBUG output.
     usb_logging_undefs="-UMESH_DEBUG"
@@ -2744,7 +2784,9 @@ apply_debug_overrides() {
   if [ -n "$env_name" ] && is_companion_radio_full_target "$env_name"; then
     preserve_full_companion_logging=1
     preserve_runtime_packet_logging=1
-  elif [ -n "$env_name" ] && is_xiao_qspi_canonical_repeater_build "$env_name"; then
+  elif [ -n "$env_name" ] \
+      && { is_xiao_qspi_canonical_repeater_build "$env_name" \
+           || is_nrf52_paired_runtime_logging_build "$env_name"; }; then
     preserve_runtime_packet_logging=1
   fi
 
@@ -2777,6 +2819,37 @@ apply_debug_overrides() {
   esac
 }
 
+is_nrf52_paired_runtime_logging_build() {
+  local env_name=$1
+
+  # Required sensor pairs normalize normal nodes onto historical OTA aliases.
+  # Those aliases must not silently discard the ordinary USB logger. Qualify
+  # these exact canonical board/role recipes first; do not broaden the old
+  # size-limited OTA or specialized transport policy for unrelated targets.
+  [ "${PIO_ENV_PLATFORM_BY_NAME[$env_name]:-}" = "NRF52_PLATFORM" ] || return 1
+  case "${NRF52_OTA_SENSOR_PROFILE:-}" in
+    full|reduced) ;;
+    *) return 1 ;;
+  esac
+  case "${env_name,,}" in
+    rak_3401_repeater|rak_3401_room_server|rak_3401_sensor|\
+    rak_3401_repeater_lora_ota_no_external_sensors|\
+    rak_3401_room_server_lora_ota_no_external_sensors|\
+    rak_3401_sensor_lora_ota_no_external_sensors|\
+    rak_3401_repeater_unified_lora_ota|\
+    rak_4631_repeater|rak_4631_room_server|rak_4631_sensor|\
+    rak_4631_repeater_lora_ota_no_external_sensors|\
+    rak_4631_room_server_lora_ota_no_external_sensors|\
+    rak_4631_sensor_lora_ota_no_external_sensors|\
+    rak_4631_repeater_unified_lora_ota|\
+    heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors|\
+    heltec_tower_v2_room_server|\
+    heltec_tower_v2_room_server_lora_ota_no_external_sensors)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 uses_merged_standard_usb_logging() {
   local env_name=$1
 
@@ -2789,6 +2862,8 @@ uses_merged_standard_usb_logging() {
       return 1
       ;;
   esac
+
+  is_nrf52_paired_runtime_logging_build "$env_name" && return 0
 
   # These profiles either own Serial for framed traffic, deliberately trade
   # logging for OTA space, or provide their own logging contract. Keep those
@@ -2817,12 +2892,17 @@ apply_merged_standard_usb_logging_profile() {
 
   uses_merged_standard_usb_logging "$env_name" || return 0
 
-  # Canonical XIAO QSPI repeaters include packet logging in the immutable
-  # combined artifact. The saved usb.logging switch controls its live stream.
+  # Canonical combined recipes include packet logging in the immutable
+  # artifact. The saved usb.logging switch controls its live stream.
   local preserve_runtime_packet_logging=0
-  if is_xiao_qspi_canonical_repeater_build "$env_name"; then
+  if is_xiao_qspi_canonical_repeater_build "$env_name" \
+      || is_nrf52_paired_runtime_logging_build "$env_name"; then
     preserve_runtime_packet_logging=1
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMESH_PACKET_LOGGING=1 -DMESH_USB_LOGGING_MERGED=1"
+  fi
+  if is_nrf52_paired_runtime_logging_build "$env_name" \
+      && [ "${MESHDEBUG_OVERRIDE,,}" != "on" ]; then
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UMESH_DEBUG"
   fi
 
   # Explicit diagnostic overrides retain their documented meaning. Canonical
@@ -2836,7 +2916,9 @@ apply_merged_standard_usb_logging_profile() {
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMESH_PACKET_LOGGING=1 -DMESH_USB_LOGGING_MERGED=1"
   fi
   if [ "${MESHDEBUG_OVERRIDE,,}" != "off" ] \
-      && ! is_logging_size_constrained_target "$env_name"; then
+      && ! is_logging_size_constrained_target "$env_name" \
+      && { ! is_nrf52_paired_runtime_logging_build "$env_name" \
+           || [ "${MESHDEBUG_OVERRIDE,,}" = "on" ]; }; then
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMESH_DEBUG=1"
   fi
 }
@@ -2917,6 +2999,31 @@ is_nrf52_companion_radio_full_target() {
     && is_companion_radio_full_target "$1"
 }
 
+# The RAK15002 STORE path is deliberately limited to the canonical RAK4631
+# receiver identities and the RAK4631 Full Companion.  Exact NOR targets,
+# deployed bridge identities, ordinary non-OTA roles, and the older strict
+# CACHE-only RAK15002 seeder keep their existing storage contracts.
+is_rak4631_rak15002_sd_store_target() {
+  case "${1,,}" in
+    rak_4631_repeater_unified_lora_ota|\
+    rak_4631_repeater_lora_ota_no_external_sensors|\
+    rak_4631_room_server_lora_ota_no_external_sensors|\
+    rak_4631_room_server_ethernet_lora_ota_no_external_sensors|\
+    rak_4631_sensor_lora_ota_no_external_sensors|\
+    rak_4631_companion_radio_full)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_rak4631_rak15002_sd_store_receiver_target() {
+  is_rak4631_rak15002_sd_store_target "$1" \
+    && [ "${1,,}" != "rak_4631_companion_radio_full" ]
+}
+
 requires_esp32_arduino3_framework() {
   local env_name=$1
   local pio_env_name=$2
@@ -2974,6 +3081,7 @@ requires_dram_limited_neighbors() {
   # 8 KiB static reserve at 254 neighbors. Use their board-declared 50-entry
   # tables when the OTA manager is included.
   case "${1,,}" in
+    heltec_wireless_tracker_repeater_observer_mqtt|\
     heltec_tracker_v1_1_repeater_observer_mqtt|\
     heltec_tracker_v2_repeater_observer_mqtt)
       # The non-PSRAM Tracker's color framebuffer, MQTT/TLS and OTA leave
@@ -3081,6 +3189,11 @@ get_reduced_lora_ota_target() {
 }
 
 is_nrf52_sensor_ota_pair_target() {
+  # Optional SD archives serve other nodes; never turn their source-only
+  # contract into the ordinary Full/Reduced self-updating receiver pair.
+  case "${1,,}" in
+    rak_4631_repeater_rak15002_sd_seeder_only) return 1 ;;
+  esac
   [ "${PIO_ENV_PLATFORM_BY_NAME[$1]:-}" = "NRF52_PLATFORM" ] \
     && ! is_companion_build "$1" \
     && ! is_kiss_modem_target "$1" \
@@ -3301,7 +3414,7 @@ is_esp32_full_only_bulk_target() {
     station_g3_esp32_repeater|station_g3_esp32_logging_repeater|station_g3_esp32_room_server|station_g3_esp32_sensor|station_g3_esp32_r2_sensor|station_g3_esp32_repeater_observer_mqtt|station_g3_esp32_room_server_observer_mqtt|\
     rak_3112_repeater|rak_3112_repeater_bridge_rs232|rak_3112_repeater_bridge_espnow|rak_3112_repeater_observer_mqtt|rak_3112_room_server|rak_3112_room_server_observer_mqtt|rak_3112_sensor|\
     xiao_s3_wio_repeater|xiao_s3_wio_repeater_bridge_espnow|xiao_s3_wio_repeater_observer_mqtt|xiao_s3_wio_room_server|xiao_s3_wio_room_server_observer_mqtt|xiao_s3_wio_sensor|\
-    lilygo_tdeck_repeater|\
+    lilygo_tdeck_repeater|sensecapindicator-lora_repeater|sensecapindicator-lora-n16r2_repeater|\
     thinknode_m7_repeater|thinknode_m7_room_server|thinknode_m7_repeater_observer_mqtt|thinknode_m7_room_server_observer_mqtt|\
     heltec_v4_r8_repeater|heltec_v4_r8_repeater_observer_mqtt|heltec_v4_r8_room_server|heltec_v4_r8_room_server_observer_mqtt|heltec_v4_r8_sensor|\
     heltec_v4_r8_tft_repeater|heltec_v4_r8_tft_repeater_observer_mqtt|heltec_v4_r8_tft_portrait_repeater_observer_mqtt|heltec_v4_r8_tft_room_server|heltec_v4_r8_tft_room_server_observer_mqtt|heltec_v4_r8_tft_portrait_room_server_observer_mqtt|heltec_v4_r8_tft_sensor)
@@ -3376,8 +3489,12 @@ record_application_expectation() {
 declare_full_logging_application_contract() {
   local env_name=$1
   BUILD_APPLICATION_EXPECTATIONS=()
+  if [ -n "${MESHCORE_NRF52_EMBED_BOOTLOADER:-}" ]; then
+    record_application_expectation "bootloader.embedded" "BL embedded 2.4.12"
+  fi
   if requires_full_usb_packet_logging "$env_name" \
-      || is_xiao_qspi_canonical_repeater_build "$env_name"; then
+      || is_xiao_qspi_canonical_repeater_build "$env_name" \
+      || is_nrf52_paired_runtime_logging_build "$env_name"; then
     # Inspect the packaged application, not an ELF debug/symbol string. The
     # settings alone can exist in debug-only builds with packet logging absent.
     record_application_expectation "logging.usb.packets" \
@@ -3405,11 +3522,35 @@ declare_build_capability_contract() {
 
   declare_full_logging_application_contract "$env_name"
   record_build_capability "profile.${BUILD_PROFILE_FOR_TARGET}"
+  if [ "$env_name" = wio-e5-mini_repeater ]; then
+    # This exact fixed-capacity recipe intentionally omits these four
+    # optional services. Keep the packaged contract explicit about its cuts.
+    record_build_reduction \
+      "radio.carrier_tools omitted to preserve the Mini Repeater app boundary"
+    record_build_reduction \
+      "management.reporting and data.tx omitted to preserve the Mini Repeater app boundary"
+    record_build_reduction \
+      "logging.file omitted; live USB/MQTT packet logging retained"
+    record_build_reduction \
+      "battery.forwarding omitted; battery alerts and readings retained"
+  fi
   pio_env_name=$(get_pio_build_env "$env_name")
+  if is_qspi_hardware_qualification_target "$env_name"; then
+    record_build_capability "hardware.qualification.pending"
+  fi
   if [ "$BUILD_PROFILE_FOR_TARGET" = "full" ] \
       && is_esp32_canonical_full_release_target "$env_name"; then
     pio_env_name=$(get_exact_identity_full_pio_env "$env_name")
   fi
+  local consolidation_contract capability marker
+  consolidation_contract=""
+  if [ -n "$PIO_CONFIG_JSON" ]; then
+    consolidation_contract=$(python3 scripts/consolidated_profiles.py expectations "$pio_env_name" <<<"$PIO_CONFIG_JSON") || return 1
+  fi
+  while IFS='=' read -r capability marker; do
+    [ -n "$capability" ] || continue
+    record_application_expectation "$capability" "$marker"
+  done <<<"$consolidation_contract"
   if is_repeater_role_target "$env_name" \
       && { pio_env_option_contains "$env_name" build_flags "WITH_RS232_BRIDGE=" \
            || pio_env_option_contains "$pio_env_name" build_flags "WITH_RS232_BRIDGE="; }; then
@@ -3417,6 +3558,10 @@ declare_build_capability_contract() {
     # Check both the logical and compiled recipes so substituting sources
     # cannot silently remove RS-232 while its legacy image is retired.
     record_build_expectation "bridge.rs232" "_ZN11RS232Bridge5beginEv"
+    if pio_env_option_contains "$pio_env_name" build_flags "RS232_BRIDGE_MERGED=1"; then
+      record_application_expectation "bridge.rs232.merged" \
+        "Error: use set rs232.enabled on|off"
+    fi
   fi
   if [ "$BUILD_PROFILE_FOR_TARGET" = "full" ] \
       && supports_esp32_full_shared_espnow "$pio_env_name"; then
@@ -3424,6 +3569,10 @@ declare_build_capability_contract() {
     # Verify that the actual ESP-NOW driver survived linking in every Full
     # repeater/observer that claims it, including exact-identity source bases.
     record_build_expectation "bridge.espnow" "_ZN12ESPNowBridge5beginEv"
+    if is_repeater_role_target "$pio_env_name"; then
+      record_build_expectation "bridge.udp" "_ZN9UDPBridge5beginEv"
+      record_application_expectation "bridge.udp.configuration" "udp.enabled"
+    fi
   elif [ "$env_name_lc" = mke_s3_repeater ]; then
     record_build_expectation "bridge.espnow" "_ZN12ESPNowBridge5beginEv"
   fi
@@ -3441,7 +3590,20 @@ declare_build_capability_contract() {
     fi
   fi
 
+  if { [ "$env_platform" = "ESP32_PLATFORM" ] || [ "$env_platform" = "NRF52_PLATFORM" ]; } \
+      && ! is_kiss_modem_target "$env_name"; then
+    local optional_display_marker
+    if [ -n "$PIO_CONFIG_JSON" ] \
+        && optional_display_marker=$(python3 scripts/optional_display_profiles.py "$pio_env_name" <<<"$PIO_CONFIG_JSON"); then
+      record_application_expectation "display.autodetect" "$optional_display_marker"
+    fi
+  fi
+
   if [ "$env_platform" = "NRF52_PLATFORM" ] && ! is_kiss_modem_target "$env_name"; then
+    if is_t114_display_autodetect_build "$pio_env_name"; then
+      record_application_expectation "display.autodetect" \
+        "meshcore.capability.display.autodetect.t114.v1"
+    fi
     # Prove the real DFU service is linked, not merely a generic OTA CLI stub.
     record_build_expectation "ota.update.bluetooth" "_ZN6BLEDfu5beginEv"
     if { is_lora_ota_build "$env_name" \
@@ -3454,6 +3616,16 @@ declare_build_capability_contract() {
   fi
 
   if [ "$env_platform" = "ESP32_PLATFORM" ]; then
+    case "$env_name" in
+      Station_G3_ESP32_*)
+        # Only the uploadable application, not ELF metadata or a guessed name,
+        # can qualify future shared-slot picker/release consolidation.
+        if [ "${PIO_ENV_BOARD_BY_NAME[$env_name]:-}" = station-g3-esp32 ]; then
+          record_application_expectation "radio.station_g3.auto_slots" \
+            "meshcore.capability.station_g3.auto_slots.v1"
+        fi
+        ;;
+    esac
     if is_companion_radio_full_target "$env_name" \
         || { [ "$BUILD_PROFILE_FOR_TARGET" = "standard" ] \
              && requires_esp32_field_browser_ota "$env_name"; }; then
@@ -3687,6 +3859,26 @@ apply_esp32_constrained_companion_size_profile() {
   esac
 }
 
+apply_esp32_iram_advert_storage_profile() {
+  local env_name=$1
+  if [ "$ESP32_FULL_BUILD" != "1" ] || ! supports_esp32_full_build "$env_name"; then
+    return 0
+  fi
+  # These measured classic ESP32 Full roles have genuine unused SRAM0 IRAM,
+  # distinct from byte-accessible D/IRAM heap. Keep all 128 advert records in
+  # its existing SDK NOLOAD section; the backend uses explicit word accesses.
+  case "${env_name,,}" in
+    lilygo_tlora_v2_1_1_6_repeater|lilygo_tlora_v2_1_1_6_repeater_|\
+    lilygo_tlora_v2_1_1_6_repeater_observer_mqtt|lilygo_tlora_v2_1_1_6_repeater_observer_mqtt_|\
+    lilygo_tlora_v2_1_1_6_room_server|lilygo_tlora_v2_1_1_6_room_server_|\
+    lilygo_tlora_v2_1_1_6_room_server_observer_mqtt|lilygo_tlora_v2_1_1_6_room_server_observer_mqtt_|\
+    tbeam_sx1262_repeater_observer_mqtt|tbeam_sx1276_repeater_observer_mqtt|\
+    tbeam_sx1262_room_server_observer_mqtt|tbeam_sx1276_room_server_observer_mqtt)
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_ADVERT_IRAM_WORD_STORAGE=1"
+      ;;
+  esac
+}
+
 apply_esp32_full_size_profile() {
   local env_name=$1
   local max_neighbours=$ESP32_FULL_MAX_NEIGHBOURS
@@ -3715,6 +3907,14 @@ apply_esp32_full_size_profile() {
   export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_NEIGHBOURS=${max_neighbours}"
 
   case "${env_name,,}" in
+    lilygo_tlora_v2_1_1_6_room_server|lilygo_tlora_v2_1_1_6_room_server_|\
+    lilygo_tlora_v2_1_1_6_room_server_observer_mqtt|lilygo_tlora_v2_1_1_6_room_server_observer_mqtt_|\
+    tbeam_sx1262_room_server_observer_mqtt|tbeam_sx1276_room_server_observer_mqtt)
+      # Preserve all 32 Room posts in genuine byte-accessible RTC SLOW memory.
+      # The bounded proof implementation serves the same maximum 4096 leaves
+      # without retaining the legacy 16 KiB leaf cache alongside Room services.
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DROOM_POSTS_RTC_SLOW_STORAGE=1 -DOTA_BOUNDED_SOURCE_PROOFS=1"
+      ;;
     tbeam_sx1262_repeater_observer_mqtt|tbeam_sx1276_repeater_observer_mqtt)
       # MQTT/TLS plus OTA left only 3.3 KiB of static-region headroom with
       # 63 rules. Retain the complete rule engine with a 31-entry table.
@@ -3737,6 +3937,18 @@ apply_esp32_full_size_profile() {
         record_build_reduction \
           "mesh.flood_rules limited to 47 by measured internal DRAM; complete rule engine retained"
       fi
+      ;;
+  esac
+
+  # Preserve all 128 advert-source records and complete Full settings. These
+  # exact S3 recipes use real retained RTC banks for part of the same table.
+  case "${env_name,,}" in
+    heltec_wireless_tracker_repeater|heltec_wireless_tracker_repeater_observer_mqtt|\
+    heltec_tracker_v2_repeater|heltec_tracker_v2_repeater_observer_mqtt)
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_ADVERT_RTC_FAST_SLOTS=50 -DFLOOD_ADVERT_RTC_SLOW_SLOTS=50"
+      ;;
+    heltec_t190_repeater_|heltec_t190_repeater_observer_mqtt)
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_ADVERT_RTC_FAST_SLOTS=16"
       ;;
   esac
 
@@ -3835,18 +4047,13 @@ apply_nrf52_size_profile() {
     return 0
   fi
 
-  # The Adafruit nRF52 platform defaults release builds to -Ofast. Once the
-  # runtime software Ed25519 fallback is linked alongside CC310, that setting
-  # fully expands repeated Curve25519 arithmetic and wastes tens of kilobytes.
-  # Keep hardware crypto, RNG mixing, the software fallback, and board features;
-  # select the size optimizer for repeaters, constrained self-updating images
-  # and Full Companion source images, especially their diagnostic profile.
-  # Full-sensor repeaters also need this after adding the second radio profile;
-  # changing optimization preserves their sensors and protocol features.
-  # The legacy RAK4631 Ethernet Companion also needs -Os to fit its declared
-  # application limit; keep its sensors, transports, OTA and layout unchanged.
+  # The framework defaults to -Ofast, which expands repeated Curve25519
+  # arithmetic when software Ed25519 is linked alongside CC310. Inherit the
+  # canonical nrf52_base -Oz optimizer rather than appending a weaker -Os
+  # override for repeaters, Full Companion, Ethernet, and constrained OTA
+  # recipes. Keep hardware crypto, software fallback, sensors, transports,
+  # OTA, the 8 KiB loop stack, and each board's application/storage layout.
   append_platformio_build_unflags "-Ofast"
-  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -Os"
 
   # These color-display repeaters reserve a 64 KiB reset-retained OTA arena
   # plus a 25 KiB framebuffer. With the 8 KiB loop stack, the complete sensor
@@ -3898,7 +4105,7 @@ apply_lora_ota_no_external_sensors_profile() {
   # costs less than 5 KiB and covers their most common external telemetry use.
   # The ordinary sibling remains fully sensor-enabled.
   # GPS availability follows the exact target recipe. In particular, the
-  # RAK4631 Serial1 RS-232 bridge intentionally omits GPS because both need the
+  # RAK3401/RAK4631 Serial1 RS-232 bridge omits GPS because both need the
   # same UART; other reduced RAK profiles below retain compatible GPS paths.
   if ! is_rak_i2c_voltage_monitor_ota_target "$env_name"; then
     omitted_sensor_flags+=" ${voltage_monitor_flags}"
@@ -3926,6 +4133,29 @@ apply_lora_ota_no_external_sensors_profile() {
     record_build_reduction \
       "selected optional environmental/ranging drivers omitted; generic I2C and exact-target board peripherals remain unchanged"
   fi
+}
+
+# Generated RAK4631 room-server and sensor OTA identities compile an ordinary
+# role environment, so their storage recipe cannot live only in a PlatformIO
+# stanza.  Apply the same bounded RAK15002 STORE contract as the explicit
+# repeater receiver, after reduced-sensor flags have been resolved.  The
+# Companion remains source-only; receiver roles retain the adaptive
+# internal/NOR path as well as optional SD.
+apply_rak4631_rak15002_sd_store_profile() {
+  local env_name=$1
+  local auto_store_flags="-DOTA_RAK_AUTO_STORE=1 -DOTA_QSPI_STORE=1 -DOTA_FLASH_STORE=1 -DOTA_QSPI_SHARED_WISBLOCK_SPI=1 -DOTA_QSPI_SCK_ARDUINO_PIN=3 -DOTA_QSPI_CS_ARDUINO_PIN=31 -DOTA_QSPI_IO0_ARDUINO_PIN=30 -DOTA_QSPI_IO1_ARDUINO_PIN=29 -DOTA_QSPI_IO2_NOT_CONNECTED=1 -DOTA_QSPI_IO3_NOT_CONNECTED=1 -DOTA_QSPI_SCK_FREQUENCY=NRF_QSPI_FREQ_32MDIV4 -DOTA_QSPI_EXPECTED_SIZE=2097152UL"
+  local sd_flags="-DOTA_RAK15002_SD_STORE=1 -DOTA_SD_STORE=1 -DOTA_SD_CS_PIN=26 -DOTA_SD_SCK_MHZ=4 -DOTA_SD_CACHE_MAX=16 -DOTA_MAX_SERVE=24"
+
+  [ "${PIO_ENV_PLATFORM_BY_NAME[$env_name]:-}" = "NRF52_PLATFORM" ] || return 0
+  is_rak4631_rak15002_sd_store_target "$env_name" || return 0
+
+  if is_rak4631_rak15002_sd_store_receiver_target "$env_name"; then
+    # A receiver may select its existing internal flash or qualified NOR
+    # backend when no card is present. The runtime owns the shared slot and
+    # never treats RAK15002 as a generic SD-primary bootloader store.
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} ${auto_store_flags}"
+  fi
+  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} ${sd_flags}"
 }
 
 append_platformio_build_unflags() {
@@ -3968,6 +4198,26 @@ for section, options in json.load(sys.stdin):
     break
 sys.exit(1)
 ' "$env_name" "$option_name" "$needle" <<<"$PIO_CONFIG_JSON"
+}
+
+pio_env_has_effective_define() {
+  local env_name=$1
+  local define_name=$2
+  python3 -c '
+import json, re, sys
+rows = {name: dict(options) for name, options in json.load(sys.stdin)}
+options = rows.get("env:" + sys.argv[1], {})
+flags = options.get("build_flags", [])
+if not isinstance(flags, list): flags = str(flags).splitlines()
+definitions = {}
+for flag in flags:
+    match = re.fullmatch(r"-([DU])\s*(\w+)(?:=(.*))?", str(flag).strip())
+    if not match: continue
+    kind, name, value = match.groups()
+    if kind == "U": definitions.pop(name, None)
+    else: definitions[name] = "1" if value is None else value
+sys.exit(0 if sys.argv[2] in definitions else 1)
+' "$env_name" "$define_name" <<<"$PIO_CONFIG_JSON"
 }
 
 append_platformio_build_src_filter() {
@@ -4063,14 +4313,23 @@ apply_nrf52_lora_ota_build_recipe() {
 # app-preserving bootloader staging. Keep this list narrower than generic nRF52
 # OTA support: external QSPI/SD, ExtraFS Companions, Ethernet, and
 # unqualified/full-sensor roles must not advertise this privileged path. The
-# same inventory is consumed by the nrf52_base pre-script so direct explicit-env
-# and build.sh release builds cannot silently differ.
+# listed RAK4631 adaptive receiver aliases are the one intentional exception:
+# their STORE overlay is applied after this decision, but still requires the
+# same fixed 64 KiB hybrid-RAM / internal-bootloader-update contract. The same
+# inventory is consumed by the nrf52_base pre-script so direct explicit-env and
+# build.sh release builds cannot silently differ.
 supports_nrf52_internal_bootloader_update() {
   [ "${PIO_ENV_PLATFORM_BY_NAME[$1]:-}" = "NRF52_PLATFORM" ] || return 1
-  if [ "${PIO_ENV_QSPI_OTA_BY_NAME[$1]:-0}" != "0" ]; then
-    pio_env_option_contains "$1" build_flags "OTA_RAK_AUTO_STORE" || return 1
+  local rak15002_receiver=0
+  if is_rak4631_rak15002_sd_store_receiver_target "$1"; then
+    rak15002_receiver=1
   fi
-  [ "${PIO_ENV_SD_OTA_BY_NAME[$1]:-0}" = "0" ] || return 1
+  if [ "${PIO_ENV_QSPI_OTA_BY_NAME[$1]:-0}" != "0" ]; then
+    pio_env_option_contains "$1" build_flags "OTA_RAK_AUTO_STORE" \
+      || [ "$rak15002_receiver" = "1" ] || return 1
+  fi
+  [ "${PIO_ENV_SD_OTA_BY_NAME[$1]:-0}" = "0" ] \
+    || [ "$rak15002_receiver" = "1" ] || return 1
   is_lora_ota_build "$1" || return 1
   grep -Fqx -- "$1" tools/mota/nrf52_internal_bootloader_targets.txt
 }
@@ -4159,10 +4418,17 @@ apply_companion_radio_full_profile() {
 
   # Every full Companion is a LoRa mOTA source, never an update destination.
   # Remove inherited staging/install stores before adding the platform's host
-  # folder transport. Full also restores WebConfig when a constrained legacy
-  # WiFi sibling disabled it only to fit its smaller application partition.
-  append_platformio_build_unflags "-UENABLE_OTA -DOTA_FLASH_STORE=1 -DOTA_SD_STORE=1 -DDISABLE_LORA_OTA=1 -DWEBCONFIG_DISABLED=1"
-  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -UOTA_FLASH_STORE -UOTA_SD_STORE -UWEBCONFIG_DISABLED -DOTA_SEEDER_ONLY=1 -DMOTA_TARGET_ID=0 -DCOMPANION_RADIO_FULL=1 -DCOMPANION_FEATURE_TEMP_RADIO=1 -DCOMPANION_FEATURE_OTA_CLI=1 -DENABLE_USB_INTERFACE=1 -DBLE_PIN_CODE=123456 -DMESH_DEBUG=1 -DMESH_PACKET_LOGGING=1"
+  # folder transport. The RAK4631 Full has an optional RAK15002 archive/cache:
+  # retain only that STORE while still removing its internal install store.
+  # Full also restores WebConfig when a constrained legacy WiFi sibling
+  # disabled it only to fit its smaller application partition.
+  if is_rak4631_rak15002_sd_store_target "$env_name"; then
+    append_platformio_build_unflags "-UENABLE_OTA -DOTA_FLASH_STORE=1 -DDISABLE_LORA_OTA=1 -DWEBCONFIG_DISABLED=1"
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -UOTA_FLASH_STORE -DOTA_SD_STORE=1 -UWEBCONFIG_DISABLED -DOTA_SEEDER_ONLY=1 -DMOTA_TARGET_ID=0 -DCOMPANION_RADIO_FULL=1 -DCOMPANION_FEATURE_TEMP_RADIO=1 -DCOMPANION_FEATURE_OTA_CLI=1 -DENABLE_USB_INTERFACE=1 -DBLE_PIN_CODE=123456 -DMESH_DEBUG=1 -DMESH_PACKET_LOGGING=1"
+  else
+    append_platformio_build_unflags "-UENABLE_OTA -DOTA_FLASH_STORE=1 -DOTA_SD_STORE=1 -DDISABLE_LORA_OTA=1 -DWEBCONFIG_DISABLED=1"
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -UOTA_FLASH_STORE -UOTA_SD_STORE -UWEBCONFIG_DISABLED -DOTA_SEEDER_ONLY=1 -DMOTA_TARGET_ID=0 -DCOMPANION_RADIO_FULL=1 -DCOMPANION_FEATURE_TEMP_RADIO=1 -DCOMPANION_FEATURE_OTA_CLI=1 -DENABLE_USB_INTERFACE=1 -DBLE_PIN_CODE=123456 -DMESH_DEBUG=1 -DMESH_PACKET_LOGGING=1"
+  fi
 
   if is_nrf52_companion_radio_full_target "$env_name"; then
     # CDC 0 starts as an ASCII CLI and automatically hands an incoming framed
@@ -4180,6 +4446,9 @@ apply_companion_radio_full_profile() {
     # Apply the proven bootstrap to every nRF52 Full Companion rather than
     # making a board-specific Bluetooth reliability promise.
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DOTA_FOLDER_SERIAL=1 -DCOMPANION_FEATURE_USB_MOTA_SOURCE=1 -DCOMPANION_FEATURE_BLE_MOTA_SOURCE=1 -DMESH_DEBUG=1 -DMESH_PACKET_LOGGING=1 -DCFG_DEBUG=1 -DRECOVERABLE_EXTERNAL_RADIO=1"
+    # Lossless name compression retains every seeder target and its wire ID
+    # while recovering flash headroom; reuse the existing bounded OTA decoder.
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DOTA_TARGET_NAME_FRONT_CODED=1"
     if [ "$env_name" = "t1000e_companion_radio_full" ]; then
       # The T1000-E's primary CDC transport is the only USB interface. Its
       # `usb.logging on` selects an input-capable ASCII logging terminal on
@@ -4194,7 +4463,7 @@ apply_companion_radio_full_profile() {
     # Every nRF52 Full Companion lends the upper half of its offline queue
     # to the cold mOTA context. Keep 256 slots for everyday use and reserve
     # runtime space for Bluetooth, displays, tasks and filesystem buffers.
-    append_platformio_build_unflags "-DOFFLINE_QUEUE_SIZE=512 -DOFFLINE_QUEUE_SIZE=128 -DOFFLINE_QUEUE_SIZE=16"
+    append_platformio_build_unflags "-DOFFLINE_QUEUE_SIZE=512 -DOFFLINE_QUEUE_SIZE=240 -DOFFLINE_QUEUE_SIZE=128 -DOFFLINE_QUEUE_SIZE=16"
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DOFFLINE_QUEUE_SIZE=256 -DOTA_SHARED_COMPANION_QUEUE=1"
     case "$env_name" in
       Heltec_t096_companion_radio_full_*)
@@ -4260,6 +4529,9 @@ apply_companion_radio_full_profile() {
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DCOMPANION_EXCLUSIVE_WIFI_BLE=1 -DUI_WIFI_SETUP_HOME_PAGE=1 -DWEBCONFIG_AP_PREFIX='\"MC-Set\"'"
       if [ "${env_name,,}" = "sensecapindicator-espnow_companion_radio_full" ]; then
         export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DINDICATOR_TRANSPORT_RENDER_PROFILE=1"
+        # Construct the complete mesh in real PSRAM after board startup;
+        # preserve all 350 contacts, 512 queue frames and 15 held DMs.
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DCOMPANION_MESH_PSRAM_STORAGE=1"
       fi
       ;;
   esac
@@ -4312,6 +4584,14 @@ apply_companion_radio_full_profile() {
     heltec_tracker_v2_companion_radio_full_*)
       append_platformio_build_unflags "-DMAX_CONTACTS=350 -DOFFLINE_QUEUE_SIZE=256"
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_CONTACTS=100 -DOFFLINE_QUEUE_SIZE=224"
+      # Reuse idle queue storage during explicit OTA; retain all 224 normal slots.
+      if [[ "${env_name,,}" != generic_espnow_companion_radio_full ]]; then
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DOTA_SHARED_COMPANION_QUEUE=1 -DONE_KEY_DM_COMPACT_HELD=1"
+      else
+        # Keep all 224 frames during OTA too; RTC FAST holds 32 existing
+        # slots without borrowing the queue or shrinking held-DM storage.
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DCOMPANION_RTC_FAST_OFFLINE_FRAMES=32"
+      fi
       record_build_reduction \
         "companion.capacity limited to 100 contacts for runtime RAM; 224 queued frames and all Full transports retained"
       ;;
@@ -4327,8 +4607,18 @@ apply_companion_radio_full_profile() {
     heltec_wireless_tracker_companion_radio_full)
       append_platformio_build_unflags "-DMAX_CONTACTS=350"
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_CONTACTS=150"
+      # Retain all 256 frames, independent OTA workspace, held DMs, and the
+      # RGB565 display. Each RTC bank holds 32 existing CPU-only frames.
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DCOMPANION_RTC_FAST_OFFLINE_FRAMES=32 -DCOMPANION_RTC_SLOW_OFFLINE_FRAMES=32"
       record_build_reduction \
         "companion.capacity limited to 150 contacts for runtime RAM; 256 queued frames and all Full transports retained"
+      ;;
+    mke_s3_companion_radio_full|\
+    thinknode_m2_companion_radio_full|\
+    thinknode_m5_companion_radio_full)
+      # These S3 boards retain the complete 256-frame queue during OTA, with
+      # 32 existing frames in each RTC bank and all 350 contacts unchanged.
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DCOMPANION_RTC_FAST_OFFLINE_FRAMES=32 -DCOMPANION_RTC_SLOW_OFFLINE_FRAMES=32"
       ;;
     sensecapindicator-lora_companion_radio_full|\
     sensecapindicator-lora-n16r2_companion_radio_full)
@@ -4449,12 +4739,83 @@ copy_build_output() {
   cp -- "$source_path" "$output_path"
 }
 
+requires_meshtext_companion_code() {
+  local env_name=$1
+  local pio_env_name=$2
+  local decision_status=0
+  is_companion_radio_full_target "$env_name" || return 1
+
+  # Check the effective recipe and overlay, including explicit feature-off
+  # builds and the Indicator LoRa recipe's inherited ESP-NOW undefine.
+  python3 -c '
+import json, os, re, shlex, sys
+rows = {name: dict(options) for name, options in json.load(sys.stdin)}
+options = rows.get("env:" + sys.argv[1], {})
+
+def operations(value):
+    words = iter(shlex.split(value if isinstance(value, str) else "\n".join(map(str, value))))
+    result = []
+    for word in words:
+        if word in ("-D", "-U"):
+            word += next(words, "")
+        match = re.fullmatch(r"-([DU])(\w+)(?:=(.*))?", word)
+        if match:
+            result.append(match.groups())
+    return result
+
+flags = operations(options.get("build_flags", []))
+flags += operations(os.environ.get("PLATFORMIO_BUILD_FLAGS", ""))
+removed = set(operations(options.get("build_unflags", []))
+              + operations(os.environ.get("PLATFORMIO_BUILD_UNFLAGS", "")))
+flags = [flag for flag in flags if flag not in removed
+         and not (flag[0] == "D" and ("D", flag[1], None) in removed)]
+defines = {name: "1" if value is None else value
+           for kind, name, value in flags if kind == "D"}
+# PlatformIO emits CPPDEFINES before CCFLAGS, so every surviving -U wins.
+for kind, name, _value in flags:
+    if kind == "U":
+        defines.pop(name, None)
+
+def enabled(name, default=False, seen=()):
+    if name not in defines:
+        return default
+    if name in seen:
+        return None
+    value = defines[name].strip().strip("() ")
+    if value in ("false", "true"):
+        return value == "true"
+    if re.fullmatch(r"[A-Za-z_]\w*", value):
+        return enabled(value, False, (*seen, name))
+    number = re.fullmatch(r"([+-]?(?:0[xX][0-9a-fA-F]+|[0-9]+))[uUlL]*", value)
+    if number:
+        value = number[1]
+        base = 16 if "x" in value.lower() else 8 if re.fullmatch(r"[+-]?0[0-7]+", value) else 10
+        return int(value, base) != 0
+    return None
+
+# Explicit enablement overrides the normal ESP-NOW exclusion, as in the header.
+# Unknown expressions retain the requirement rather than silently dropping it.
+if "MESH_ENABLE_MESHTEXT_CHAT" in defines:
+    required = enabled("MESH_ENABLE_MESHTEXT_CHAT") is not False
+else:
+    required = (enabled("COMPANION_RADIO_FULL", True) is not False
+                and enabled("MESH_PRIMARY_ESPNOW") is not True)
+sys.exit(0 if required else 3)
+' "$pio_env_name" <<<"$PIO_CONFIG_JSON" || decision_status=$?
+  case "$decision_status" in
+    0) return 0 ;;
+    3) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 write_build_capability_manifest() {
   local env_name=$1
   local env_platform=$2
   local pio_env_name=$3
   local firmware_filename=$4
-  local artifact_target=${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}
+  local artifact_target
+  artifact_target=$(embedded_bootloader_artifact_target "${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}") || return 1
   if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ] \
       && is_nrf52_sensor_ota_pair_target "$env_name"; then
     artifact_target+="-${NRF52_OTA_SENSOR_PROFILE}-ota"
@@ -4475,11 +4836,24 @@ write_build_capability_manifest() {
       || is_xiao_qspi_canonical_repeater_build "$env_name"; then
     checker_args+=(--require-ota)
   fi
+  local meshtext_status=0
+  requires_meshtext_companion_code "$env_name" "$pio_env_name" || meshtext_status=$?
+  if [ "$meshtext_status" -eq 0 ]; then
+    # Every enabled Full LoRa Companion must retain executable codec and
+    # transport definitions, not merely a channel name or CLI help string.
+    checker_args+=(--require-meshtext)
+  elif [ "$meshtext_status" -ne 1 ]; then
+    echo "Cannot determine the Full Companion Meshtext capability contract." >&2
+    return "$meshtext_status"
+  fi
   if [ "$env_platform" = "ESP32_PLATFORM" ]; then
     checker_args+=(--firmware-bin "${build_output_dir}/firmware.bin"
                    --partitions "${build_output_dir}/partitions.bin")
   elif [ "$env_platform" = "NRF52_PLATFORM" ]; then
     checker_args+=(--dfu-package "${build_output_dir}/firmware.zip")
+  elif [ "$env_platform" = "RP2040_PLATFORM" ]; then
+    checker_args+=(--firmware-bin "${build_output_dir}/firmware.bin"
+                   --uf2-package "${build_output_dir}/firmware.uf2")
   fi
 
   for item in "${BUILD_CAPABILITIES[@]}"; do
@@ -4587,7 +4961,7 @@ output_artifact_exists() {
 compute_build_recipe_digest() {
   local env_name=$1 env_platform=$2 pio_env_name=$3 embedded_version=$4
   local original_flags=$5 full_source_commit=$6 artifact_target checkout_dir
-  artifact_target=${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}
+  artifact_target=$(embedded_bootloader_artifact_target "${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}") || return 1
   if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ] \
       && is_nrf52_sensor_ota_pair_target "$env_name"; then
     artifact_target+="-${NRF52_OTA_SENSOR_PROFILE}-ota"
@@ -4658,7 +5032,7 @@ build_artifacts_exist() {
     nrf52_sensor_profile_manifest_matches \
       "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" "$env_name" \
       "$NRF52_OTA_SENSOR_PROFILE" \
-      "${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}-${NRF52_OTA_SENSOR_PROFILE}-ota" || return 1
+      "$(embedded_bootloader_artifact_target "${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}")-${NRF52_OTA_SENSOR_PROFILE}-ota" || return 1
   fi
   # Old manifests can be marked verified while lacking a newly required
   # capability. Never let --resume bypass the current packaged-logging gate.
@@ -4745,14 +5119,36 @@ collect_build_artifacts() {
       ;;
   esac
 
+  python3 scripts/package_meshtext_license.py collect "$build_output_dir" \
+    --stem "${OUTPUT_DIR}/${firmware_filename}" || return $?
+
+  python3 scripts/package_pocket_gui_license.py collect "$build_output_dir" \
+    --stem "${OUTPUT_DIR}/${firmware_filename}" || return $?
+
+  if [ -n "${MESHCORE_NRF52_EMBED_BOOTLOADER:-}" ]; then
+    python3 scripts/qualify_nrf52_embedded_bootloader.py "$build_output_dir" \
+      "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" || return $?
+  fi
+
   python3 scripts/firmware_memory_manifest.py package "$build_output_dir" \
     --stem "${OUTPUT_DIR}/${firmware_filename}" || return $?
+}
+
+embedded_bootloader_artifact_target() {
+  if [ -n "${MESHCORE_NRF52_EMBED_BOOTLOADER:-}" ]; then
+    [ "$MESHCORE_NRF52_EMBED_BOOTLOADER" = "2.4.12" ] || return 1
+    echo "${1}-with-bootloader-${MESHCORE_NRF52_EMBED_BOOTLOADER}"
+  else
+    echo "$1"
+  fi
 }
 
 get_firmware_filename() {
   local env_name=$1
   local firmware_version_string=$2
   local filename_infix=$FIRMWARE_FILENAME_INFIX
+  local artifact_env_name
+  artifact_env_name=$(embedded_bootloader_artifact_target "$env_name") || return 1
 
   # Make LoRa-OTA artifacts obvious without changing the PlatformIO environment
   # name or the stable MOTA target identity. FULL artifacts retain their
@@ -4770,9 +5166,9 @@ get_firmware_filename() {
   fi
 
   if [ -n "$filename_infix" ]; then
-    echo "${env_name}-${filename_infix}-${firmware_version_string}"
+    echo "${artifact_env_name}-${filename_infix}-${firmware_version_string}"
   else
-    echo "${env_name}-${firmware_version_string}"
+    echo "${artifact_env_name}-${firmware_version_string}"
   fi
 }
 
@@ -4914,6 +5310,14 @@ build_firmware_one_profile() {
   if ! is_supported_platform "$env_platform"; then
     echo "Unsupported or unknown platform for env: $env_name"
     return 1
+  fi
+  if [ -n "${MESHCORE_NRF52_EMBED_BOOTLOADER:-}" ]; then
+    if [ "$MESHCORE_NRF52_EMBED_BOOTLOADER" != "2.4.12" ] \
+        || [ "$env_platform" != "NRF52_PLATFORM" ] \
+        || ! { is_repeater_role_target "$env_name" || is_room_server_role_target "$env_name"; }; then
+      echo "Embedded bootloader variants require an nRF52 Repeater or Room and release 2.4.12." >&2
+      return 1
+    fi
   fi
   pio_env_name=$(get_pio_build_env "$env_name")
   if { [ "$COMPLETE_OTA_FIRST_PASS" = "1" ] \
@@ -5090,12 +5494,14 @@ build_firmware_one_profile() {
   apply_esp32_lora_ota_size_profile "$env_name"
   apply_esp32_constrained_companion_size_profile "$env_name"
   apply_esp32_full_size_profile "$env_name"
+  apply_esp32_iram_advert_storage_profile "$env_name"
   apply_esp32_full_shared_bridge_profile "$pio_env_name"
   apply_esp32_full_async_tcp_profile "$env_name"
   apply_repeater_neighbor_capacity "$env_name"
   apply_stm32_companion_size_profile "$env_name"
   apply_nrf52_size_profile "$env_name"
   apply_lora_ota_no_external_sensors_profile "$env_name"
+  apply_rak4631_rak15002_sd_store_profile "$env_name"
   apply_radio_overrides
   apply_firmware_profile_overrides
   declare_build_capability_contract "$env_name" "$env_platform"
@@ -5115,6 +5521,16 @@ build_firmware_one_profile() {
     if ! pio_env_option_contains "$pio_env_name" extra_scripts \
         "scripts/esp32_full_partition.py"; then
       append_platformio_extra_script "pre:scripts/esp32_full_partition.py"
+    fi
+    # Some board recipes replace esp32_base.extra_scripts. Keep the final
+    # infrastructure object-size policy in those exact Full environments too.
+    if ! pio_env_option_contains "$pio_env_name" extra_scripts \
+        "scripts/esp32_full_size.py"; then
+      append_platformio_extra_script "pre:scripts/esp32_full_size.py"
+    fi
+    if ! pio_env_option_contains "$pio_env_name" extra_scripts \
+        "scripts/generate_room_web_html.py"; then
+      append_platformio_extra_script "pre:scripts/generate_room_web_html.py"
     fi
     # PlatformIO appends PLATFORMIO_BUILD_FLAGS while resolving every extends
     # layer. Deep ESP32 Full profiles can therefore exceed Windows' process
@@ -5145,6 +5561,12 @@ build_firmware_one_profile() {
   if ! pio_env_option_contains "$pio_env_name" extra_scripts \
       "scripts/check_firmware_ram.py"; then
     append_platformio_extra_script "post:scripts/check_firmware_ram.py"
+  fi
+
+  if [ -n "${MESHCORE_NRF52_EMBED_BOOTLOADER:-}" ] \
+      && ! pio_env_option_contains "$pio_env_name" extra_scripts \
+          "scripts/nrf52_embedded_bootloader_pio.py"; then
+    append_platformio_extra_script "pre:scripts/nrf52_embedded_bootloader_pio.py"
   fi
 
   recipe_build_flags=$PLATFORMIO_BUILD_FLAGS
@@ -5571,6 +5993,9 @@ get_merged_rs232_repeater_replacement() {
     solarxiao_33s_repeater_bridge_rs232)
       printf '%s\n' solarxiao_33S_repeater
       ;;
+    xiao_nrf52_repeater_bridge_rs232|xiao_nrf52_repeater_bridge_rs232_lora_ota_no_external_sensors)
+      printf '%s\n' Xiao_nrf52_repeater
+      ;;
     heltec_v3_repeater_bridge_rs232)
       printf '%s\n' Heltec_v3_repeater
       ;;
@@ -5622,6 +6047,18 @@ get_merged_espnow_repeater_replacement() {
 }
 
 is_runtime_setting_alias_target() {
+  # Physical-slot selection is now runtime/automatic on Station G3. Retain
+  # exact R2 environment names for explicit historical builds, not duplicate
+  # ordinary releases. This does not rewrite their deployed OTA identities.
+  if get_station_g3_shared_slot_replacement "$1" >/dev/null; then
+    return 0
+  fi
+  if get_t114_display_replacement "$1" >/dev/null; then
+    return 0
+  fi
+  if get_consolidated_hardware_replacement "$1" >/dev/null; then
+    return 0
+  fi
   if is_legacy_companion_power_saving_target "$1" \
       || is_legacy_companion_femoff_target "$1" \
       || is_legacy_radio_gain_profile_target "$1" \
@@ -5636,12 +6073,151 @@ is_runtime_setting_alias_target() {
   return 1
 }
 
+get_consolidated_hardware_replacement() {
+  # Configuration proves the new implementation is selected before omitting
+  # an ordinary build. Packaging independently requires its executed marker.
+  # Explicit builds still retain the requested historical OTA identity.
+  case "${1,,}" in
+    picow_companion_radio_usb|picow_companion_radio_ble|picow_companion_radio_wifi|\
+    heltec_v4_expansionkit_repeater|heltec_v4_expansionkit_repeater_observer_mqtt|heltec_v4_expansionkit_room_server_observer_mqtt|\
+    heltec_v4_r8_tft_portrait_repeater_observer_mqtt|heltec_v4_r8_tft_portrait_room_server_observer_mqtt|\
+    heltec_v4_expansionkit_tft_companion_radio_*|heltec_v4_3_expansionkit_tft_companion_radio_*|\
+    muzi_base_duo_superio_companion_radio_*|muzi_base_uno_superio_companion_radio_*|lilygo_t-echo-lite_non_shell_companion_radio_*|\
+    heltec_rc32_without_display_*) ;;
+    *) return 1 ;;
+  esac
+  [ -n "$PIO_CONFIG_JSON" ] || return 1
+  python3 scripts/consolidated_profiles.py replacement "$1" <<<"$PIO_CONFIG_JSON"
+}
+
+is_t114_display_autodetect_build() {
+  local target=$1
+  [ "${PIO_ENV_PLATFORM_BY_NAME[$target]:-}" = NRF52_PLATFORM ] \
+    && [ "${PIO_ENV_BOARD_BY_NAME[$target]:-}" = heltec_t114 ] \
+    && [ -n "$PIO_CONFIG_JSON" ] || return 1
+  python3 -c '
+import json,re,sys
+rows={name:dict(options) for name,options in json.load(sys.stdin)}
+definitions={}
+for flag in rows.get("env:"+sys.argv[1],{}).get("build_flags",[]):
+    match=re.fullmatch(r"-([DU])\s*(\w+)(?:=(.*))?",str(flag).strip())
+    if not match: continue
+    kind,key,value=match.groups()
+    if kind=="U": definitions.pop(key,None)
+    else: definitions[key]="1" if value is None else value
+sys.exit(0 if definitions.get("HELTEC_T114","0") not in ("0","false")
+         and definitions.get("T114_DISPLAY_AUTODETECT")=="1"
+         and definitions.get("DISPLAY_CLASS")=="ST7789Display" else 1)
+' "$target" <<<"$PIO_CONFIG_JSON"
+}
+
+get_t114_display_replacement() {
+  local target=$1 candidate lower=${1,,}
+  # Synthetic lean OTA environments are generated before bulk filtering;
+  # filter their exact aliases as well as the original five recipe names.
+  [[ "$lower" =~ ^heltec_t114_without_display_((repeater(_bridge_rs232)?|room_server)(_lora_ota_no_external_sensors)?|companion_radio_(ble|usb|full))$ ]] || return 1
+  candidate=Heltec_t114_${lower#heltec_t114_without_display_}
+  [ "${PIO_ENV_PLATFORM_BY_NAME[$target]:-}" = NRF52_PLATFORM ] \
+    && [ "${PIO_ENV_BOARD_BY_NAME[$target]:-}" = heltec_t114 ] || return 1
+  is_t114_display_autodetect_build "$(get_pio_build_env "$candidate")" || return 1
+  printf '%s\n' "$candidate"
+}
+
+get_station_g3_shared_slot_replacement() {
+  local target=$1 candidate
+  case "$target" in
+    Station_G3_ESP32_r2_repeater|Station_G3_ESP32_r2_room_server|\
+    Station_G3_ESP32_r2_sensor|Station_G3_ESP32_r2_repeater_observer_mqtt|\
+    Station_G3_ESP32_r2_room_server_observer_mqtt)
+      candidate=${target/Station_G3_ESP32_r2_/Station_G3_ESP32_}
+      ;;
+    *) return 1 ;;
+  esac
+  # Do not collapse another radio family, role, platform or missing recipe.
+  [ "${PIO_ENV_PLATFORM_BY_NAME[$target]:-}" = ESP32_PLATFORM ] \
+    && [ "${PIO_ENV_PLATFORM_BY_NAME[$candidate]:-}" = ESP32_PLATFORM ] \
+    && [ "${PIO_ENV_BOARD_BY_NAME[$target]:-}" = station-g3-esp32 ] \
+    && [ "${PIO_ENV_BOARD_BY_NAME[$candidate]:-}" = station-g3-esp32 ] || return 1
+  [ -n "$PIO_CONFIG_JSON" ] || return 1
+  # Use effective flags (including -U/later overrides), not a substring that
+  # could mistake an overridden SX1262 declaration for the running radio.
+  python3 -c '
+import json,re,sys
+rows = {name:dict(options) for name,options in json.load(sys.stdin)}
+for target in sys.argv[1:]:
+    definitions={}
+    for flag in rows.get("env:"+target,{}).get("build_flags",[]):
+        match=re.fullmatch(r"-([DU])\s*(\w+)(?:=(.*))?",str(flag).strip())
+        if not match: continue
+        kind,key,value=match.groups()
+        if kind=="U": definitions.pop(key,None)
+        else: definitions[key]="1" if value is None else value
+    if definitions.get("RADIO_CLASS")!="CustomSX1262": sys.exit(1)
+    if definitions.get("USE_SX1262","0") in ("0","false"): sys.exit(1)
+' "$target" "$candidate" <<<"$PIO_CONFIG_JSON" || return 1
+  printf '%s\n' "$candidate"
+}
+
+is_solarxiao_internal_room_compatibility_target() {
+  case "${1,,}" in
+    solarxiao_30s_room_server|solarxiao_33s_room_server) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+get_onboard_qspi_normal_replacement() {
+  local target=$1 base
+  base=${target%_lora_ota_no_external_sensors}
+  case "${base,,}" in
+    solarxiao_30s_room_server|solarxiao_33s_room_server|xiao_nrf52_room_server|\
+    ikoka_nano_nrf_22dbm_room_server|ikoka_nano_nrf_30dbm_room_server|ikoka_nano_nrf_33dbm_room_server|\
+    ikoka_stick_nrf_22dbm_room_server|ikoka_stick_nrf_30dbm_room_server|ikoka_stick_nrf_33dbm_room_server|\
+    ikoka_handheld_nrf_e22_30dbm_room_server|lilygo_t-echo_room_server|\
+    sensecap_solar_room_server|thinknode_m1_room_server|thinknode_m6_room_server|\
+    wiotrackerl1_room_server|lilygo_t-echo-lite_room_server|lilygo_t-echo-lite_repeater)
+      printf '%s_lora_ota\n' "$base"
+      return 0
+      ;;
+    lilygo_t-echo_repeater|sensecap_solar_repeater|thinknode_m1_repeater|\
+    thinknode_m6_repeater|wiotrackerl1_repeater)
+      if [ "$base" != "$target" ]; then
+        printf '%s\n' "$base"
+        return 0
+      fi
+      ;;
+    xiao_nrf52_repeater_bridge_rs232)
+      printf '%s\n' Xiao_nrf52_repeater
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+is_qspi_hardware_qualification_target() {
+  case "${1,,}" in
+    muzi_base_duo_repeater_lora_ota|muzi_base_duo_room_server_lora_ota|\
+    muzi_base_uno_repeater_lora_ota|muzi_base_uno_room_server_lora_ota|\
+    lilygo_t-echo_card_repeater_lora_ota|lilygo_t-echo_card_room_server_lora_ota|\
+    nano_g2_ultra_repeater_lora_ota|nano_g2_ultra_room_server_lora_ota)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 is_redundant_bulk_build_target() {
-  # Bench fixtures and migration utilities use their dedicated PlatformIO
-  # recipes; they are not node firmware for the release/OTA packaging matrix.
+  # Known onboard-QSPI normal recipes replace old internal/lean choices.
+  # Retain exact legacy OTA identities for explicit compatibility/recovery;
+  # do not remap them to the QSPI identity. Hardware-pending external ports
+  # are explicit qualification builds, never ordinary release choices.
+  if get_onboard_qspi_normal_replacement "$1" >/dev/null \
+      || is_qspi_hardware_qualification_target "$1"; then
+    return 0
+  fi
+  # Bench fixtures, migration utilities and the unqualified optional SD
+  # source use exact recipes, not the ordinary release/OTA receiver matrix.
   case "${1,,}" in
     profile_switch_*|profile_fixed_*|profile_four_tx_v4_rx|*partition_migrator*|*partition_expander*|*_partition_legacy_seed|\
-    *_legacy_partition_test|*_sim)
+    *_legacy_partition_test|*_sim|rak_4631_repeater_rak15002_sd_seeder_only)
       return 0
       ;;
   esac

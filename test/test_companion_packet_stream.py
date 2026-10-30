@@ -197,7 +197,8 @@ class CompanionPacketStreamTests(unittest.TestCase):
                         ['NRF52_PLATFORM=1', 'MESH_USB_LOGGING_AVAILABLE=1']
                         + (['MESH_DUAL_CDC_LOGGING=1'] if dual else []),
                         ('ConfigSerializer.cpp', 'DynamicConfigSerializer.cpp',
-                         'CommonRadioPrefs.cpp', 'TxtDataHelpers.cpp'))
+                         'CommonRadioPrefs.cpp', 'radiolib/RXPowerSaving.cpp',
+                         'radiolib/RXPowerSavingCLI.cpp', 'TxtDataHelpers.cpp'))
 
     def test_actual_full_dual_compiled_primary_transport(self):
         fixture = ROOT / 'test/fixtures/nrf52_usb_console'

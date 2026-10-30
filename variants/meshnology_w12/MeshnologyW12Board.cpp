@@ -1,10 +1,12 @@
 #include "MeshnologyW12Board.h"
+#include <helpers/ESP32GpioHold.h>
 
 void MeshnologyW12Board::begin() {
     ESP32Board::begin();
 
-    rtc_gpio_hold_dis((gpio_num_t)P_LORA_LF_PA_POWER);
-    rtc_gpio_hold_dis((gpio_num_t)P_LORA_HF_PA_POWER);
+    // Keep both FEM rails off while releasing a retained terminal shutdown.
+    mesh::esp32::releaseOutputAfterDeepSleep((gpio_num_t)P_LORA_LF_PA_POWER, LOW);
+    mesh::esp32::releaseOutputAfterDeepSleep((gpio_num_t)P_LORA_HF_PA_POWER, LOW);
     pinMode(PIN_ADC_CTRL, OUTPUT);
     digitalWrite(PIN_ADC_CTRL, LOW); // Disable battery sense until required
 
@@ -22,13 +24,17 @@ void MeshnologyW12Board::begin() {
         startup_reason = BD_STARTUP_RX_PACKET;
     }
 
-      rtc_gpio_hold_dis((gpio_num_t)P_LORA_NSS);
-      rtc_gpio_deinit((gpio_num_t)P_LORA_DIO_1);
+      mesh::esp32::releaseRtcGpioIfSupported((gpio_num_t)P_LORA_NSS);
+      mesh::esp32::deinitRtcGpioIfSupported((gpio_num_t)P_LORA_DIO_1);
     }
   }
 
+  void MeshnologyW12Board::applyLedPolicy() {
+    if (!mesh::leds::enabled()) neopixelWrite(NEOPIXEL_LED, 0, 0, 0);
+  }
+
   void MeshnologyW12Board::onBeforeTransmit(void) {
-    neopixelWrite(NEOPIXEL_LED, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS);   // turn TX neopixel on (White)
+    if (mesh::leds::enabled()) neopixelWrite(NEOPIXEL_LED, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS);   // turn TX neopixel on (White)
   }
 
   void MeshnologyW12Board::onAfterTransmit(void) {
@@ -45,7 +51,9 @@ void MeshnologyW12Board::begin() {
     digitalWrite(P_LORA_LF_PA_POWER, LOW);
     digitalWrite(P_LORA_HF_PA_POWER, LOW);
     digitalWrite(high_band ? P_LORA_HF_PA_POWER : P_LORA_LF_PA_POWER, HIGH);
-    delay(100);
+    // The FEM rail needs only 1 ms to settle. TX control-line prearming is
+    // handled separately immediately before transmit, not by idling the PA on.
+    delay(1);
 
     radio_high_band = high_band;
     radio_band_initialized = true;
@@ -59,7 +67,13 @@ void MeshnologyW12Board::begin() {
     rtc_gpio_set_direction((gpio_num_t)P_LORA_DIO_1, RTC_GPIO_MODE_INPUT_ONLY);
     rtc_gpio_pulldown_en((gpio_num_t)P_LORA_DIO_1);
 
-    rtc_gpio_hold_en((gpio_num_t)P_LORA_NSS);
+    mesh::esp32::holdRtcGpioIfSupported((gpio_num_t)P_LORA_NSS);
+
+    // Packet-wake sleep leaves the radio receiving. Retain the selected FEM
+    // rail and the inactive rail's LOW level; both PA enable pins are RTC GPIOs
+    // on this ESP32-S3. Terminal powerOff() deliberately retains both LOW.
+    mesh::esp32::holdOutputForDeepSleep((gpio_num_t)P_LORA_LF_PA_POWER, radio_high_band ? LOW : HIGH);
+    mesh::esp32::holdOutputForDeepSleep((gpio_num_t)P_LORA_HF_PA_POWER, radio_high_band ? HIGH : LOW);
 
     if (pin_wake_btn < 0) {
       esp_sleep_enable_ext1_wakeup( (1L << P_LORA_DIO_1), ESP_EXT1_WAKEUP_ANY_HIGH);  // wake up on: recv LoRa packet
@@ -79,10 +93,8 @@ void MeshnologyW12Board::begin() {
     // A shutdown must not retain the packet-wake deep-sleep behavior above.
     // Disable both external FEM rails, then use the base shutdown path so the
     // display, GPS, radio, serial buffers, and stale wake sources are handled.
-    digitalWrite(P_LORA_LF_PA_POWER, LOW);
-    digitalWrite(P_LORA_HF_PA_POWER, LOW);
-    rtc_gpio_hold_en((gpio_num_t)P_LORA_LF_PA_POWER);
-    rtc_gpio_hold_en((gpio_num_t)P_LORA_HF_PA_POWER);
+    mesh::esp32::holdOutputForDeepSleep((gpio_num_t)P_LORA_LF_PA_POWER, LOW);
+    mesh::esp32::holdOutputForDeepSleep((gpio_num_t)P_LORA_HF_PA_POWER, LOW);
     ESP32Board::powerOff();
   }
 

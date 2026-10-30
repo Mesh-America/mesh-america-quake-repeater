@@ -1,5 +1,6 @@
 #include <helpers/BaseChatMesh.h>
 #include <helpers/ContactListOrder.h>
+#include <helpers/SmallTableSort.h>
 #include <helpers/RemoteCliRequest.h>
 #include <helpers/RemoteCliTimeout.h>
 #include <Utils.h>
@@ -38,8 +39,8 @@ bool BaseChatMesh::initializeContactStorage() {
   ContactInfo* expanded_contacts = static_cast<ContactInfo*>(
       heap_caps_calloc(requested_capacity, sizeof(ContactInfo),
                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  int* expanded_sort_array = static_cast<int*>(
-      heap_caps_calloc(requested_capacity, sizeof(int),
+  ContactIndex* expanded_sort_array = static_cast<ContactIndex*>(
+      heap_caps_calloc(requested_capacity, sizeof(ContactIndex),
                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (expanded_contacts == NULL || expanded_sort_array == NULL) {
     if (expanded_contacts != NULL) heap_caps_free(expanded_contacts);
@@ -127,16 +128,39 @@ void BaseChatMesh::sendAckTo(const ContactInfo& dest, const uint8_t* ack_hash, u
   }
 }
 
+static uint32_t contactClockBootstrapLimit(uint32_t current_time) {
+  // A corrupt contact must not permanently move the clock into the far future.
+  // Use the build year while the RTC is unset, and a rolling bound when a
+  // long-lived installation already has a clock beyond that build horizon.
+  constexpr const char* date = __DATE__;
+  constexpr unsigned year = (date[7] - '0') * 1000 + (date[8] - '0') * 100
+                          + (date[9] - '0') * 10 + (date[10] - '0') + 4;
+  constexpr unsigned previous_year = year - 1;
+  // Gregorian leap days before this year, minus the 477 before 1970.
+  // Fold the build horizon at compile time instead of linking a calendar loop.
+  constexpr uint64_t days = 365ULL * (year - 1970)
+      + previous_year / 4 - previous_year / 100 + previous_year / 400 - 477;
+  constexpr uint64_t build_limit = days * 86400ULL;
+  constexpr uint32_t build_bound = build_limit < UINT32_MAX
+      ? uint32_t(build_limit) : UINT32_MAX;
+  constexpr uint32_t clock_window = 366UL * 86400UL;
+  const uint32_t clock_bound = current_time > UINT32_MAX - clock_window
+      ? UINT32_MAX : current_time + clock_window;
+  return clock_bound > build_bound ? clock_bound : build_bound;
+}
+
 void BaseChatMesh::bootstrapRTCfromContacts() {
+  const uint32_t current_time = getRTCClock()->getCurrentTime();
+  const uint32_t max_time = contactClockBootstrapLimit(current_time);
   uint32_t latest = 0;
   for (int i = 0; i < num_contacts; i++) {
-    if (contacts[i].lastmod > latest) {
+    if (contacts[i].lastmod > latest && contacts[i].lastmod < max_time) {
       latest = contacts[i].lastmod;
     }
   }
   if (latest != 0 && latest != UINT32_MAX) {
     const uint32_t contact_floor = latest + 1;
-    if (contact_floor > getRTCClock()->getCurrentTime()) {
+    if (contact_floor > current_time) {
       getRTCClock()->setCurrentTime(contact_floor);
     }
   }
@@ -354,7 +378,8 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
       uint8_t ack_hash[6];    // calc truncated hash of the message timestamp + text + sender pub_key, to prove to sender that we got it
       mesh::Utils::sha256(ack_hash, 4, data, 5 + text_len, from.id.pub_key, PUB_KEY_SIZE);
       // NEW: append (potential) extended attempt byte (to make packethash unique)
-      ack_hash[4] = data[5 + text_len + 1];
+      const size_t attempt_offset = 5 + text_len + 1;
+      ack_hash[4] = attempt_offset < len ? data[attempt_offset] : 0;
       getRNG()->random(&ack_hash[5], 1);  // make 6th byte random
 
       if (packet->isRouteFlood()) {
@@ -396,22 +421,38 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
         temp[4] = (TXT_TYPE_CLI_DATA << 2);
 
         auto reply_pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, from.id, secret, temp, 5 + text_len);
+        onCLIReplyPrepared(from, reply_pkt);
+        bool queued = false;
         if (reply_pkt) {
           if (from.out_path_len == OUT_PATH_UNKNOWN) {
-            sendFloodScoped(from, reply_pkt, CLI_REPLY_DELAY_MILLIS);
+            queued = sendFloodScoped(from, reply_pkt, CLI_REPLY_DELAY_MILLIS);
           } else {
-            sendDirect(reply_pkt, from.getPath(), from.out_path_len, CLI_REPLY_DELAY_MILLIS);
+            queued = sendDirect(reply_pkt, from.getPath(), from.out_path_len, CLI_REPLY_DELAY_MILLIS);
           }
         }
-      }
+        onCLIReplyQueued(from, reply_pkt, queued);
+      } else onCLIReplyQueued(from, nullptr, false);
     } else if (flags == TXT_TYPE_SIGNED_PLAIN) {
-      if (canMutateContacts()) {
+      if (len < 9) return; // timestamp, flags and complete author prefix
+      const uint32_t previous_sync_since = from.sync_since;
+      const uint32_t previous_lastmod = from.lastmod;
+      const bool mutate_contact = canMutateContacts();
+      if (mutate_contact) {
         if (sender_timestamp > from.sync_since) {  // make sure 'sync_since' is up-to-date
           from.sync_since = sender_timestamp;
         }
         from.lastmod = getRTCClock()->getCurrentTime(); // update last heard time
       }
-      onSignedMessageRecv(from, packet, sender_timestamp, &data[5], (const char *) &data[9]);  // let UI know
+      // The accepted callback can persist the updated live contact. Rejected
+      // admission must not persist it or report delivery; restore its cursor
+      // so a subsequent keep-alive still requests this post.
+      if (!onSignedMessageRecv(from, packet, sender_timestamp, &data[5], (const char *) &data[9])) {
+        if (mutate_contact) {
+          from.sync_since = previous_sync_since;
+          from.lastmod = previous_lastmod;
+        }
+        return;
+      }
 
       uint32_t ack_hash;    // calc truncated hash of the message timestamp + text + OUR pub_key, to prove to sender that we got it
       mesh::Utils::sha256((uint8_t *) &ack_hash, 4, data, 9 + strlen((char *)&data[9]), self_id.pub_key, PUB_KEY_SIZE);
@@ -635,6 +676,18 @@ int BaseChatMesh::sendMessage(const ContactInfo& recipient, uint32_t timestamp, 
   return rc;
 }
 
+int BaseChatMesh::sendMessageDetached(const ContactInfo& recipient,
+                                     uint32_t timestamp, const char* text,
+                                     uint32_t& expected_ack,
+                                     uint32_t& est_timeout,
+                                     uint8_t* packet_hash) {
+  const unsigned long previous_timeout = txt_send_timeout;
+  const int result = sendMessage(recipient, timestamp, 0, text, expected_ack,
+                                 est_timeout, packet_hash);
+  txt_send_timeout = previous_timeout;
+  return result;
+}
+
 int BaseChatMesh::sendCommandData(const ContactInfo& recipient,
                                   uint32_t timestamp, uint8_t attempt,
                                   uint8_t txt_type, const char* text,
@@ -750,7 +803,16 @@ bool BaseChatMesh::shareContactZeroHop(const ContactInfo& contact) {
   auto packet = obtainNewPacket();
   if (packet == NULL) return false;  // no Packets available
 
-  packet->readFrom(temp_buf, plen);  // restore Packet from 'blob'
+  // A cache read may be short or corrupt. Never share a partial packet or a
+  // different identity that happens to occupy the same cache-key prefix.
+  if (!packet->readFrom(temp_buf, plen)
+      || packet->getPayloadType() != PAYLOAD_TYPE_ADVERT
+      || packet->payload_len < PUB_KEY_SIZE + 4 + SIGNATURE_SIZE
+      || packet->payload_len > PUB_KEY_SIZE + 4 + SIGNATURE_SIZE + MAX_ADVERT_DATA_SIZE
+      || memcmp(packet->payload, contact.id.pub_key, PUB_KEY_SIZE) != 0) {
+    releasePacket(packet);
+    return false;
+  }
   uint16_t codes[2];
   codes[0] = codes[1] = 0;   // { 0, 0 } means 'send this nowhere'
   sendZeroHop(packet, codes);
@@ -779,6 +841,24 @@ bool BaseChatMesh::importContact(const uint8_t src_buf[], uint8_t len) {
   return false; // error
 }
 
+// Keep the identical request/login routing tail shared on flash-limited nodes.
+__attribute__((noinline))
+int BaseChatMesh::sendContactPacket(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t& est_timeout) {
+  if (pkt) {
+    uint32_t t = getTransmitAirtime(pkt);
+    if (recipient.out_path_len == OUT_PATH_UNKNOWN) {
+      if (!sendFloodScoped(recipient, pkt)) return MSG_SEND_FAILED;
+      est_timeout = calcFloodTimeoutMillisFor(t);
+      return MSG_SEND_SENT_FLOOD;
+    } else {
+      if (!sendDirect(pkt, recipient.getPath(), recipient.out_path_len)) return MSG_SEND_FAILED;
+      est_timeout = calcDirectTimeoutMillisFor(t, recipient.out_path_len);
+      return MSG_SEND_SENT_DIRECT;
+    }
+  }
+  return MSG_SEND_FAILED;
+}
+
 int BaseChatMesh::sendLogin(const ContactInfo& recipient, const char* password, uint32_t& est_timeout) {
   mesh::Packet* pkt;
   {
@@ -799,19 +879,7 @@ int BaseChatMesh::sendLogin(const ContactInfo& recipient, const char* password, 
 
     pkt = createAnonDatagram(PAYLOAD_TYPE_ANON_REQ, self_id, recipient.id, recipient.getSharedSecret(self_id), temp, tlen);
   }
-  if (pkt) {
-    uint32_t t = getTransmitAirtime(pkt);
-    if (recipient.out_path_len == OUT_PATH_UNKNOWN) {
-      if (!sendFloodScoped(recipient, pkt)) return MSG_SEND_FAILED;
-      est_timeout = calcFloodTimeoutMillisFor(t);
-      return MSG_SEND_SENT_FLOOD;
-    } else {
-      if (!sendDirect(pkt, recipient.getPath(), recipient.out_path_len)) return MSG_SEND_FAILED;
-      est_timeout = calcDirectTimeoutMillisFor(t, recipient.out_path_len);
-      return MSG_SEND_SENT_DIRECT;
-    }
-  }
-  return MSG_SEND_FAILED;
+  return sendContactPacket(recipient, pkt, est_timeout);
 }
 
 bool BaseChatMesh::allocateRequestTag(uint32_t& tag) {
@@ -829,19 +897,7 @@ int BaseChatMesh::sendAnonReq(const ContactInfo& recipient, const uint8_t* data,
 
     pkt = createAnonDatagram(PAYLOAD_TYPE_ANON_REQ, self_id, recipient.id, recipient.getSharedSecret(self_id), temp, 4 + len);
   }
-  if (pkt) {
-    uint32_t t = getTransmitAirtime(pkt);
-    if (recipient.out_path_len == OUT_PATH_UNKNOWN) {
-      if (!sendFloodScoped(recipient, pkt)) return MSG_SEND_FAILED;
-      est_timeout = calcFloodTimeoutMillisFor(t);
-      return MSG_SEND_SENT_FLOOD;
-    } else {
-      if (!sendDirect(pkt, recipient.getPath(), recipient.out_path_len)) return MSG_SEND_FAILED;
-      est_timeout = calcDirectTimeoutMillisFor(t, recipient.out_path_len);
-      return MSG_SEND_SENT_DIRECT;
-    }
-  }
-  return MSG_SEND_FAILED;
+  return sendContactPacket(recipient, pkt, est_timeout);
 }
 
 int  BaseChatMesh::sendRequest(const ContactInfo& recipient, const uint8_t* req_data, uint8_t data_len, uint32_t& tag, uint32_t& est_timeout) {
@@ -856,19 +912,7 @@ int  BaseChatMesh::sendRequest(const ContactInfo& recipient, const uint8_t* req_
 
     pkt = createDatagram(PAYLOAD_TYPE_REQ, recipient.id, recipient.getSharedSecret(self_id), temp, 4 + data_len);
   }
-  if (pkt) {
-    uint32_t t = getTransmitAirtime(pkt);
-    if (recipient.out_path_len == OUT_PATH_UNKNOWN) {
-      if (!sendFloodScoped(recipient, pkt)) return MSG_SEND_FAILED;
-      est_timeout = calcFloodTimeoutMillisFor(t);
-      return MSG_SEND_SENT_FLOOD;
-    } else {
-      if (!sendDirect(pkt, recipient.getPath(), recipient.out_path_len)) return MSG_SEND_FAILED;
-      est_timeout = calcDirectTimeoutMillisFor(t, recipient.out_path_len);
-      return MSG_SEND_SENT_DIRECT;
-    }
-  }
-  return MSG_SEND_FAILED;
+  return sendContactPacket(recipient, pkt, est_timeout);
 }
 
 int  BaseChatMesh::sendRequest(const ContactInfo& recipient, uint8_t req_type, uint32_t& tag, uint32_t& est_timeout) {
@@ -883,19 +927,7 @@ int  BaseChatMesh::sendRequest(const ContactInfo& recipient, uint8_t req_type, u
 
     pkt = createDatagram(PAYLOAD_TYPE_REQ, recipient.id, recipient.getSharedSecret(self_id), temp, sizeof(temp));
   }
-  if (pkt) {
-    uint32_t t = getTransmitAirtime(pkt);
-    if (recipient.out_path_len == OUT_PATH_UNKNOWN) {
-      if (!sendFloodScoped(recipient, pkt)) return MSG_SEND_FAILED;
-      est_timeout = calcFloodTimeoutMillisFor(t);
-      return MSG_SEND_SENT_FLOOD;
-    } else {
-      if (!sendDirect(pkt, recipient.getPath(), recipient.out_path_len)) return MSG_SEND_FAILED;
-      est_timeout = calcDirectTimeoutMillisFor(t, recipient.out_path_len);
-      return MSG_SEND_SENT_DIRECT;
-    }
-  }
-  return MSG_SEND_FAILED;
+  return sendContactPacket(recipient, pkt, est_timeout);
 }
 
 bool BaseChatMesh::startConnection(const ContactInfo& contact, uint16_t keep_alive_secs) {
@@ -1025,8 +1057,8 @@ void BaseChatMesh::resetPathTo(ContactInfo& recipient) {
 static ContactInfo* table;  // pass via global :-(
 
 static int cmp_contact_list_order(const void *a, const void *b) {
-  int a_idx = *((int *)a);
-  int b_idx = *((int *)b);
+  int a_idx = *static_cast<const ContactIndex*>(a);
+  int b_idx = *static_cast<const ContactIndex*>(b);
   return mesh::compareContactListOrder(
       table[a_idx].flags, table[a_idx].last_advert_timestamp,
       table[b_idx].flags, table[b_idx].last_advert_timestamp);
@@ -1037,8 +1069,8 @@ void BaseChatMesh::scanRecentContacts(int last_n, ContactVisitor* visitor) {
     sort_array[i] = i;
   }
   table = contacts; // pass via global *sigh* :-(
-  qsort(sort_array, num_contacts, sizeof(sort_array[0]),
-        cmp_contact_list_order);
+  mesh::sortSmallTable(sort_array, num_contacts, sizeof(sort_array[0]),
+                       cmp_contact_list_order);
 
   if (last_n == 0) {
     last_n = num_contacts;   // scan ALL

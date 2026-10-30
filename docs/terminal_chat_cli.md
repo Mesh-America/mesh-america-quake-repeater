@@ -17,7 +17,8 @@ select **CLI**. The browser runs the same commands as the USB terminal and
 Full Companion's TCP terminal on port 5002, including contact import, contact
 selection, messages, remote login/commands, and delayed RF replies. Run `help`
 to list commands compiled into the device. Enable the tab with
-`set wifi.cli on`; the open setup AP does not expose it.
+`set wifi.cli on` and sign in with the node admin password. The setup AP does
+not expose this full terminal.
 
 For example, copy the complete `meshcore://...` string from `card` on another
 Companion, then run these commands on the receiving Companion:
@@ -51,6 +52,46 @@ connection. Use the WiFi MOTA seeder on port 5001 for a host folder over WiFi.
 
 ## Local maintenance commands
 
+Supported ESP32-S3/SX1262 Full Companions also support
+[Meshtext channel chat](radio_profiles.md#meshtext-channel-chat):
+
+```text
+set mt.shortname MIKE
+send mt.nodeinfo 0
+channel 0 Hello
+```
+
+Use a configured `mt-` channel slot. Chat carries only the entered text. After
+the first successful over-air chat transmission per used channel/identity per
+boot, the firmware queues a separate standard name/ID NodeInfo advertisement.
+Automatic metadata waits for a 250 ms quiet TX gap so the peer can resume RX.
+`send mt.nodeinfo` can also request one explicitly. Neither contains GPS or
+coordinates. No NodeInfo is sent just from booting, configuration, receiving
+traffic or a timer. The long name comes from the existing node name;
+`get mt.shortname` shows the effective four-byte short name. These commands
+are not added to smaller or feature-disabled builds.
+
+MT chat uses `flood.retry.count` (`0`–`15`) to retry when no matching forwarded
+copy is heard. A heard repeat stops retries, but is not a recipient delivery
+receipt. NodeInfo has at most one retry, only with a nonzero count and
+`flood.retry.advert on`, with an extra one-minute wait. For example:
+
+```text
+get flood.retry.count
+set flood.retry.count 3
+set flood.retry.advert on
+get mt.retry
+```
+
+`get mt.retry` shows retry/heard/exhausted counters, pending work and the
+configured count; it does not change settings. With `set mt.hops 0`, no peer
+can forward a copy, so heard-repeat retries are disabled. The original chat
+and first-use NodeInfo are unaffected.
+
+This does not make the Companion relay other people's MT packets. See
+[heard-repeat retries](radio_profiles.md#heard-repeat-retries) for the airtime
+limits, exact-packet matching and cancellation rules.
+
 Local means a connection directly to the node: USB, BLE or WiFi/Ethernet
 Companion protocol, a TCP terminal, or the browser CLI on the LAN. These
 connections can use the following commands when the role and build include
@@ -61,11 +102,14 @@ the corresponding feature:
 | `stats-core`, `stats-radio`, `stats-radio-diag`, `stats-packets` | Runtime diagnostics |
 | `get public.key` | Read-only node identity public key; Companion returns `> ` followed by 64 uppercase hex characters |
 | `get prv.key` | Node identity private key; Companion requires private key export enabled in the build |
-| `get password` | Infrastructure admin password; Companion reports that it has no admin password |
+| `get password` | Infrastructure admin password; ESP32 WiFi Companion reports management-password status without revealing it; other Companions report no admin password |
+| `password <new-password>` | Change the saved admin password on infrastructure and ESP32 WiFi Companion |
 | `erase` | Erase stored identity and settings; reboot for a fresh node |
 | `get wifi.pwd` | Stored WiFi password on WiFi builds |
 | `get mqttN.password`, `get mqttN.token` | Stored credentials for MQTT slot N |
 | `get acl`, `log` | Infrastructure ACL or captured packet log; these stores do not exist on Companion |
+| `get guest`, `set guest on`, `set guest off`, `get guests [page]` | Repeater guest-login control and current guest sessions |
+| `get logins [page]` | Recent repeater login attempts, with 12-character public-key prefixes |
 
 The command text is the same for direct connections. A binary Companion app
 can send `0x42` (`CMD_RUN_CLI_COMMAND`) followed by the ASCII command, without
@@ -86,9 +130,12 @@ the binary contacts operations for Companion contacts. Interactive chat
 commands still use the text terminal or their corresponding binary protocol
 operations.
 
-The browser CLI requires station/LAN mode and `wifi.cli on`. Infrastructure
-uses its admin login; Companion uses the trusted LAN. Configuration forms keep
-password fields masked; explicit local CLI getters return their values.
+The browser CLI requires station/LAN mode, `wifi.cli on`, and the node admin
+login. Configuration forms keep password fields masked; explicit local CLI
+getters return their values, except ESP32 WiFi Companion's status-only
+`get password`. Existing USB/BLE/TCP clients and explicitly authorized remote
+CLI contacts retain their administrative command access. HTTP authentication
+does not add a password handshake to the raw TCP services.
 
 ## Companion contact and channel TX profiles
 
@@ -109,6 +156,32 @@ persist and also apply to messages sent by the phone app. Use exact names,
 a channel index, or `key:<unique public-key prefix>` for a contact.
 See the [routing guide](radio_profiles.md#companion-tx-routing-by-contact-or-channel)
 for which requests/replies are covered and how to reset a choice.
+
+## Companion media and SSH TX profiles
+
+```text
+get tx.media
+set tx.media radio2
+get tx.ssh
+set tx.ssh radio
+```
+
+Each setting accepts `auto`, `radio`, `radio2`, `both`, or `off`, defaults to
+`auto`, and is saved across reboot. `tx.media` handles Open TAK binary media;
+`tx.ssh` requires a tunnel app using the explicit SSH application tag, not
+an existing untagged SSH connection. See the
+[application routing guide](radio_profiles.md#companion-media-and-ssh-tx-routing)
+for the framing and routing rules. Ordinary text keeps its existing route.
+
+## ESP32 Full Companion Ethernet
+
+Use `set ethernet.radio <MHz>,<kHz>,<SF>,<CR>[,<preamble>]`, then
+`set ethernet on`. `get ethernet` reports state; `set ethernet off` closes
+the KISS service and releases its radio2 lease. Settings survive reboot.
+This is a separate whole-link mode, not the tagged `tx.ssh` application route.
+Normal USB/BLE/Companion TCP stay in Companion mode. The host instead uses
+KISS-over-TCP port 5003 on trusted station WiFi, with MTU 230.
+See [Ethernet setup and radio2 restrictions](radio_profiles.md#esp32-companion-ethernet-over-lora-kiss).
 
 ## Companion USB mode
 
@@ -185,10 +258,21 @@ ESP32 and nRF52 Full Companions include an offline World English Bible lookup:
 
 ```text
 get reader 3:16
+get reader 2
+get reader 2:2-12
 ```
 
-This returns a single complete verse from the embedded corpus, using plain ASCII punctuation
-with unchanged wording and capitalization, through the local USB/TCP terminal.
+These select a verse, an entire chapter, or an inclusive verse range from the
+embedded corpus. Local USB/TCP/browser terminals stream the complete selection
+in small chunks, keeping the radio loop running while the terminal drains.
+A new command or disconnected session cancels unfinished output. Text uses
+plain ASCII punctuation with unchanged wording and capitalization.
+
+In the app's USB/BLE CLI, each reply stays within the existing frame limit.
+Follow the displayed `Next: get reader ...` command to continue a long verse
+or advance through the selected chapter/range. The optional final number is
+the page within the first verse of that command, for example `get reader 21:17 2`.
+The continuation command retains the requested range's end.
 See [Reader lookup and compression](https://github.com/mikecarper/MeshCore/blob/keymindCascade/tools/bible/README.md) for the
 source, supported build profiles and memory costs.
 
@@ -552,6 +636,33 @@ LOGIN -> Hilltop Repeater accepted (ACL permissions 0x03, server v13)
 cmd ver
 cmd get radio
 ```
+
+Repeater guest logins default to off. An admin can use `cmd set guest on` to
+enable them or `cmd set guest off` to disable them and remove current guest
+sessions immediately. These settings are saved and need no reboot. When enabled,
+the configured `guest.password` applies; its blank default permits passwordless
+guest access. Admin and assigned ACL access are unaffected. Room-server login
+settings are unchanged.
+
+Use `cmd get guests` or `cmd get guests 2` from an admin session to inspect the
+repeater's guest entries. Each page shows one full public key and its last
+activity time in UTC epoch seconds. Guests are held in RAM, so this is a list of
+accepted sessions rather than proof that a device is currently reachable. They
+are cleared by a reboot or `set guest off` and remain separate from `get acl`.
+
+Use `cmd get logins` or `cmd get logins 2` from an admin session to inspect recent
+login attempts. The repeater retains up to 16 distinct public keys in RAM, newest
+attempt first, with up to two rows per page. Each row shows a 12-character hex
+key prefix, the latest UTC epoch time, result, and attempt count. Repeated
+attempts update the same full key's row; different keys sharing a displayed
+prefix remain separate records.
+
+Results distinguish accepted logins, wrong passwords, disabled guests,
+replay/state rejection, and unavailable ACL capacity. Only authenticated,
+complete login requests are recorded; anonymous owner, region, or clock requests
+are excluded. Passwords and shared secrets are never stored. This bounded
+history clears on reboot, survives `set guest off`, and does not show who is
+currently online. A zero timestamp means the node's clock was unset.
 
 The exact commands and permissions depend on the target firmware. `cmd` does
 not run a command on the local Companion; it sends the text over LoRa to the

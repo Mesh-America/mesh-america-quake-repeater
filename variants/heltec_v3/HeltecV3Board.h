@@ -1,4 +1,5 @@
 #pragma once
+#include <helpers/ESP32GpioHold.h>
 
 #include <Arduino.h>
 #include <helpers/RefCountedDigitalPin.h>
@@ -45,10 +46,12 @@ public:
         startup_reason = BD_STARTUP_RX_PACKET;
       }
 
-      rtc_gpio_hold_dis((gpio_num_t)P_LORA_NSS);
-      rtc_gpio_deinit((gpio_num_t)P_LORA_DIO_1);
+      mesh::esp32::releaseRtcGpioIfSupported((gpio_num_t)P_LORA_NSS);
+      mesh::esp32::deinitRtcGpioIfSupported((gpio_num_t)P_LORA_DIO_1);
     }
   }
+
+  bool supportsBatteryCalibration() const override { return true; }
 
   uint16_t getBattMilliVolts() override {
     analogReadResolution(10);
@@ -62,7 +65,7 @@ public:
 
     digitalWrite(PIN_ADC_CTRL, !adc_active_state);
 
-    return (ADC_MULTIPLIER * (3.3 / 1024.0) * raw) * 1000;
+    return calibrateBatteryMillivolts((ADC_MULTIPLIER * (3.3 / 1024.0) * raw) * 1000);
   }
 
   const char* getManufacturerName() const override {

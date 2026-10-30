@@ -2,10 +2,94 @@
 #include "target.h"
 #include "NotificationSettingsFile.h"
 
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+bool MyMesh::handleCompactLedCommand(const char* command, char* reply, size_t size) {
+  if (!command || !reply || !size) return false;
+  if (strcmp(command, "get leds") == 0) {
+    snprintf(reply, size, "> %s", mesh::leds::enabled() ? "on" : "off");
+    return true;
+  }
+  if (strncmp(command, "set leds", 8) != 0
+      || (command[8] && command[8] != ' ' && command[8] != '\t')) return false;
+  const char* value = command + 8;
+  while (*value == ' ' || *value == '\t') ++value;
+  if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
+    snprintf(reply, size, "Error: usage set leds on|off");
+    return true;
+  }
+  const bool on = strcmp(value, "on") == 0;
+  const uint8_t previous = _prefs.leds_quiet;
+  _prefs.leds_quiet = !on;
+  if (_prefs.leds_quiet != previous) {
+    if (!savePrefs()) {
+      _prefs.leds_quiet = previous;
+      snprintf(reply, size, "Error: LED setting save unconfirmed; reboot may differ");
+      return true;
+    }
+  }
+  mesh::leds::setEnabled(on);
+  board.applyLedPolicy();
+  mesh::leds::applyStatusPolicy();
+  snprintf(reply, size, "OK");
+  return true;
+}
+#endif
+
+bool MyMesh::handleAlertCommand(const char* command, char* reply, size_t size) {
+  if (!command || !reply || !size) return false;
+  const bool get = strncmp(command, "get ", 4) == 0;
+  if (!get && strncmp(command, "set ", 4) != 0) return false;
+  const char* name = command + 4;
+  uint8_t* quiet = nullptr;
+  size_t length = 0;
+  bool supported = false;
+  if (strncmp(name, "buzzer", 6) == 0) {
+    length = 6;
+    quiet = &_prefs.buzzer_quiet;
+#ifdef PIN_BUZZER
+    supported = true;
+#endif
+  } else if (strncmp(name, "vibration", 9) == 0) {
+    length = 9;
+    quiet = &_prefs.vibe_quiet;
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
+    supported = true;
+#endif
+  } else return false;
+  const char* value = name + length;
+  if (*value && *value != ' ' && *value != '\t') return false;
+  if (!supported) {
+    snprintf(reply, size, "Error: %.*s unavailable on this build", int(length), name);
+    return true;
+  }
+  if (get) {
+    if (*value) snprintf(reply, size, "Error: usage get %.*s", int(length), name);
+    else snprintf(reply, size, "> %s", *quiet ? "off" : "on");
+    return true;
+  }
+  while (*value == ' ' || *value == '\t') ++value;
+  if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
+    snprintf(reply, size, "Error: usage set %.*s on|off", int(length), name);
+    return true;
+  }
+  const uint8_t previous = *quiet;
+  *quiet = strcmp(value, "off") == 0;
+  if (*quiet != previous && !savePrefs()) {
+    *quiet = previous;
+    snprintf(reply, size, "Error: failed to save %.*s setting", int(length), name);
+    return true;
+  }
+  if (_ui) _ui->syncAlertPreferences();
+  snprintf(reply, size, "OK");
+  return true;
+}
+
 #if COMPANION_FEATURE_NOTIFICATIONS
+// The UI's STATUS_LED_RGB define is local to its own translation unit.
 uint8_t MyMesh::capabilities() const {
   uint8_t bits = _ui ? _ui->notificationCapabilities() : 0;
-#if defined(PIN_STATUS_LED) || defined(STATUS_LED_RGB)
+#if defined(PIN_STATUS_LED) || \
+    (defined(PIN_STATUS_LED_R) && defined(PIN_STATUS_LED_G) && defined(PIN_STATUS_LED_B))
   bits |= mesh::notify::Led;
 #endif
   for(unsigned pin=0;pin<64;++pin)if(gpioAvailable(pin)) { bits|=mesh::notify::Gpio;break; }
@@ -18,7 +102,8 @@ void MyMesh::pulse(mesh::notify::Output output,bool on,int8_t pin) {
   } else if(output==mesh::notify::Vibration) {
     if(_ui)_ui->notificationVibration(on);
   } else if(output==mesh::notify::Led) {
-#ifdef STATUS_LED_RGB
+    on = on && mesh::leds::enabled();
+#if defined(PIN_STATUS_LED_R) && defined(PIN_STATUS_LED_G) && defined(PIN_STATUS_LED_B)
     analogWrite(PIN_STATUS_LED_R,on?255:0);
     analogWrite(PIN_STATUS_LED_G,on?90:0);
     analogWrite(PIN_STATUS_LED_B,0);

@@ -471,7 +471,7 @@ esp_err_t PsychicMqttClient::reconnect()
 
 void PsychicMqttClient::disconnect()
 {
-    if (_client == nullptr)
+    if (_client == nullptr || !_started)
     {
         ESP_LOGW(TAG, "MQTT client not started.");
         return;
@@ -481,16 +481,41 @@ void PsychicMqttClient::disconnect()
     {
         ESP_LOGI(TAG, "Disconnecting MQTT client.");
         _stopMqttClient = false;
-        esp_mqtt_client_disconnect(_client);
-
-        // Wait for all disconnect events to be processed
-        while (!_stopMqttClient)
+        const esp_err_t disconnect_result = esp_mqtt_client_disconnect(_client);
+        if (disconnect_result == ESP_OK)
         {
-            vTaskDelay(10 / portTICK_PERIOD_MS);
+            // The SDK can lose its disconnect notification during a failed
+            // transport. Give callbacks one second, then use SDK stop to close
+            // the transport instead of waiting forever on that notification.
+            const uint32_t started_at = static_cast<uint32_t>(millis());
+            const uint32_t poll_ticks = 10 / portTICK_PERIOD_MS;
+            while (!_stopMqttClient
+                   && static_cast<uint32_t>(millis() - started_at) < 1000U)
+            {
+                vTaskDelay(poll_ticks ? poll_ticks : 1);
+            }
+            if (!_stopMqttClient)
+            {
+                ESP_LOGW(TAG, "Disconnect notification timed out; stopping MQTT client.");
+            }
+        }
+        else
+        {
+            ESP_LOGW(TAG, "MQTT disconnect request failed: %s; stopping client.",
+                     esp_err_to_name(disconnect_result));
         }
     }
 
-    esp_mqtt_client_stop(_client);
+    const esp_err_t stop_result = esp_mqtt_client_stop(_client);
+    if (stop_result != ESP_OK)
+    {
+        // A failed stop is not permission for the station owner to disable
+        // WiFi or reclaim transport buffers. isStarted() keeps that handoff
+        // blocked until an owning-task retry actually stops the SDK client.
+        ESP_LOGW(TAG, "MQTT client stop failed: %s", esp_err_to_name(stop_result));
+        return;
+    }
+    _connected = false;
     _started = false;
     ESP_LOGI(TAG, "MQTT client stopped.");
 }
@@ -655,6 +680,11 @@ unsigned long PsychicMqttClient::getOutboxDrops()
 unsigned long PsychicMqttClient::getPublishOk()
 {
     return _publish_ok;
+}
+
+unsigned long PsychicMqttClient::getPublishAck()
+{
+    return _publish_ack.load(std::memory_order_relaxed);
 }
 
 unsigned long PsychicMqttClient::getPublishErr()
@@ -832,6 +862,7 @@ void PsychicMqttClient::_onMessage(esp_mqtt_event_handle_t &event)
 
 void PsychicMqttClient::_onPublish(esp_mqtt_event_handle_t &event)
 {
+    _publish_ack.fetch_add(1, std::memory_order_relaxed);
     ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
     for (uint8_t i = 0; i < _onPublishUserCallbackCount; ++i)
     {

@@ -606,6 +606,7 @@ These settings apply across all MQTT slots:
 - `get mqtt.packets` - Get packet message setting (on/off)
 - `get mqtt.raw` - Get raw message setting (on/off)
 - `get mqtt.rx` - Get RX packet uplinking setting (on/off)
+- `get mqtt.advert.verify` - Get advert signature filtering setting (on/off)
 - `get mqtt.tx` - Get TX packet uplinking setting (on/off/advert)
 - `get mqtt.interval` - Get status publish interval
 - `get mqtt.neighbors` - Get periodic neighbors publishing setting (on/off; neighbors-enabled builds)
@@ -622,6 +623,7 @@ These settings apply across all MQTT slots:
 - `set mqtt.packets on|off` - Enable/disable packet messages
 - `set mqtt.raw on|off` - Enable/disable raw messages
 - `set mqtt.rx on|off` - Enable/disable RX (received) packet uplinking
+- `set mqtt.advert.verify on|off` - Skip received adverts whose signature fails (default off)
 - `set mqtt.tx on|off|advert` - Set TX packet uplinking mode:
   - `on` - Uplink all transmitted packets
   - `advert` - Uplink only this node's own advert packets (self-originated)
@@ -751,13 +753,27 @@ Optionally set a WPA2 password for the setup AP at build time with
 `-D WEBCONFIG_AP_PASSWORD='"yourpassword"'`.
 
 #### Modes and authentication
-- **Setup AP**: unauthenticated. Trust is based on physical proximity to the
-  open/PSK AP. Only the SoftAP interface serves the API -- on `start webconfig
-  ap` the STA is explicitly disassociated so the API is **not** exposed on the
-  LAN the node was attached to.
-- **LAN**: requires the admin password (same one used for remote CLI admin).
-  Sessions use a cookie with a sliding idle expiry (default 20 minutes); five
-  failed logins trigger a 30-second lockout.
+- **Setup AP**: first-time provisioning with no saved WiFi SSID does not require
+  an admin login. With a saved SSID, both a recovery AP and `start webconfig ap`
+  require the existing admin password, when configured, before settings can be
+  changed. Joining the AP does not grant permission to replace that password.
+  Only the SoftAP interface serves the setup API, including while saved-network
+  recovery retries the station connection. `WEBCONFIG_AP_PASSWORD` protects
+  joining the WiFi network separately from the portal's admin login.
+- **LAN**: requires the configured admin password (same one used for remote CLI
+  admin). Images deliberately configured without an admin password retain their
+  no-password policy. Sessions use a cookie with a sliding idle expiry (default
+  20 minutes).
+
+When an admin login is required, `/api/login` applies the same limits on LAN and
+the recovery AP. Five failed logins from one address lock that address for 30
+seconds after its fifth failure. A shared budget allows a burst of six failures
+across all addresses and refills one allowance every 6 seconds. When it is
+exhausted, even correct credentials receive HTTP 429 until an allowance returns.
+A successful login clears only that address's failure count, not the shared
+budget. The [room browser](docs/room_services.md#local-wi-fi-chat-on-esp32) has a
+separate password budget; signing in through one endpoint does not clear the
+other's failures.
 
 > **Security note:** the open setup AP transports WiFi/MQTT credentials over
 > plain HTTP. Provision on a trusted, non-public frequency/location, set

@@ -1,5 +1,6 @@
 #include <helpers/RadioProfileCLI.h>
 #include <helpers/BatteryChargeCLI.h>
+#include <helpers/BatteryCalibrationStore.h>
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #if MESH_PACKET_LOGGING
@@ -271,7 +272,8 @@ protected:
   void onCLICommandRecv(const ContactInfo& contact, mesh::Packet* pkt, uint32_t sender_timestamp, const char *text, char* reply) override {
   }
 
-  void onSignedMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t sender_timestamp, const uint8_t *sender_prefix, const char *text) override {
+  bool onSignedMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t sender_timestamp, const uint8_t *sender_prefix, const char *text) override {
+    return false; // This minimal example does not retain room posts.
   }
 
   void onChannelMessageRecv(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t timestamp, const char *text) override {
@@ -423,6 +425,10 @@ public:
     mesh::setUsbLoggingEnabled(_prefs.usb_logging_enabled != 0);
 #endif
 
+    if (!mesh::power::beginBatteryCalibrationStore(board, volatile_primary_fs ? nullptr : _fs)) {
+      MESH_DEBUG_PRINTLN("Battery calibration could not be restored; using board default");
+    }
+
     loadContacts();
     _public = addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
   }
@@ -469,6 +475,12 @@ public:
   }
 
   void handleCommand(const char* command) {
+    char calibration_reply[160];
+    if (mesh::power::handleStoredBatteryCalibrationCommand(board, command,
+          calibration_reply, sizeof(calibration_reply))) {
+      Serial.println(calibration_reply);
+      return;
+    }
 #if MESH_BATTERY_CHARGE_CONTROL
     char charge_reply[160];
     if (mesh::power::handleBatteryChargeCommand(board, command, charge_reply,
@@ -747,27 +759,16 @@ void setup() {
 #endif
 
   board.begin();
+  board.applyMcuRegulator(mesh::power::RegulatorMode::Default);
 
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.begin();
 #endif
 
-  int radioinit_attempts = 0;
-  while (!radio_init()) {
-    ++radioinit_attempts;
-    MESH_DEBUG_PRINTLN("Radio init failed! (attempt %d)", radioinit_attempts);
-    if (radioinit_attempts >= 3) {
-      MESH_DEBUG_PRINTLN("Radio init failed 3x - rebooting");
-      board.reboot();
-    }
-    delay(500);
-  }
-
-  fast_rng.begin(radio_driver.getRngSeed());
-
-#if defined(NRF52_PLATFORM)
-  FILESYSTEM* primary_fs = &InternalFS;
+  FILESYSTEM* primary_fs;
   bool volatile_primary_fs = false;
+#if defined(NRF52_PLATFORM)
+  primary_fs = &InternalFS;
   mesh::storage::RamFallbackFileSystem* ram_primary_fs = nullptr;
   const auto primary_fs_boot =
       mesh::storage::beginInternalPrimaryFilesystemSafely(InternalFS);
@@ -781,16 +782,31 @@ void setup() {
     primary_fs = &ram_primary_fs->filesystem();
     volatile_primary_fs = true;
   }
-  the_mesh.begin(*primary_fs, volatile_primary_fs);
 #elif defined(RP2040_PLATFORM)
   LittleFS.begin();
-  the_mesh.begin(LittleFS);
+  primary_fs = &LittleFS;
 #elif defined(ESP32)
   SPIFFS.begin(true);
-  the_mesh.begin(SPIFFS);
+  primary_fs = &SPIFFS;
 #else
   #error "need to define filesystem"
 #endif
+  mesh::RadioProfileCLI::configureBootTuning(
+      volatile_primary_fs ? nullptr : primary_fs, radio_driver);
+
+  int radioinit_attempts = 0;
+  while (!radio_init()) {
+    ++radioinit_attempts;
+    MESH_DEBUG_PRINTLN("Radio init failed! (attempt %d)", radioinit_attempts);
+    if (radioinit_attempts >= 3) {
+      MESH_DEBUG_PRINTLN("Radio init failed 3x - rebooting");
+      board.reboot();
+    }
+    delay(500);
+  }
+
+  fast_rng.begin(radio_driver.getRngSeed());
+  the_mesh.begin(*primary_fs, volatile_primary_fs);
 
   radio_driver.setParams(the_mesh.getFreqPref(), LORA_BW, LORA_SF, LORA_CR);
   radio_driver.setTxPower(the_mesh.getTxPowerPref());

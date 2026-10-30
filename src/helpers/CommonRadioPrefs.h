@@ -1,6 +1,7 @@
 #pragma once
 #include "ConfigSerializer.h"
 #include "KeyValueStore.h"
+#include "radiolib/RXPowerSaving.h"
 
 class CommonRadioPrefs : public ConfigSerializer, public KeyValueStore {
   bool _is_dirty = false;
@@ -61,6 +62,9 @@ public:
 
   virtual uint8_t getFEMTxGain() const = 0;
   virtual void setFEMTxGain(uint8_t g) = 0;
+
+  virtual RxPowerSavingConfig readRxPowerSavingConfig() const { return {}; }
+  void formatRxPowerSavingStatus(char* reply, size_t reply_size) const;
 
   bool handleCommand(const char* command, uint32_t sender_timestamp, char* reply);
 

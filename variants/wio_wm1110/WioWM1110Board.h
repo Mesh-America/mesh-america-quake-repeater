@@ -17,13 +17,21 @@ public:
   void begin();
 
 #if defined(LED_GREEN)
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    digitalWrite(LED_GREEN, mesh::leds::enabled() ? HIGH : LOW);
+    if (!mesh::leds::enabled()) digitalWrite(LED_RED, LOW);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(LED_RED, HIGH);
+    if (mesh::leds::enabled()) digitalWrite(LED_RED, HIGH);
   }
   void onAfterTransmit() override {
     digitalWrite(LED_RED, LOW);
   }
 #endif
+
+  bool supportsBatteryCalibration() const override { return true; }
 
   uint16_t getBattMilliVolts() override {
     int adcvalue = 0;
@@ -31,7 +39,7 @@ public:
     analogReference(AR_INTERNAL_3_0);
     delay(10);
     adcvalue = analogRead(BATTERY_PIN);
-    return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE * 1000.0) / 4096.0;
+    return calibrateBatteryMillivolts((adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE * 1000.0) / 4096.0);
   }
 
   const char* getManufacturerName() const override {

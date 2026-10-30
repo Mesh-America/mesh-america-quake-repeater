@@ -1,4 +1,5 @@
 #include "HeltecV4R8Board.h"
+#include <helpers/ESP32GpioHold.h>
 
 // Expansion Kit V2 control-pin notes (kept here beside the shared-reset
 // sequencing): display/touch I2C is SDA 17 / SCL 18; GPIO 21 is the shared
@@ -30,13 +31,13 @@ void HeltecV4R8Board::begin() {
       startup_reason = BD_STARTUP_RX_PACKET;
     }
 
-    rtc_gpio_hold_dis((gpio_num_t)P_LORA_NSS);
-    rtc_gpio_deinit((gpio_num_t)P_LORA_DIO_1);
+    mesh::esp32::releaseRtcGpioIfSupported((gpio_num_t)P_LORA_NSS);
+    mesh::esp32::deinitRtcGpioIfSupported((gpio_num_t)P_LORA_DIO_1);
   }
 }
 
 void HeltecV4R8Board::onBeforeTransmit(void) {
-  digitalWrite(P_LORA_TX_LED, HIGH);
+  if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);
   loRaFEMControl.setTxModeEnable();
 }
 
@@ -52,8 +53,7 @@ void HeltecV4R8Board::powerOff() {
 void HeltecV4R8Board::shutdownPeripherals() {
   ESP32Board::shutdownPeripherals();
   loRaFEMControl.setSleepModeEnable();
-  digitalWrite(P_LORA_PA_POWER, LOW);
-  rtc_gpio_hold_en((gpio_num_t)P_LORA_PA_POWER);
+  mesh::esp32::holdOutputForDeepSleep((gpio_num_t)P_LORA_PA_POWER, LOW);
   periph_power.release();  // Drop the permanent antenna-boost/VEXT claim from begin().
 }
 
@@ -78,9 +78,9 @@ bool HeltecV4R8Board::isExternalPowered() {
   if (!power_voltage_sampled || uint32_t(now - last_power_check_ms) >= 5000) {
     last_power_check_ms = now;
     power_voltage_sampled = true;
-    // Like Meshtastic's analog power detection, enter above a full Li-ion cell
-    // plus 10 mV. Release at 4.20 V to reduce display-profile chatter. This can
-    // miss a charger while the battery is low; it is not a charging-status flag.
+    // Enter above a full Li-ion cell plus 10 mV. Release at 4.20 V to reduce
+    // display-profile chatter. This can miss a charger while the battery is
+    // low; it is not a charging-status flag.
     const uint16_t millivolts = getBattMilliVolts();
     voltage_external_power = millivolts > (voltage_external_power ? 4200 : 4210);
   }

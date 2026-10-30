@@ -27,6 +27,10 @@
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
 #include <helpers/CompanionReaderConfig.h>
+#if UI_POCKET_GUI
+#include <helpers/ui/PocketGuiSettings.h>
+namespace mesh { namespace ui { namespace pocket { class PocketGui; } } }
+#endif
 
 class UITask : public AbstractUITask {
   DisplayDriver* _display;
@@ -39,15 +43,17 @@ class UITask : public AbstractUITask {
 #elif defined(PIN_VIBRATION)
   GenericVibration vibration;
 #endif
-  unsigned long _next_refresh;
+  uint32_t _next_refresh;
   unsigned long _pairing_screen_until;
   bool _deferred_msg_preview;
-  CompanionNodePrefs* _node_prefs;
+  bool _startup_complete = false;
+  CompanionNodePrefs* _node_prefs = nullptr;
   char _alert[80];
-  unsigned long _alert_expiry;
+  uint32_t _alert_expiry;
   int _msgcount;
-  unsigned long ui_started_at, next_batt_chck;
-  int next_backlight_btn_check = 0;
+  unsigned long ui_started_at;
+  uint32_t next_batt_chck;
+  uint32_t last_backlight_btn_check = 0;
 #ifdef HAS_TOUCH
   #ifndef TOUCH_CENTER_ZONE_PERCENT
     #define TOUCH_CENTER_ZONE_PERCENT 34
@@ -86,8 +92,8 @@ class UITask : public AbstractUITask {
 #endif
 #ifdef PIN_STATUS_LED
   int led_state = 0;
-  int next_led_change = 0;
-  int last_led_increment = 0;
+  uint32_t last_led_change = 0;
+  uint32_t led_phase_millis = 0;
 #endif
 
 #ifdef PIN_USER_BTN_ANA
@@ -98,6 +104,9 @@ class UITask : public AbstractUITask {
   UIScreen* home;
   UIScreen* msg_preview = nullptr;
   UIScreen* curr;
+#if UI_POCKET_GUI
+  mesh::ui::pocket::Settings _pocket_settings;
+#endif
 #if COMPANION_FEATURE_READER
   UIScreen* reader = nullptr;
 #endif
@@ -146,6 +155,15 @@ public:
   int  getMsgCount() const { return _msgcount; }
   int getPreviewCount() const;
   void renderMessageSummary(DisplayDriver& display) const;
+#if UI_POCKET_GUI
+  mesh::ui::pocket::Settings& pocketSettings() { return _pocket_settings; }
+  void renderPocketBoard(mesh::ui::pocket::PocketGui& gui) const;
+  void renderPocketInbox(mesh::ui::pocket::PocketGui& gui) const;
+  unsigned pocketBoardCount() const;
+  void cleanPocketDisplay() { if (_display) _display->forceFullRefresh(); }
+  void channelMessageSent(int channel_idx, const char* channel_name,
+                          const char* sender, const char* text, size_t length) override;
+#endif
   bool hasDisplay() const { return _display != NULL; }
 #ifdef HAS_TOUCH
   bool supportsTouchDebug() const override { return _display != nullptr; }
@@ -155,7 +173,7 @@ public:
     _touch_debug_enabled = enabled;
     _touch_debug_x = _touch_debug_y = _touch_debug_area = -1;
     _touch_debug_screen = nullptr;
-    _next_refresh = 0;  // Also removes already-drawn outlines when disabling.
+    _next_refresh = millis();  // Also removes already-drawn outlines when disabling.
     if (enabled) checkDisplayOn(0);  // Wake without selecting or navigating.
     return true;
   }
@@ -164,7 +182,9 @@ public:
     return _display != NULL && _display->supportsRotation();
   }
   bool setDisplayRotationDegrees(uint16_t degrees) override {
-    return _display != NULL && _display->setRotationDegrees(degrees);
+    if (_display == NULL || !_display->setRotationDegrees(degrees)) return false;
+    _next_refresh = millis();
+    return true;
   }
   bool isButtonPressed() const;
 
@@ -185,7 +205,7 @@ public:
   void msgRead(int msgcount) override;
   void syncMessageQueue(int msgcount, int removed_index = -1) override;
   bool supportsInboxModes() const override { return _display != nullptr; }
-  void inboxModeChanged() override { _next_refresh = 0; }
+  void inboxModeChanged() override { _next_refresh = millis(); }
   const char* inboxTitle() const;
   void newMsg(uint8_t path_len, const char* from_name, const char* text,
               int msgcount, int channel_idx = -1,
@@ -196,6 +216,7 @@ public:
   void notificationVibration(bool on) override;
   void notificationMelody(const char* text) override;
   void notificationScreen(int8_t mode) override;
+  void syncAlertPreferences() override;
   void loop() override;
 
   void shutdown(bool restart = false);

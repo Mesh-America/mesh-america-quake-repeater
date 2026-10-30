@@ -31,7 +31,7 @@ void ThinknodeM5Board::begin() {
     mv /= 8;
 
     analogReadResolution(10);  
-    return static_cast<uint16_t>(mv * ADC_MULTIPLIER );
+    return calibrateBatteryMillivolts(static_cast<uint16_t>(mv * ADC_MULTIPLIER ));
 }
 
   const char* ThinknodeM5Board::getManufacturerName() const {

@@ -5,9 +5,11 @@
 #include <helpers/ClientLoginPersistence.h>
 #include <helpers/ClientPathPersistence.h>
 #include <helpers/LazyPersistence.h>
+#include <helpers/PowerManagementUtils.h>
 #include <helpers/RoutingPolicy.h>
 #include <helpers/radiolib/RXPowerSaving.h>
 #include <helpers/sensors/LPPDataHelpers.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <helpers/UsbLogging.h>
 #if defined(ENABLE_OTA)
 #include <helpers/ota/OtaContext.h>
@@ -105,7 +107,7 @@ static File openAppend(FILESYSTEM* _fs, const char* fname) {
 
 /* --------------------- Cayenne LPP helpers ----------------------------*/
 
-static float findTelemValue(const uint8_t* buf, uint8_t size, uint8_t channel, uint8_t type, float def_value) {
+static const uint8_t* findTelemData(const uint8_t* buf, uint8_t size, uint8_t channel, uint8_t type) {
   uint8_t i = 0;
 
   while (i + 2 < size) {
@@ -117,11 +119,27 @@ static float findTelemValue(const uint8_t* buf, uint8_t size, uint8_t channel, u
     if (sz > size - i) break;
 
     if (ch == channel && t == type) {
-      return LPPData::getFloat(&buf[i], sz, LPPData::getMultiplier(t), LPPData::isSigned(t));
+      return &buf[i];
     }
     i += sz;  // skip
   }
-  return def_value;   // not found
+  return nullptr;   // not found
+}
+
+static float findTelemValue(const uint8_t* buf, uint8_t size, uint8_t channel, uint8_t type, float def_value) {
+  const uint8_t* data = findTelemData(buf, size, channel, type);
+  return data ? LPPData::getFloat(data, LPPData::getDataSize(type),
+      LPPData::getMultiplier(type), LPPData::isSigned(type)) : def_value;
+}
+
+static int64_t readTelemRawValue(const uint8_t* data, uint8_t size, bool is_signed) {
+  if (!data || size == 0 || size > sizeof(uint32_t)) return 0;
+  int64_t value = 0;
+  for (uint8_t i = 0; i < size; ++i) value = (value << 8) | data[i];
+  if (is_signed && (value & (int64_t(1) << (size * 8 - 1)))) {
+    value -= int64_t(1) << (size * 8);
+  }
+  return value;
 }
 
 /* ------------------ end Cayenne LPP helpers ----------------------*/
@@ -139,11 +157,14 @@ bool SensorMesh::telemHasChanged(ClientInfo* c) {
     if (!LPPData::isScalarType(t)
         || sz > c->extra.sensor.min_deltas_len - i - 2) return false;
 
-    float min_delta = LPPData::getFloat(&c->extra.sensor.min_deltas[i + 2], sz, LPPData::getMultiplier(t), LPPData::isSigned(t));
-    float pv = LPPData::getFloat(&c->extra.sensor.prev_telem[i + 2], sz, LPPData::getMultiplier(t), LPPData::isSigned(t));
-
-    float v = findTelemValue(buf, size, ch, t, 0.0f);
-    if (fabsf(v - pv) > min_delta) changed = true;
+    const bool is_signed = LPPData::isSigned(t);
+    const int64_t min_delta = readTelemRawValue(&c->extra.sensor.min_deltas[i + 2], sz, is_signed);
+    const int64_t pv = readTelemRawValue(&c->extra.sensor.prev_telem[i + 2], sz, is_signed);
+    const int64_t v = readTelemRawValue(findTelemData(buf, size, ch, t), sz, is_signed);
+    // The common LPP multiplier cancels. Compare raw units so float rounding
+    // cannot hide a one-LSB change or push an equal delta over the threshold.
+    const int64_t difference = v >= pv ? v - pv : pv - v;
+    if (difference > min_delta) changed = true;
 
     i += 2 + sz;  // skip
   }
@@ -164,9 +185,11 @@ void SensorMesh::snapshotTelemetry(ClientInfo* c) {
 
     c->extra.sensor.prev_telem[i] = ch;
     c->extra.sensor.prev_telem[i + 1] = t;
-    float v = findTelemValue(buf, size, ch, t, 0.0f);
-    LPPData::putFloat(&c->extra.sensor.prev_telem[i + 2], v, sz,
-                      LPPData::getMultiplier(t), LPPData::isSigned(t));
+    // Retain exactly what was delivered; a float round trip can lose one LSB
+    // and repeatedly report the same unchanged reading as a new delta.
+    const uint8_t* value = findTelemData(buf, size, ch, t);
+    if (value) memcpy(&c->extra.sensor.prev_telem[i + 2], value, sz);
+    else memset(&c->extra.sensor.prev_telem[i + 2], 0, sz);
     i += 2 + sz;
   }
 }
@@ -381,6 +404,7 @@ void SensorMesh::sendAlert(const ClientInfo* c, Trigger* t) {
 }
 
 void SensorMesh::alertIf(bool condition, Trigger& t, AlertPriority pri, const char* text) {
+  if (isTrackerModeEnabled()) return;
   if (condition) {
     if (!t.isTriggered() && num_alert_tasks < MAX_CONCURRENT_ALERTS) {
       StrHelper::strncpy(t.text, text, sizeof(t.text));
@@ -418,10 +442,17 @@ bool SensorMesh::getCADEnabled() const {
 }
 
 bool SensorMesh::allowPacketForward(const mesh::Packet* packet) {
+  if (!packet || !_cli.batteryAllowsForward(packet->isRouteFlood())) return false;
+  if (isTrackerModeEnabled()) return false;
   if (_prefs.disable_fwd) return false;
   if (packet->isRouteFlood() && packet->getPathHashCount() >= _prefs.flood_max) return false;
   _clock_sync.observeAcceptedFlood(packet);
   return true;
+}
+
+bool SensorMesh::allowPacketTransmit(const mesh::Packet* packet) const {
+  return _cli.batteryAllowsTransmit(packet)
+      && mesh::Mesh::allowPacketTransmit(packet);
 }
 
 int SensorMesh::calcRxDelay(float score, uint32_t air_time) const {
@@ -430,16 +461,27 @@ int SensorMesh::calcRxDelay(float score, uint32_t air_time) const {
 }
 
 uint32_t SensorMesh::getRetransmitDelay(const mesh::Packet* packet) {
-  uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.tx_delay_factor);
+  uint32_t t = (_radio->getProfileAirtime(packet->radio_profile,
+      packet->getRawLength(), packet->tx_cr) * _prefs.tx_delay_factor);
   return getRNG()->nextInt(0, 6)*t;
 }
 uint32_t SensorMesh::getDirectRetransmitDelay(const mesh::Packet* packet) {
-  uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.direct_tx_delay_factor);
+  uint32_t t = (_radio->getProfileAirtime(packet->radio_profile,
+      packet->getRawLength(), packet->tx_cr) * _prefs.direct_tx_delay_factor);
   return getRNG()->nextInt(0, 6)*t;
 }
 
 bool SensorMesh::allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash,
                                   uint8_t next_hop_hash_len) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return false;
+  if (_cli.morseReply().ownsReply(packet)) return false;
+#if MESH_ENABLE_SENSOR_TRACKER
+  if (tracker_pending && packet != NULL) {
+    uint8_t hash[MAX_HASH_SIZE];
+    packet->calculatePacketHash(hash);
+    if (memcmp(hash, tracker_packet_hash, sizeof(hash)) == 0) return false;
+  }
+#endif
   (void)packet;
   (void)next_hop_hash;
   (void)next_hop_hash_len;
@@ -472,6 +514,9 @@ uint32_t SensorMesh::getDirectRetryAttemptDelay(const mesh::Packet* packet, uint
 }
 
 bool SensorMesh::allowFloodRetry(const mesh::Packet* packet) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return false;
+  if (_cli.morseReply().ownsReply(packet)) return false;
+  if (packet != NULL && packet->flood_retry_policy == mesh::FLOOD_RETRY_POLICY_DENY) return false;
   if (_prefs.disable_fwd || _prefs.flood_retry_attempts == 0) return false;
   return packet == NULL || packet->getPayloadType() != PAYLOAD_TYPE_ADVERT
       || _prefs.flood_retry_advert_enabled;
@@ -488,6 +533,7 @@ uint8_t SensorMesh::getFloodRetryMaxPathLength(const mesh::Packet* packet) const
 }
 
 uint8_t SensorMesh::getFloodRetryMaxAttempts(const mesh::Packet* packet) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return 0;
   if (_prefs.disable_fwd) return 0;
 
   uint8_t attempts = constrain(_prefs.flood_retry_attempts, 0, 15);
@@ -709,6 +755,20 @@ void SensorMesh::handleCommand(uint32_t sender_timestamp, char* command, char* r
 
   mesh::cli::normalizeCommandVerb(command);
 
+#if MESH_ENABLE_SENSOR_TRACKER
+  if (sender_timestamp == 0 && tracker.enabled) {
+    wakeTrackerRadio();
+    tracker_awake_until = futureMillis(120000);
+  }
+  if (handleTrackerCommand(sender_timestamp, command, reply)) return;
+#else
+  if (strncmp(command, "get tracker", 11) == 0
+      || strncmp(command, "set tracker.", 12) == 0) {
+    strcpy(reply, "ERR: tracker unavailable on this build");
+    return;
+  }
+#endif
+
   // first, see if this is a custom-handled CLI command (ie. in main.cpp)
   if (handleCustomCommand(sender_timestamp, command, reply)) {
     return;   // command has been handled
@@ -782,6 +842,9 @@ void SensorMesh::handleCommand(uint32_t sender_timestamp, char* command, char* r
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
     updateGpsTelemetryPolicy();
+#if MESH_ENABLE_SENSOR_TRACKER
+    if (tracker.enabled) configureTrackerRuntime();
+#endif
   }
 }
 
@@ -790,6 +853,20 @@ void SensorMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
                               size_t app_data_len) {
   mesh::Mesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
   _clock_sync.observeVerifiedAdvert(packet, id, timestamp);
+#if MESH_ENABLE_SENSOR_TRACKER
+  AdvertDataParser advert(app_data, app_data_len);
+  if (tracker.enabled && !tracker_storage_fault && advert.isValid()
+      && advert.getType() == ADV_TYPE_REPEATER && packet->getPathHashCount() == 0) {
+    // RF activity can postpone recovery, never clear an outage or its cutoff.
+    mesh::tracker::RouteState proposed;
+    mesh::tracker::noteRepeater(tracker.route, getRTCClock()->getCurrentTime(), proposed);
+    if (proposed.flags != tracker.route.flags) {
+      mesh::tracker::TrackerRecord candidate = tracker;
+      candidate.route = proposed;
+      saveTrackerRecord(candidate);
+    } else tracker.route = proposed;
+  }
+#endif
 }
 
 void SensorMesh::onGroupPacketRecv(mesh::Packet* packet) {
@@ -843,6 +920,13 @@ void SensorMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret, con
 
 int SensorMesh::searchPeersByHash(const uint8_t* hash) {
   int n = 0;
+#if MESH_ENABLE_SENSOR_TRACKER
+  // Give the full configured owner its own receive slot, independent of ACL
+  // privilege. A public-key prefix match alone never authenticates a response.
+  if (tracker.enabled && memcmp(tracker.owner, hash, PATH_HASH_SIZE) == 0) {
+    matching_peer_indexes[n++] = -2;
+  }
+#endif
   for (int i = 0; i < acl.getNumClients() && n < MAX_SEARCH_RESULTS; i++) {
     if (acl.getClientByIdx(i)->id.isHashMatch(hash)) {
       matching_peer_indexes[n++] = i;  // store the INDEXES of matching contacts (for subsequent 'peer' methods)
@@ -852,7 +936,14 @@ int SensorMesh::searchPeersByHash(const uint8_t* hash) {
 }
 
 void SensorMesh::getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) {
+  if (peer_idx < 0 || peer_idx >= MAX_SEARCH_RESULTS) {
+    memset(dest_secret, 0, PUB_KEY_SIZE);
+    return;
+  }
   int i = matching_peer_indexes[peer_idx];
+#if MESH_ENABLE_SENSOR_TRACKER
+  if (i == -2) { memcpy(dest_secret, tracker_secret, PUB_KEY_SIZE); return; }
+#endif
   if (i >= 0 && i < acl.getNumClients()) {
     // lookup pre-calculated shared_secret
     memcpy(dest_secret, acl.getClientByIdx(i)->shared_secret, PUB_KEY_SIZE);
@@ -879,7 +970,17 @@ void SensorMesh::sendAckTo(const ClientInfo& dest, uint32_t ack_hash, uint8_t pa
 }
 
 void SensorMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) {
+  if (sender_idx < 0 || sender_idx >= MAX_SEARCH_RESULTS) return;
   int i = matching_peer_indexes[sender_idx];
+#if MESH_ENABLE_SENSOR_TRACKER
+  if (i == -2) {
+    if (handleTrackerResponse(packet, type, data, len)) return;
+    i = -1;
+    for (int index = 0; index < acl.getNumClients(); ++index) {
+      if (acl.getClientByIdx(index)->id.matches(tracker.owner)) { i = index; break; }
+    }
+  }
+#endif
   if (i < 0 || i >= acl.getNumClients()) {
     MESH_DEBUG_PRINTLN("onPeerDataRecv: Invalid sender idx: %d", i);
     return;
@@ -953,8 +1054,11 @@ void SensorMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_i
         char *command = (char *) &data[5];
         char *reply = (char *) &temp[5];
         *reply = 0;
+        const uint32_t morse_mutation_before = _cli.morseReply().generation();
+        _cli.morseReply().beginCommand(from->id.pub_key);
         handleCommand(sender_timestamp, command, reply, i,
                       packet->getPathHashSize());
+        _cli.morseReply().endCommand();
 
         int text_len = strlen(reply);
         if (text_len > 0) {
@@ -967,13 +1071,20 @@ void SensorMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_i
           temp[4] = (TXT_TYPE_CLI_DATA << 2);
 
           auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, from->id, secret, temp, 5 + text_len);
+          const bool arms_morse = _cli.morseReply().generation() != morse_mutation_before;
+          if (arms_morse) {
+            _cli.morseReply().prepareReply(reply);
+            if (reply) reply->radio_reply = true;
+          }
+          bool queued = false;
           if (reply) {
             if (!mesh::Packet::isValidPathLen(from->out_path_len)) {
-              sendFloodReply(reply, CLI_REPLY_DELAY_MILLIS, packet->getPathHashSize());
+              queued = sendFloodReply(reply, CLI_REPLY_DELAY_MILLIS, packet->getPathHashSize());
             } else {
-              sendDirect(reply, from->out_path, from->out_path_len, CLI_REPLY_DELAY_MILLIS);
+              queued = sendDirect(reply, from->out_path, from->out_path_len, CLI_REPLY_DELAY_MILLIS);
             }
           }
+          if (arms_morse) _cli.morseReply().armReply(reply, queued);
         }
       } else {
         MESH_DEBUG_PRINTLN("onPeerDataRecv: unsupported text type received: flags=%02x", (uint32_t)flags);
@@ -994,6 +1105,24 @@ bool SensorMesh::handleIncomingMsg(ClientInfo& from, uint32_t timestamp, uint8_t
   }
   #endif
   return false;
+}
+
+#if !MESH_ENABLE_SENSOR_TRACKER
+void SensorMesh::onSendComplete(mesh::Packet* packet) {
+  mesh::Mesh::onSendComplete(packet);
+  _cli.morseReply().complete(packet);
+}
+
+void SensorMesh::onSendFail(mesh::Packet* packet) {
+  mesh::Mesh::onSendFail(packet);
+  _cli.morseReply().fail(packet);
+}
+#endif
+
+void SensorMesh::onRadioProfileCopyQueued(mesh::Packet* packet,
+                                         const mesh::Packet* original, uint8_t priority) {
+  _cli.morseReply().copy(original, packet);
+  mesh::Mesh::onRadioProfileCopyQueued(packet, original, priority);
 }
 
 #define CTL_TYPE_NODE_DISCOVER_REQ   0x80
@@ -1030,7 +1159,17 @@ void SensorMesh::onControlDataRecv(mesh::Packet* packet) {
 }
 
 bool SensorMesh::onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uint8_t* secret, uint8_t* path, uint8_t path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) {
+  if (sender_idx < 0 || sender_idx >= MAX_SEARCH_RESULTS) return false;
   int i = matching_peer_indexes[sender_idx];
+#if MESH_ENABLE_SENSOR_TRACKER
+  if (i == -2) {
+    if (handleTrackerPath(packet, path, path_len, extra_type, extra, extra_len)) return false;
+    i = -1;
+    for (int index = 0; index < acl.getNumClients(); ++index) {
+      if (acl.getClientByIdx(index)->id.matches(tracker.owner)) { i = index; break; }
+    }
+  }
+#endif
   if (i < 0 || i >= acl.getNumClients()) {
     MESH_DEBUG_PRINTLN("onPeerPathRecv: Invalid sender idx: %d", i);
     return false;
@@ -1164,9 +1303,6 @@ void SensorMesh::begin(FILESYSTEM* fs) {
   }
 
   saved_radio_apply_pending = !applySavedRadioParams();
-  if (!saved_radio_apply_pending) {
-    radio_driver.setTxPower(_prefs.tx_power_dbm);
-  }
   const bool fem_gain_changed = board.canControlLoRaFemLna()
       && board.isLoRaFemLnaEnabled() != (_prefs.radio_fem_rxgain != 0);
   if (board.setLoRaFemLnaEnabled(_prefs.radio_fem_rxgain) && fem_gain_changed) {
@@ -1180,14 +1316,25 @@ void SensorMesh::begin(FILESYSTEM* fs) {
   updateAdvertTimer();
   updateFloodAdvertTimer();
 
-   board.setAdcMultiplier(_prefs.adc_multiplier);
 
 #if ENV_INCLUDE_GPS == 1
   applyGpsPrefs();
 #endif
+#if MESH_ENABLE_SENSOR_TRACKER
+  const auto tracker_load = tracker_storage_available
+      ? mesh::tracker::loadTracker(_fs, tracker)
+      : mesh::tracker::StoreResult::Unavailable;
+  tracker_storage_fault = tracker_load != mesh::tracker::StoreResult::Success
+      && tracker_load != mesh::tracker::StoreResult::NotFound;
+  if (tracker_storage_fault) tracker.enabled = false;
+  tracker_boot_anchor = getRTCClock()->getCurrentTime();
+  configureTrackerRuntime();
+#endif
 }
 
 bool SensorMesh::applySavedRadioParams() {
+  // A busy radio can accept the tuple before deferring TX power. Recovery
+  // is complete only after both saved settings have been accepted.
   uint32_t timings[2] = {_prefs.rx_ps_rx_us, _prefs.rx_ps_sleep_us};
   const uint32_t* applied_timings = _prefs.rx_powersaving_enabled
       && radio_driver.supportsRxPowerSaving() ? timings : NULL;
@@ -1197,7 +1344,7 @@ bool SensorMesh::applySavedRadioParams() {
     return false;
   }
   active_cr = _prefs.cr;
-  return true;
+  return radio_driver.setTxPower(_prefs.tx_power_dbm);
 }
 
 bool SensorMesh::formatFileSystem() {
@@ -1279,6 +1426,7 @@ bool SensorMesh::sendFloodReply(mesh::Packet* packet,
 }
 
 void SensorMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
+  if (isTrackerModeEnabled()) return;
   mesh::Packet* pkt = createSelfAdvert();
   if (pkt) {
     if (flood) {
@@ -1292,6 +1440,7 @@ void SensorMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
 }
 
 void SensorMesh::updateAdvertTimer() {
+  if (isTrackerModeEnabled()) { next_local_advert = 0; return; }
   if (_prefs.advert_interval > 0) {  // schedule local advert timer
     next_local_advert = futureMillis((int)((uint32_t)_prefs.advert_interval * 2 * 60 * 1000));
   } else {
@@ -1299,6 +1448,7 @@ void SensorMesh::updateAdvertTimer() {
   }
 }
 void SensorMesh::updateFloodAdvertTimer() {
+  if (isTrackerModeEnabled()) { next_flood_advert = 0; return; }
   if (_prefs.flood_advert_interval > 0) {  // schedule flood advert timer
     next_flood_advert = futureMillis( ((uint32_t)_prefs.flood_advert_interval) * 60 * 60 * 1000);
   } else {
@@ -1348,9 +1498,23 @@ bool  SensorMesh::getGPS(uint8_t channel, float& lat, float& lon, float& alt) {
 }
 
 void SensorMesh::loop() {
+#if MESH_ENABLE_SENSOR_TRACKER
+  // Retire observed expiry even during Morse deferral. A retained deadline
+  // otherwise looks future again after half the 32-bit millis range.
+  if (tracker_awake_until && millisHasNowPassed(tracker_awake_until)) {
+    tracker_awake_until = 0;
+  }
+  if (!mesh::morseTimingActive(_radio) && tracker.enabled && trackerNeedsRadio()) wakeTrackerRadio();
+#endif
   _cli.loop();
   mesh::Mesh::loop();
+  // Do not consume sensor/advert/write deadlines during timed Morse capture.
+  // USB command service and the physical radio continue on every pass.
+  if (mesh::morseTimingActive(_radio)) return;
   _clock_sync.loop();
+#if MESH_ENABLE_SENSOR_TRACKER
+  serviceTracker();
+#endif
 
   if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
     mesh::Packet* pkt = createSelfAdvert();
@@ -1377,9 +1541,6 @@ void SensorMesh::loop() {
     MESH_DEBUG_PRINTLN("Temp radio params expired before apply");
   } else if (revert_radio_due && !hasOutbound() && radio_apply_ready) {
     if (applySavedRadioParams()) {
-      if (saved_radio_apply_pending) {
-        radio_driver.setTxPower(_prefs.tx_power_dbm);
-      }
       set_radio_at = revert_radio_at = 0;
       temp_radio_applied = false;
       saved_radio_apply_pending = false;
@@ -1422,7 +1583,6 @@ void SensorMesh::loop() {
   if (saved_radio_apply_pending && !temp_radio_applied && !hasOutbound()
       && radio_apply_ready && !radio_apply_failed) {
     if (applySavedRadioParams()) {
-      radio_driver.setTxPower(_prefs.tx_power_dbm);
       saved_radio_apply_pending = false;
       radio_apply_retry_at = 0;
       radio_apply_failures = 0;
@@ -1446,6 +1606,7 @@ void SensorMesh::loop() {
     }
 
     for (int i = 0; i < acl.getNumClients(); i++) {
+      if (isTrackerModeEnabled()) break; // Check-in replaces background pushes.
       ClientInfo* client = acl.getClientByIdx(i);
       if ((client->permissions & PERM_ACL_ROLE_MASK) < PERM_ACL_READ_ONLY
           || client->extra.sensor.scope_region_id == 0
@@ -1481,7 +1642,7 @@ void SensorMesh::loop() {
   }
 
   // check the alert send queue
-  if (num_alert_tasks > 0) {
+  if (num_alert_tasks > 0 && !isTrackerModeEnabled()) {
     auto t = alert_tasks[0];   // process head of queue
 
     if (millisHasNowPassed(t->send_expiry)) {  // next send needed?
@@ -1544,75 +1705,125 @@ bool SensorMesh::isMillisTimerDue(unsigned long timestamp) const {
 }
 
 uint32_t SensorMesh::limitSleepToMillisTimer(unsigned long timestamp,
-                                              uint32_t sleep_secs) const {
-  if (!timestamp || sleep_secs == 0) return sleep_secs;
+                                            uint32_t sleep_ms) const {
+  if (!timestamp || sleep_ms == 0) return sleep_ms;
 
-  unsigned long now = millis();
-  if ((long)(now - timestamp) >= 0) return 0;
+  const uint32_t now = millis();
+  if ((int32_t)(now - (uint32_t)timestamp) >= 0) return 0;
 
-  uint32_t remaining_secs = (timestamp - now + 999UL) / 1000UL;
-  return remaining_secs < sleep_secs ? remaining_secs : sleep_secs;
+  // Keep the millis arithmetic 32-bit, including on native test hosts.
+  const uint32_t remaining_ms = (uint32_t)timestamp - now;
+  return remaining_ms < sleep_ms ? remaining_ms : sleep_ms;
 }
 
 bool SensorMesh::hasPendingWork() const {
-  if (isDualRadioActive()) return true;
-  if (hasPendingOtaApply()) return true;
-  if (_cli.hasActiveUserGpioTimer()) return true;
-  if (radio_driver.isWatchdogObserving()) return true;
-  if (radio_driver.isCalibratingNoiseFloor()) return true;
-  if (hasQueuedWorkDue() || hasRetryWorkDue()) return true;
+  return pendingWorkReason() != 0;
+}
+
+mesh::powerdiag::Mask SensorMesh::pendingWorkReason() const {
+  using mesh::powerdiag::mask;
+  using mesh::powerdiag::Reason;
+#if MESH_ENABLE_SENSOR_TRACKER
+  if (tracker.enabled && (tracker_pending || tracker_acquiring
+      || (tracker_awake_until && !millisHasNowPassed(tracker_awake_until))
+      || (!tracker_storage_fault && getRTCClock()->getCurrentTime() >= tracker_next_check))) return mask(Reason::Tracker);
+#endif
+  if (!canIdleDualRadio()) return mask(Reason::DualRadio);
+  if (hasPendingOtaApply()) return mask(Reason::Ota);
+  if (_cli.hasActiveUserGpioTimer()) return mask(Reason::Scheduled);
+  if (radio_driver.isWatchdogObserving()) return mask(Reason::RadioWatchdog);
+  uint32_t noise_floor_delay_ms;
+  if (getNextNoiseFloorWakeDelay(noise_floor_delay_ms) && noise_floor_delay_ms == 0)
+    return mask(Reason::Calibration);
+  if (hasQueuedWorkDue()) return mask(Reason::Queue);
+  if (hasRetryWorkDue()) return mask(Reason::Retry);
   if (isMillisTimerDue(next_flood_advert)
       || isMillisTimerDue(next_local_advert)
-      || isMillisTimerDue(dirty_contacts_expiry)) return true;
+      || isMillisTimerDue(dirty_contacts_expiry)) return mask(Reason::Scheduled);
   if (num_alert_tasks > 0
-      && isMillisTimerDue(alert_tasks[0]->send_expiry)) return true;
+      && isMillisTimerDue(alert_tasks[0]->send_expiry)) return mask(Reason::Scheduled);
 
   const bool radio_apply_backoff = radio_apply_retry_at
       && !millisHasNowPassed(radio_apply_retry_at);
   if (!radio_apply_backoff
       && (isMillisTimerDue(set_radio_at) || isMillisTimerDue(revert_radio_at)
-          || (saved_radio_apply_pending && !temp_radio_applied))) return true;
+          || (saved_radio_apply_pending && !temp_radio_applied))) return mask(Reason::Scheduled);
 
   uint32_t now_secs = getRTCClock()->getCurrentTime();
-  return now_secs >= last_read_time + SENSOR_READ_INTERVAL_SECS;
+  return now_secs >= last_read_time + SENSOR_READ_INTERVAL_SECS
+      ? mask(Reason::Scheduled) : 0;
 }
 
 uint32_t SensorMesh::getPowerSaveSleepSeconds(uint32_t max_secs) const {
-  if (max_secs == 0 || hasPendingWork()) return 0;
+  return mesh::power::powerSaveSleepSeconds(getPowerSaveSleepMilliseconds(
+      mesh::power::secondsToSleepMilliseconds(max_secs)));
+}
 
-  uint32_t sleep_secs = max_secs;
+uint32_t SensorMesh::getPowerSaveSleepMilliseconds(uint32_t max_ms) const {
+  using mesh::powerdiag::mask;
+  using mesh::powerdiag::Reason;
+  const mesh::powerdiag::Mask pending = max_ms ? pendingWorkReason() : mask(Reason::NoWake);
+  if (pending) {
+    if (mesh::powerdiag::enabled()) mesh::powerdiag::decision(pending, millis());
+    return 0;
+  }
+
+  mesh::powerdiag::Mask blocked = 0;
+  uint32_t sleep_ms = max_ms;
+#if MESH_ENABLE_SENSOR_TRACKER
+  if (tracker.enabled && !tracker_storage_fault) {
+    const uint32_t now = getRTCClock()->getCurrentTime();
+    if (now >= tracker_next_check) {
+      if (mesh::powerdiag::enabled()) mesh::powerdiag::decision(mask(Reason::Tracker), millis());
+      return 0;
+    }
+    const uint32_t until_check = mesh::power::secondsToSleepMilliseconds(tracker_next_check - now);
+    if (until_check < sleep_ms) sleep_ms = until_check;
+  }
+#endif
   uint32_t wake_delay_ms;
   if (getNextQueueWakeDelay(wake_delay_ms)) {
-    uint32_t wake_delay_secs = (wake_delay_ms + 999UL) / 1000UL;
-    if (wake_delay_secs < sleep_secs) sleep_secs = wake_delay_secs;
+    if (wake_delay_ms < sleep_ms) sleep_ms = wake_delay_ms;
+    if (wake_delay_ms == 0) blocked |= mask(Reason::Queue);
   }
+#if MESH_ENABLE_SENSOR_TRACKER && MESH_ENABLE_TX_BEACONS
+  // The normal queue query omits RF maintenance while radio_available is
+  // false. A tracker's deliberate RF sleep must not hide its next beacon.
+  if (tracker.enabled && getNextBeaconWakeDelay(wake_delay_ms)) {
+    if (wake_delay_ms < sleep_ms) sleep_ms = wake_delay_ms;
+    if (wake_delay_ms == 0) blocked |= mask(Reason::Queue);
+  }
+#endif
   if (getNextRetryWakeDelay(wake_delay_ms)) {
-    uint32_t wake_delay_secs = (wake_delay_ms + 999UL) / 1000UL;
-    if (wake_delay_secs < sleep_secs) sleep_secs = wake_delay_secs;
+    if (wake_delay_ms < sleep_ms) sleep_ms = wake_delay_ms;
+    if (wake_delay_ms == 0) blocked |= mask(Reason::Retry);
   }
 
-  sleep_secs = limitSleepToMillisTimer(next_flood_advert, sleep_secs);
-  sleep_secs = limitSleepToMillisTimer(next_local_advert, sleep_secs);
-  sleep_secs = limitSleepToMillisTimer(dirty_contacts_expiry, sleep_secs);
+  const uint32_t before_scheduled = sleep_ms;
+  sleep_ms = limitSleepToMillisTimer(next_flood_advert, sleep_ms);
+  sleep_ms = limitSleepToMillisTimer(next_local_advert, sleep_ms);
+  sleep_ms = limitSleepToMillisTimer(dirty_contacts_expiry, sleep_ms);
   if (num_alert_tasks > 0) {
-    sleep_secs = limitSleepToMillisTimer(alert_tasks[0]->send_expiry,
-                                         sleep_secs);
+    sleep_ms = limitSleepToMillisTimer(alert_tasks[0]->send_expiry,
+                                       sleep_ms);
   }
 
   const bool radio_apply_backoff = radio_apply_retry_at
       && !millisHasNowPassed(radio_apply_retry_at);
   if (radio_apply_backoff) {
-    sleep_secs = limitSleepToMillisTimer(radio_apply_retry_at, sleep_secs);
+    sleep_ms = limitSleepToMillisTimer(radio_apply_retry_at, sleep_ms);
   } else {
-    sleep_secs = limitSleepToMillisTimer(set_radio_at, sleep_secs);
-    sleep_secs = limitSleepToMillisTimer(revert_radio_at, sleep_secs);
+    sleep_ms = limitSleepToMillisTimer(set_radio_at, sleep_ms);
+    sleep_ms = limitSleepToMillisTimer(revert_radio_at, sleep_ms);
   }
 
   uint32_t now_secs = getRTCClock()->getCurrentTime();
   uint32_t sensor_due = last_read_time + SENSOR_READ_INTERVAL_SECS;
   if (now_secs < sensor_due) {
-    uint32_t sensor_delay = sensor_due - now_secs;
-    if (sensor_delay < sleep_secs) sleep_secs = sensor_delay;
+    uint32_t sensor_delay = mesh::power::secondsToSleepMilliseconds(sensor_due - now_secs);
+    if (sensor_delay < sleep_ms) sleep_ms = sensor_delay;
   }
-  return sleep_secs;
+  if (before_scheduled > 0 && sleep_ms == 0) blocked |= mask(Reason::Scheduled);
+  if (blocked && mesh::powerdiag::enabled()) mesh::powerdiag::decision(blocked, millis());
+  return sleep_ms;
 }

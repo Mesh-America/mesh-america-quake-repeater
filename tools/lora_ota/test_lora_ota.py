@@ -1670,6 +1670,100 @@ class SourceCliTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertEqual(restore_source.call_count, 2)
 
+    def test_seeder_log_close_failure_does_not_skip_failure_policy_restore(self) -> None:
+        saved = ota.RxpsSettings(True, 18205, 20423, 8, 16)
+        image = firmware(b"seeder-close-failure" * 500, VERSION_NEW)
+        package = ota.parse_mota(mota_blob(image))
+        expected_body_hash = ota.parse_endf(image).body_hash
+        normal = ota.RadioSettings(910.525, 62.5, 7, 5, False)
+        controller = mock.Mock()
+        controller.get_radio.return_value = normal
+        controller.remote_command.return_value = "OK"
+        cleanup = []
+
+        def fail_close():
+            cleanup.append("close log")
+            raise OSError("log close failed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            work_dir = Path(directory) / "work"
+            argv = [
+                "release.mota", "remote",
+                "--controller-serial", "/dev/controller",
+                "--source-serial", "/dev/source",
+                "--password", "secret", "--work-dir", str(work_dir), "--yes",
+            ]
+            seeder = ota.SeederProcess(
+                argparse.Namespace(
+                    motatool="motatool", source_serial="/dev/source",
+                    source_tcp=None, source_baud=115200,
+                ),
+                Path(directory), work_dir,
+            )
+            seeder.start = mock.Mock()
+            seeder.process = mock.Mock()
+            seeder.process.poll.return_value = 0
+            log_file = seeder.log_file = mock.Mock(closed=False)
+            log_file.close.side_effect = fail_close
+            error = io.StringIO()
+            with contextlib.ExitStack() as stack:
+                for name in (
+                    "preflight_inputs", "preflight_source_cli",
+                    "ensure_source_clock_gate_safe", "ensure_controller_clock_safe",
+                    "verify_shared_source_identity", "confirm_update",
+                    "run_temp_radio_preflight", "arm_target_temp_radio",
+                    "arm_source_temp_radio_once", "switch_controller_to_temp_radio",
+                    "find_and_start_pull",
+                ):
+                    stack.enter_context(mock.patch.object(ota, name))
+                stack.enter_context(mock.patch.object(ota, "read_source_rxps", return_value=saved))
+                stack.enter_context(mock.patch.object(ota, "disable_source_rxps", return_value=True))
+                restore_source = stack.enter_context(mock.patch.object(
+                    ota, "restore_source_rxps",
+                    side_effect=lambda *args: cleanup.append("restore source RXPS"),
+                ))
+                stack.enter_context(mock.patch.object(ota, "query_target", return_value=target()))
+                stack.enter_context(mock.patch.object(
+                    ota, "prepare_package",
+                    return_value=(Path("release.mota"), package, expected_body_hash),
+                ))
+                stack.enter_context(mock.patch.object(
+                    ota, "read_lora_ota_participant_versions",
+                    return_value={"destination": VERSION_NEW},
+                ))
+                stack.enter_context(mock.patch.object(
+                    ota, "read_remote_rxps", return_value=ota.RxpsSettings(False, 0, 0),
+                ))
+                monitor = stack.enter_context(mock.patch.object(
+                    ota, "monitor_download", side_effect=ota.OtaError("synthetic transfer failure"),
+                ))
+                shorten_source = stack.enter_context(mock.patch.object(
+                    ota, "shorten_source_temp_window", return_value=True,
+                ))
+                stack.enter_context(mock.patch.object(ota, "SeederProcess", return_value=seeder))
+                stack.enter_context(mock.patch.object(ota.time, "sleep"))
+                source_command = stack.enter_context(mock.patch.object(
+                    ota, "source_cli_command",
+                    side_effect=lambda args, command, **kwargs: cleanup.append(command) or "OK",
+                ))
+                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                stack.enter_context(contextlib.redirect_stderr(error))
+                result = ota.main(argv, controller_override=controller)
+
+        self.assertEqual(result, 2)
+        monitor.assert_called_once()
+        log_file.close.assert_called_once_with()
+        self.assertIsNone(seeder.process)
+        self.assertIsNone(seeder.log_file)
+        source_command.assert_called_once_with(mock.ANY, "ota folder off", check=False)
+        shorten_source.assert_called_once_with(mock.ANY, check=False)
+        controller.set_radio.assert_called_once_with(normal, "restore controller radio after failure")
+        restore_source.assert_called_once_with(mock.ANY, saved)
+        self.assertEqual(cleanup, ["close log", "ota folder off", "restore source RXPS"])
+        self.assertIn("ERROR: synthetic transfer failure", error.getvalue())
+        self.assertIn("WARNING: could not close seeder log", error.getvalue())
+        self.assertIn("log close failed", error.getvalue())
+
     def test_shared_failure_cleanup_never_persists_temp_radio_tuple(self) -> None:
         normal = ota.RadioSettings(910.525, 62.5, 7, 5, False)
         controller = mock.Mock()
@@ -2542,6 +2636,81 @@ class DownloadSessionTests(unittest.TestCase):
         self.assertIn(self.package.manifest_id, status)
         self.assertEqual(controller.commands, ["ota status"])
         self.assertEqual(seeder.calls, total)
+
+    def test_complete_compressed_source_progress_still_requires_ready_destination(self) -> None:
+        controller = self.Controller([
+            f"OTA | download: downloading 6/9 id={self.package.manifest_id} 2s",
+            f"OTA | download: ready to install 9/9 id={self.package.manifest_id} 3s",
+        ])
+        args = argparse.Namespace(
+            target="remote", transfer_timeout_minutes=1, poll_seconds=1,
+        )
+        total = (
+            self.package.payload_size + self.package.block_size - 1
+        ) // self.package.block_size
+        seeder = object.__new__(ota.SeederProcess)
+        seeder.log_path = Path("serve.log")
+        seeder.log_file = None
+        seeder.process = mock.Mock()
+        seeder.process.poll.return_value = None
+        detail = "".join(
+            f"[dev] DEFLATE 0 block={index} @0 OK\n" for index in range(total)
+        )
+        elapsed = [0.0]
+
+        def advance(seconds: float) -> None:
+            elapsed[0] += seconds
+
+        with (
+            mock.patch.object(Path, "read_text", return_value=detail),
+            mock.patch.object(ota.time, "monotonic", side_effect=lambda: elapsed[0]),
+            mock.patch.object(ota.time, "sleep", side_effect=advance),
+            mock.patch.object(ota, "transfer_tail_guard_seconds", return_value=0),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = ota.monitor_download(controller, args, self.package, seeder)
+        self.assertIn("ready to install", status)
+        self.assertEqual(controller.commands, ["ota status", "ota status"])
+        self.assertGreaterEqual(elapsed[0], ota.passive_progress_stall_seconds(args, self.package))
+
+    def test_monitor_uses_quiet_window_when_source_log_is_unavailable(self) -> None:
+        args = argparse.Namespace(
+            target="remote", transfer_timeout_minutes=1, poll_seconds=1,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            seeder = object.__new__(ota.SeederProcess)
+            seeder.log_path = Path(directory) / "missing-serve.log"
+            seeder.log_file = None
+            seeder.process = mock.Mock()
+            seeder.process.poll.return_value = None
+            for unreadable, flush_failed in ((False, False), (True, False),
+                                             (False, True), (True, True)):
+                with self.subTest(unreadable=unreadable, flush_failed=flush_failed), \
+                        contextlib.ExitStack() as stack:
+                    seeder.log_file = mock.Mock(closed=False) if flush_failed else None
+                    if flush_failed:
+                        seeder.log_file.flush.side_effect = OSError("log flush failed")
+                    if unreadable:
+                        stack.enter_context(mock.patch.object(
+                            Path, "read_text", side_effect=PermissionError("unreadable log")))
+                    elapsed = [0.0]
+
+                    def advance(seconds: float) -> None:
+                        elapsed[0] += seconds
+
+                    stack.enter_context(mock.patch.object(
+                        ota.time, "monotonic", side_effect=lambda: elapsed[0]))
+                    stack.enter_context(mock.patch.object(
+                        ota.time, "sleep", side_effect=advance))
+                    stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                    controller = self.Controller([
+                        f"OTA | download: ready to install 9/9 id={self.package.manifest_id} 2s"
+                    ])
+                    status = ota.monitor_download(controller, args, self.package, seeder)
+                    self.assertIn(self.package.manifest_id, status)
+                    self.assertEqual(controller.commands, ["ota status"])
+                    self.assertEqual(
+                        elapsed[0], ota.passive_progress_stall_seconds(args, self.package))
 
     def test_lost_pull_reply_is_resolved_without_blind_replay(self) -> None:
         controller = self.Controller([
@@ -4111,7 +4280,7 @@ class TempRadioPreflightTests(unittest.TestCase):
             return result
 
         controller._execute = ambiguous
-        with self.assertRaisesRegex(ota.TransmissionError, "2 unambiguous"):
+        with self.assertRaisesRegex(ota.OtaError, "2 unambiguous"):
             controller.get_contact_clock(
                 "remote", self.NODE_KEYS["remote"], timeout=30
             )
@@ -5315,6 +5484,97 @@ class ReliabilityTests(unittest.TestCase):
             seeder.log_file = None
             self.assertEqual(seeder.payload_read_progress(package), (2, 3, 2))
 
+    def test_seeder_progress_tracks_compressed_slices_and_retries(self) -> None:
+        package = ota.parse_mota(mota_blob(firmware(b"B" * 2500, VERSION_NEW)))
+        seeder = object.__new__(ota.SeederProcess)
+        seeder.log_path = Path("serve.log")
+        seeder.log_file = None
+        detail = (
+            "[dev] DEFLATE 0 block=0 @0 OK\n"  # Length query or first slice.
+            "[dev] DEFLATE 0 block=0 @190 OK\n"
+            "[dev] DEFLATE 0 block=2 @0 OK\n"
+            "[dev] DEFLATE 0 block=2 @0 OK\n"  # Retry remains activity.
+        )
+        with mock.patch.object(Path, "read_text", return_value=detail):
+            self.assertEqual(seeder.payload_read_progress(package), (2, 3, 4))
+
+    def test_seeder_progress_merges_raw_and_compressed_logical_blocks(self) -> None:
+        package = ota.parse_mota(mota_blob(firmware(b"B" * 2500, VERSION_NEW)))
+        seeder = object.__new__(ota.SeederProcess)
+        seeder.log_path = Path("serve.log")
+        seeder.log_file = None
+        detail = (
+            f"[dev] READ 0 @{package.payload_offset} OK\n"
+            "[dev] DEFLATE 0 block=0 @0 OK\n"
+            # This compressed offset happens to equal raw block zero's file
+            # offset. The logical block field, not that offset, identifies it.
+            f"[dev] DEFLATE 0 block=2 @{package.payload_offset} OK\n"
+        )
+        with mock.patch.object(Path, "read_text", return_value=detail):
+            self.assertEqual(seeder.payload_read_progress(package), (2, 3, 3))
+
+    def test_seeder_progress_ignores_invalid_compressed_requests(self) -> None:
+        package = ota.parse_mota(mota_blob(firmware(b"B" * 2500, VERSION_NEW)))
+        seeder = object.__new__(ota.SeederProcess)
+        seeder.log_path = Path("serve.log")
+        seeder.log_file = None
+        detail = (
+            "[dev] DEFLATE 0 block=0 @0 ERR\n"
+            "[dev] DEFLATE 1 block=0 @0 OK\n"
+            "[dev] DEFLATE 00 block=0 @0 OK\n"
+            "[dev] DEFLATE 0 block=3 @0 OK\n"
+            "[dev] DEFLATE 0 block=-1 @0 OK\n"
+            "[dev] DEFLATE 0 block=x @0 OK\n"
+            "[dev] DEFLATE 0 block=0 @-1 OK\n"
+            "[dev] DEFLATE 0 block=0 @65536 OK\n"
+            "[dev] DEFLATE 0 block=0 @0\n"
+            "[dev] DEFLATE 0 block=0 @0 OK trailing\n"
+            "[dev] DEFLATE 0 block=0\n@0 OK\n"
+            "DEFLATE 0 block=0 @0 OK\n"
+        )
+        with mock.patch.object(Path, "read_text", return_value=detail):
+            self.assertEqual(seeder.payload_read_progress(package), (0, 3, 0))
+
+    def test_seeder_progress_missing_log_keeps_all_three_counters(self) -> None:
+        package = ota.parse_mota(mota_blob(firmware(b"B" * 2500, VERSION_NEW)))
+        with tempfile.TemporaryDirectory() as directory:
+            seeder = object.__new__(ota.SeederProcess)
+            seeder.log_path = Path(directory) / "missing-serve.log"
+            seeder.log_file = None
+            self.assertEqual(seeder.payload_read_progress(package), (0, 3, 0))
+
+    def test_seeder_progress_unreadable_log_keeps_all_three_counters(self) -> None:
+        package = ota.parse_mota(mota_blob(firmware(b"B" * 2500, VERSION_NEW)))
+        seeder = object.__new__(ota.SeederProcess)
+        seeder.log_path = Path("unreadable-serve.log")
+        seeder.log_file = None
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError("unreadable log")):
+            self.assertEqual(seeder.payload_read_progress(package), (0, 3, 0))
+
+    def test_seeder_progress_flush_failure_preserves_readable_progress(self) -> None:
+        package = ota.parse_mota(mota_blob(firmware(b"B" * 2500, VERSION_NEW)))
+        seeder = object.__new__(ota.SeederProcess)
+        seeder.log_path = Path("serve.log")
+        seeder.log_file = mock.Mock(closed=False)
+        seeder.log_file.flush.side_effect = OSError("log flush failed")
+        detail = (f"[dev] READ 0 @{package.payload_offset} OK\n"
+                  f"[dev] READ 0 @{package.payload_offset + 2 * package.block_size} OK\n"
+                  f"[dev] READ 0 @{package.payload_offset} OK\n")
+        with mock.patch.object(Path, "read_text", return_value=detail):
+            self.assertEqual(seeder.payload_read_progress(package), (2, 3, 3))
+
+    def test_seeder_progress_flush_and_read_failures_keep_zero_activity(self) -> None:
+        package = ota.parse_mota(mota_blob(firmware(b"B" * 2500, VERSION_NEW)))
+        seeder = object.__new__(ota.SeederProcess)
+        seeder.log_path = Path("serve.log")
+        seeder.log_file = mock.Mock(closed=False)
+        seeder.log_file.flush.side_effect = OSError("log flush failed")
+        for error in (FileNotFoundError("missing log"), PermissionError("unreadable log")):
+            with self.subTest(error=error), mock.patch.object(
+                    Path, "read_text", side_effect=error) as read:
+                self.assertEqual(seeder.payload_read_progress(package), (0, 3, 0))
+                read.assert_called_once()
+
     def test_marked_output_excludes_queued_messages(self) -> None:
         controller = object.__new__(ota.Controller)
         controller._execute = lambda _commands, _label: subprocess.CompletedProcess(
@@ -6283,7 +6543,7 @@ class ReliabilityTests(unittest.TestCase):
             [("offline", False), ("online", False)],
         )
 
-    def test_lost_relay_cleanup_reconciles_identity_without_replay(self) -> None:
+    def test_lost_relay_cleanup_does_not_claim_return_from_temporary_identity(self) -> None:
         key = "AB" * 32
 
         class Controller:
@@ -6305,11 +6565,10 @@ class ReliabilityTests(unittest.TestCase):
             relay_values=[("relay", "secret")],
             temp_values=(909.95, 250.0, 5, 5, 120),
         )
-        ota.shorten_relay_temp_windows(
-            controller,
-            args,
-            expected_public_keys={"relay": key.lower()},
+        acknowledged = ota.shorten_relay_temp_windows(
+            controller, args, expected_public_keys={"relay": key.lower()},
         )
+        self.assertFalse(acknowledged)
         relative_writes = [
             call for call in controller.calls if call[1].startswith("tempradio ")
         ]
@@ -6317,7 +6576,7 @@ class ReliabilityTests(unittest.TestCase):
             relative_writes,
             [("relay", "tempradio 909.95,250,5,5,1", False)],
         )
-        self.assertIn(("relay", "get public.key", False), controller.calls)
+        self.assertEqual(controller.calls, relative_writes)
 
     def test_managed_relay_timing_is_saved_guarded_and_restored(self) -> None:
         class Controller:
@@ -7891,6 +8150,73 @@ class MotatoolIntegrationTests(unittest.TestCase):
                 "motatool integration tests"
             )
         subprocess.run([cls.motatool, "--version"], check=True, capture_output=True)
+
+    def prepare_layout_delta(
+        self, *, external: bool = False, memory: str | None = None,
+        authenticated: bool = True,
+    ) -> tuple[ota.MotaInfo, list[mock._Call]]:
+        # The real tool must size an image larger than its legacy 0x98000
+        # workspace from the EndF-authenticated geometry, including two spare
+        # detools segments. Only a small content change needs transferring.
+        layout = struct.pack(
+            "<8sBBHIII", b"mOTALay1", 1, 1 if external else 0, 24,
+            0x27000, 0xED000, 0xED000,
+        ) if authenticated else b""
+        body = b"A" * (0x99000 - 56 - len(layout)) + layout
+        base_image = firmware(body, VERSION_OLD)
+        new_image = firmware(b"B" * 32 + body[32:], VERSION_NEW)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base_path = root / "running.bin"
+            base_path.write_bytes(base_image)
+            archive_path = root / "release.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("firmware.bin", new_image)
+            args = prepare_args(archive_path, self.motatool, base_path)
+            args.inplace_memory = memory
+            work = root / "work"
+            work.mkdir()
+            with mock.patch.object(ota, "run_checked", wraps=ota.run_checked) as run:
+                _path, package, expected = ota.prepare_package(
+                    args, target(
+                        platform="nrf52", nrf_sd=external,
+                        base_hash=ota.parse_endf(base_image).body_hash,
+                        boot_codecs=1 << ota.MOTA_CODEC_IN_PLACE,
+                    ), work,
+                )
+            self.assertFalse(package.is_full)
+            self.assertEqual(package.codec_id, ota.MOTA_CODEC_IN_PLACE)
+            self.assertEqual(package.image_size, len(new_image))
+            self.assertEqual(package.base_hash, ota.parse_endf(base_image).body_hash)
+            self.assertEqual(expected, ota.parse_endf(new_image).body_hash)
+            return package, run.call_args_list
+
+    def test_authenticated_internal_layout_selects_large_workspace(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            _package, calls = self.prepare_layout_delta()
+        build = next(call.args[0] for call in calls if call.kwargs["label"] == "build mOTA")
+        self.assertNotIn("--inplace-memory", build)
+        self.assertIn("in-place memory=0x9B000", output.getvalue())
+
+    def test_authenticated_external_layout_uses_minimum_workspace(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            _package, calls = self.prepare_layout_delta(external=True)
+        build = next(call.args[0] for call in calls if call.kwargs["label"] == "build mOTA")
+        self.assertNotIn("--inplace-memory", build)
+        self.assertIn("in-place memory=0x9B000", output.getvalue())
+
+    def test_explicit_workspace_is_preserved_and_layout_checked(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            _package, calls = self.prepare_layout_delta(memory="0xA0000")
+        build = next(call.args[0] for call in calls if call.kwargs["label"] == "build mOTA")
+        self.assertEqual(build[build.index("--inplace-memory") + 1], "0xA0000")
+        self.assertIn("in-place memory=0xA0000", output.getvalue())
+        with self.assertRaisesRegex(ota.OtaError, "exceeds authenticated nRF52 workspace"):
+            self.prepare_layout_delta(memory="0xD0000")
+
+    def test_legacy_image_retains_conservative_workspace_limit(self) -> None:
+        with self.assertRaisesRegex(ota.OtaError, "legacy default memory 0x98000 is too small"):
+            self.prepare_layout_delta(authenticated=False)
 
     def test_raw_esp32_zip_becomes_full_mota(self) -> None:
         image = firmware(b"ESP32-new" * 900, VERSION_NEW)

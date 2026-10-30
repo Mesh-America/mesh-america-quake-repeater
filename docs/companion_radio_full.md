@@ -16,6 +16,10 @@ For runtime on/off commands and board exceptions, see
 For practical on/off commands and update directions, see
 [Full Companion feature switches](full_companion_features.md).
 
+Shared hardware commands include [power and watchdog diagnostics](companion_power_diagnostics.md),
+[radio recovery and RXEN diagnostics](companion_radio_diagnostics.md), and
+[SD card management on supported builds](test-results/companion_cli_parity_2026-10-23.md#shared-sd-commands).
+
 `companion_radio_full` combines every qualified Companion transport for its
 platform into one artifact and acts as a host-backed LoRa mOTA source for
 updating other nodes. Most targets can run those transports simultaneously;
@@ -30,8 +34,10 @@ requires a reboot to apply its exclusive transport selection; primary ESP-NOW
 mesh operation is unaffected by the infrastructure-WiFi default.
 
 The full Companion is deliberately not a LoRa OTA destination: it has no
-firmware staging store, refuses `ota install`, and never advertises its own
-firmware as an mOTA image.
+installable firmware staging store, refuses `ota install`, and never
+advertises its own firmware as an mOTA image. The RAK4631 Full variant can
+optionally keep a source-only RAK15002 SD archive of peer `.mota` files; that
+does not make the Companion an update destination.
 
 Preference changes through the Companion protocol, WebConfig, or USB terminal
 report a storage error if saving fails, and restore their previous values.
@@ -44,12 +50,45 @@ a busy radio rollback remains pending for recovery instead of reporting success.
 | BLE Binary Companion | Yes | Yes |
 | USB ASCII terminal | Yes | Yes |
 | Dedicated USB plaintext logging | No - shares the one USB TTY | Yes |
-| Host-backed LoRa mOTA source | WiFi TCP 5001 | Exclusive USB mode or encrypted BLE |
+| Host-backed LoRa mOTA source | WiFi TCP 5001 | Exclusive USB mode or encrypted BLE; RAK4631 Full can additionally cache/serve peer images from optional RAK15002 SD |
 | WiFi Companion/WebConfig | Yes | No - nRF52840 has no WiFi |
 | Hardware serial Companion | On targets with assigned serial pins | On targets with assigned serial pins |
-| Ethernet Companion | On targets with an Ethernet module | On RAK4631 with RAK13800 |
+| Ethernet Companion | On targets with an Ethernet module | On RAK4631 with RAK13800; the RAK15002 combination is explicitly one-at-a-time |
 | LoRa self-update | No | No |
 | Optional self-update | WiFi on existing dual-app layouts; USB on single-app layouts | Bluetooth DFU with a compatible bootloader; USB always supported |
+
+### RAK4631 Full Companion: optional RAK15002 archive and RAK13800 Ethernet
+
+`RAK_4631_companion_radio_full` can cache and serve peer mOTA files from an
+optional RAK15002 card. This remains a source-only archive: `ota install` and
+bootloader installation are unavailable on the Companion, whether or not a
+card is inserted. Check the archive with `ota cache [on|off]`; use
+`get sdcard [free]` for card space.
+
+The optional RAK13800 Ethernet module and RAK15002 share CS26. Ethernet is
+therefore **off by default** in this combined Full image and is controlled only
+for the current boot:
+
+```text
+get eth
+set eth on
+set eth off
+```
+
+Startup and shutdown are asynchronous. `get eth` reports `starting`, `retrying`,
+`online`, `stopping`, or a failure state; accepting `set eth on` does not prove
+a DHCP lease. USB, BLE, and radio service continue while network operations
+wait. After requesting OFF, wait until `get eth` reports `off` before accessing SD.
+An already-entered vendor DHCP or renewal call cannot be cancelled midway;
+OFF keeps the SPI reservation until that call finishes and cleanup is safe.
+
+Remove the SD card and end/cancel active OTA cache, transfer, serve, or host
+folder activity before `set eth on`. The command refuses unsafe states. Turn
+Ethernet off before inserting or accessing a card; an insertion during
+Ethernet use fails closed and still requires `set eth off`. This is not a
+supported hot-swap workflow. The combined RAK15002/Ethernet hardware path has
+not yet been hardware-qualified; see [nRF52 RAK15002 storage](ota_nrf52_qspi.md#optional-rak15002-storage-in-canonical-rak4631-images)
+for the receiver's separate signed-application path and loader prerequisite.
 
 ### Screenless nRF52 spoken button confirmations
 
@@ -320,6 +359,29 @@ set display.rotation 0
 
 `0` resets the screen to that board's compiled default orientation.
 
+The display clock accepts decimal hour offsets, including half-hour and
+quarter-hour timezones, from `-12` through `+14`:
+
+```text
+get tz.offset
+set tz.offset 5.75
+```
+
+This Companion display setting is separate from MQTT's `timezone.offset`.
+Invalid values leave the previous setting unchanged; a failed save restores
+its exact previous fractional value.
+
+Preference migration retains the published signed one-byte hour at offset
+225 and every following legacy field. Integer settings keep the existing
+image format. Fractional settings append a 10-byte `TZF` version-1 footer
+after the existing board and `TXR` footers: a little-endian 32-bit float and
+CRC-16/CCITT covering the first eight bytes, stored most-significant byte
+first. The old byte contains the hour truncated toward zero. A missing footer
+uses that legacy integer; malformed, truncated, nonfinite or out-of-range
+footers reject the complete image before changing live preferences. Older
+firmware with strict image-length validation cannot read a fractional image;
+set an integer offset and save before downgrading.
+
 Heltec E290 and T190 now use their Full Companion artifacts for simultaneous
 USB, BLE, and WiFi. Their older `usb_ble`, USB-only, and BLE-only names remain
 available only as explicit compatibility builds.
@@ -347,6 +409,8 @@ get wifi.ssid
 get wifi.status
 get wifi.powersave
 get webui
+get password
+password my-admin-pass
 set wifi.ssid MyNetwork
 set wifi.pwd my-password
 set wifi.powersave min
@@ -358,13 +422,30 @@ stop webconfig
 ESP32 WiFi Companions with WebConfig, including Full Companion, expose a
 **CLI** tab at the node's LAN address. It defaults to on; use `get wifi.cli`,
 `set wifi.cli on`, or `set wifi.cli off`. Older builds that report the browser
-terminal as unavailable need a firmware update. The open setup AP does not
+terminal as unavailable need a firmware update. The setup AP does not
 expose this tab.
+
+ESP32 WebConfig and runtime browser OTA share the saved node admin password,
+initially `password`; the OTA HTTP Basic username is `admin`. `get password`
+reports status without revealing it. The password is stored in NVS and survives
+a filesystem erase. New values must be 1–15 UTF-8 bytes without CR or LF. Use
+8–15 printable ASCII characters to protect setup WiFi with the same password;
+otherwise the hotspot is open and requires an HTTP admin login. The display's
+WiFi join QR uses the hotspot's current credential. After a successful change,
+the submitting page keeps its save result and tries the new login once; other
+browser sessions must sign in again. An unconfirmed save keeps the previous
+runtime password active, but the saved state after reboot may differ.
 
 The browser accepts Companion configuration commands, including `get powersaving`,
 `set usb.logging on|off`, WiFi controls, and MQTT settings. `set mqtt.enabled on|off` controls MQTT
 without erasing broker settings; `get mqtt.enabled`, `get mqtt.running`, and
 `get mqtt.status` distinguish the saved switch from current connections.
+On MQTT builds, `get mqtt.stats` reports free/largest heap and accepted/error
+publish counts. `get mqttN.diag` reports the connection state, transport errors,
+and `pub_ack`, the count of actual broker acknowledgments for that client.
+Accepted publishes are separate from broker acknowledgments. Runtime slot
+capacity depends on the hardware profile; the V4 OLED Full profile runs one
+slot even though six broker configurations can be saved.
 `set logging.output off|usb|wifi|both` selects both outputs together. The browser
 also uses the complete Companion terminal for `card`, `import meshcore://...`,
 `list`, `to`, `send`, `login`, `cmd`, and delayed replies, with the same syntax
@@ -419,9 +500,11 @@ turns it on once when upgrading an older Companion preference file, including
 one written by the short-lived default-off regression. After that one-time
 migration, an explicit `set powersaving off` selection remains persistent.
 
-On ESP32, enabling it lowers the CPU clock to 80 MHz, enables idle yielding,
-and enables the configured GPS duty cycle. Disabling it restores the normal CPU
-clock and keeps GPS awake. Active Full Companion transports remain available in
+On ESP32, enabling it normally selects 80 MHz when processor speed is Auto,
+enables idle yielding, and enables the configured GPS duty cycle. Auto holds
+the highest supported CPU speed while a second radio profile is active, except
+on SenseCAP Indicator. An explicit processor speed stays selected. Disabling
+device power saving restores the normal Auto CPU policy and keeps GPS awake. Active Full Companion transports remain available in
 both states; on the SenseCAP Indicator this means USB plus the selected BLE or
 infrastructure-WiFi secondary transport. WiFi modem sleep stays enabled when
 BLE and the ESP32 WiFi radio are active together because coexistence requires
@@ -525,6 +608,26 @@ their views. Companion session state is device-wide, so use one active
 Companion application at a time. On nRF52, BLE remains available while USB is
 in terminal or mOTA mode.
 
+The Companion TCP listener starts only after a usable WiFi station or setup-AP
+address exists. If opening the socket fails, it closes any failed-start socket
+and retries with a delay capped at 30 seconds, without restarting the WiFi
+connection or disturbing BLE, WebConfig, OTA, or a healthy accepted TCP client.
+Turning WiFi off or suspending it cancels the listener request; retry service
+cannot turn it back on. Use `get wifi.tcp` through BLE, USB, or the browser CLI
+to inspect listener state, registration, accepted clients, completed RX/TX
+frames, and errors without a PC port probe. `get display.wifi` also shows the
+actual `tcp` listener flag independently of the network-services flag. A
+listening socket alone cannot detect LAN firewall or guest-network isolation.
+
+ESP32 TCP sends are non-blocking, and inbound commands are serviced alongside
+outgoing data rather than waiting for an empty transmit queue. Unsolicited
+radio logs therefore cannot keep the app handshake unread. A live client with
+pending output is disconnected after 10 seconds without write progress;
+other transports continue running. Required replies retain their queue slots,
+so a new command waits if no reply can be admitted. Partially sent frames
+remain pinned to preserve framing, while already queued replies keep the same
+reconnection rules below.
+
 On WiFi TCP port 5000, reconnecting from the same IP retains queued outgoing
 frames. A different IP takes over immediately, but never receives the previous
 IP's replies: up to four queued frames are parked separately for 30 seconds
@@ -554,6 +657,9 @@ Binary WiFi/Ethernet frames must declare 1–176 payload bytes. Illegal lengths
 close the connection immediately, without waiting for the announced body or
 executing a truncated command. An incomplete binary header or payload has a
 five-second deadline once reception starts; reconnect to send a fresh frame.
+RAK13800 worker-owned SPI intervals pause this deadline without changing the
+connection or its queued replies. The remaining receive budget resumes when
+the worker hands the controller back; an already-expired frame is not revived.
 Ethernet raw-line terminal input has no typing deadline, but an overlong line
 also closes the connection instead of executing its prefix.
 
@@ -601,6 +707,12 @@ a fixed pairing PIN, then `reboot` to activate it. `set pin 0` restores the
 default/generated PIN policy. A PIN saved through the Companion protocol also
 takes effect after reboot. See the [PIN command reference](cli_commands.md#set-the-bluetooth-pairing-pin-companion).
 
+On T1000-E, a USB data host automatically pauses Bluetooth, including an
+existing phone connection. Unplug USB to resume Bluetooth after 500 ms; a
+saved off setting stays off. A wall charger without a USB data host does not
+pause Bluetooth. See the [T1000-E transport policy](role_feature_switches.md)
+for status and saved-setting behavior.
+
 The Bluetooth device name is independently configurable. In the text terminal,
 use `get bluetooth.name` and `set bluetooth.name <name>`; use
 `set bluetooth.name default` to restore `MeshCore-<node name>`. The WebConfig
@@ -629,8 +741,12 @@ stealth remains enabled. Repeating `on` keeps an existing bond. Toggle `off`,
 then `on`, then reboot to reset first pairing. All flag changes need reboot.
 The node still sends directed or allowlisted BLE packets; it is not radio silent.
 
-ESP32 ports 5000, 5001, 5002, and WebConfig have no independent login layer.
-Expose them only on a trusted LAN or temporary setup network. See
+ESP32 TCP ports 5000, 5001, and 5002 remain trusted-network services. The HTTP
+admin login protects WebConfig and runtime browser OTA, and does not protect
+these ports or delegated remote CLI. Administrative console access can change
+the admin password. Expose TCP services only on a trusted LAN or temporary
+setup network. Temporary migration/recovery apps retain their documented
+access policy. See
 [WiFi setup](./WiFi.md) for credential setup and reconnect behavior.
 
 ## USB Binary and text terminal modes

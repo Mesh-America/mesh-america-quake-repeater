@@ -11,6 +11,50 @@ Periodic requests coalesce while a block is active. RXPS resumes after a complet
 block, including a held block, or at timeout. Receive and transmit activity are
 never interrupted just to finish calibration.
 
+If a reception delays the return to RXPS, the pending restoration is retried
+after every Dispatcher receive poll, including empty polls. A false preamble
+that expires without another packet interrupt therefore cannot leave the radio
+in continuous RX until the next calibration or AGC reset. An unread packet or
+active reception still owns the radio; TX completion retains its normal rearm.
+The retry wake query reports this pending restoration as immediate work, keeping
+event-driven sleepers awake until the existing preamble/header timeout or RX
+completion releases the owner. The query does not issue SPI commands.
+
+A calibration request waiting for successful RX does not keep the MCU awake.
+Repeated failed receive starts retry after 20, 40, 80, 160, 320, 640, and 1280 ms,
+then at most once every 2000 ms. Only the repeated idle fallback is paced:
+packet/TX completion and explicit retune/CAD restoration still rearm promptly.
+Calibration and recovery requests retain the failed-start backoff; successful
+RX or a new radio session clears it. A retry blocked by BUSY or an RX owner
+waits 2000 ms without issuing another RX command. The Dispatcher includes this
+retry deadline in its wake query, and deferred adaptive AGC joins a later RX
+retry instead of forcing 50 ms wakeups throughout a persistent fault.
+
+In single-profile RXPS, routine refreshes wait at least 60 seconds after the
+last completed or timed-out block before requesting another continuous-RX
+window. Both periodic maintenance and passive retry checks use this cooldown;
+retries do not restart a partially collected block. With RXPS off, or when the
+selected tuple requires continuous-RX fallback, the existing two-second
+maintenance tick and passive-probe age check are unchanged. Startup, explicit
+gain/tuning changes, AGC resets, and radio recovery still request a fresh block
+promptly. Dual-profile scanning retains
+its separate refresh policy.
+
+Frequent configured AGC resets can still dominate calibration time: Cascade
+repeater builds start with an eight-second AGC interval, and MQTT observers
+use 28 seconds. With device power saving on, their adaptive AGC schedule backs
+off separately, up to 60 seconds; see [AGC reset settings](../cli_commands.md).
+AGC resets still bypass the routine noise-floor cooldown. After
+a timed-out startup block with no valid floor, the next routine RXPS attempt
+also waits 60 seconds; passive retries retain their existing bounded busy
+escape while waiting for a valid baseline.
+
+The longer RXPS cooldown trades a slower response to ambient noise changes for
+more time in duty-cycle RX. It does not reduce sample count, shorten settling,
+or put the radio to sleep between samples. A large upward change still needs
+three complete high blocks to pass the rise hold. No battery-life improvement
+has been measured for this scheduling change.
+
 The block estimate is the 12.5th percentile: the average of the eighth and
 ninth sorted samples, retaining fractional dBm. A published update uses 25% of
 the previous floor and 75% of the new estimate, with a -120 dBm lower bound. Initial calibration and explicit gain/tuning changes seed a new baseline.
@@ -30,9 +74,10 @@ out of 64 to avoid higher-valued traffic entirely. Nearly continuous
 interference or enough low outliers can still mislead it. The rise hold delays
 large changes but cannot identify their source.
 
-RSSI sampling waits 20 ms after every receive re-arm, including CAD and TX
-completion, to avoid unsettled frontend readings. The ten-second trial window
-often failed to complete during heavy traffic with that settling guard; the
+RSSI sampling waits 7 ms on SX1262, SX1268, and LLCC68 builds, or 20 ms on other
+families, after every receive re-arm, including CAD and TX completion, to avoid
+unsettled frontend readings. The ten-second trial window often failed to
+complete during heavy traffic with that settling guard; the
 30-second cap allows more idle opportunities. Partial blocks still time out
 without publishing. Longer collection spends more time in continuous RX when
 RXPS is enabled. A quiet minimum is about 3.2 seconds; real completion time
@@ -82,11 +127,12 @@ radio windows of at least 12 hours use a 12-hour deadline; shorter windows
 disable that reboot watchdog until the window ends. The temporary timing
 overrides are held in RAM and do not replace saved normal-mode preferences.
 
-The status read uses the two-byte GetStatus transaction. The pinned RadioLib
-getStatus() helper requests zero copied data bytes, so its return value is not
-usable for this mode check. The dedicated read restores the normal SPI command
-layout afterward and does not wake a duty-cycling radio to inspect its mode.
+The status read uses the two-byte GetStatus transaction. RadioLib 7.8.1 also
+reads the response byte directly; the dedicated probe additionally preserves
+the existing SPI layout, checks transport errors, and avoids waiting on BUSY.
+It does not wake a duty-cycling radio to inspect its mode.
 
 Validation lives in `test_noise_floor_estimator`, `test_rx_power_saving`,
 `test_radio_liveness`, `test_radio_receive_contract.py`, and
-`test_sx126x_receive_mode.py`.
+`test_sx126x_receive_mode.py`, and `test_radio_receive_retry.py`. These host
+checks do not establish battery-life or hardware fault-recovery results.

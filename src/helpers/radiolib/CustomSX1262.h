@@ -1,9 +1,17 @@
 #pragma once
 
 #include <RadioLib.h>
+#include "RadioRegulatorState.h"
+#include <math.h>
 #include "MeshCore.h"
 #include "RXPowerSaving.h"
 #include "SX1262ProfileSwitchState.h"
+#include <helpers/RadioSwitchTuning.h>
+#include "SX126xMorseRssi.h"
+#include "ESP32RadioTrace.h"
+#if defined(STATION_G3_ESP32)
+#include <StationG3RadioSlot.h>
+#endif
 
 #ifndef MC_SX1262_FAST_PROFILE_SWITCH
 // CustomSX1262 targets use direct radio I/O unless a board opts out. Keep
@@ -20,8 +28,20 @@
 #define MC_SX1262_FAST_PACKET_CACHE MC_SX1262_FAST_PROFILE_SWITCH
 #endif
 
-#if (MC_SX1262_FAST_FS || MC_SX1262_FAST_PACKET_CACHE) && !MC_SX1262_FAST_PROFILE_SWITCH
-#error "SX1262 SetFs/packet reuse requires the owned fast profile-switch path"
+#ifndef MC_SX1262_FAST_IQ_CACHE
+// Reuse only acknowledged IQ state inside the owned warm RX path. Follow
+// the direct-I/O FS policy; explicit board opt-outs and overrides still win.
+#define MC_SX1262_FAST_IQ_CACHE MC_SX1262_FAST_FS
+#endif
+
+#ifndef MC_SX1262_FAST_MODEM_CACHE
+// Reuse the LoRa modem confirmation only inside an acknowledged owned RX hop.
+// Expander targets that opt out of FS retain their previous live-query path.
+#define MC_SX1262_FAST_MODEM_CACHE MC_SX1262_FAST_FS
+#endif
+
+#if (MC_SX1262_FAST_FS || MC_SX1262_FAST_PACKET_CACHE || MC_SX1262_FAST_IQ_CACHE || MC_SX1262_FAST_MODEM_CACHE) && !MC_SX1262_FAST_PROFILE_SWITCH
+#error "SX1262 SetFs/packet/modem reuse requires the owned fast profile-switch path"
 #endif
 
 #ifndef SX126X_TX_BUSY_TIMEOUT_MS
@@ -29,6 +49,18 @@
 #endif
 
 class CustomSX1262 : public SX1262 {
+#if MESH_RADIO_TRACE_ENABLED
+  void traceOperation(mesh::radiotrace::Reason reason) {
+    if (mesh::radiotrace::trace().pending())
+      mesh::radiotrace::trace().operation(static_cast<PhysicalLayer*>(this), mesh::radiotrace::nowUs(), reason);
+  }
+#endif
+#if defined(SX126X_USE_REGULATOR_LDO) && SX126X_USE_REGULATOR_LDO
+  mesh::power::RadioRegulatorState _regulator{mesh::power::REGULATOR_LDO, mesh::power::RegulatorMode::Ldo};
+#else
+  mesh::power::RadioRegulatorState _regulator{mesh::power::REGULATOR_DCDC | mesh::power::REGULATOR_LDO,
+      mesh::power::RegulatorMode::Dcdc};
+#endif
   uint32_t _preambleMillis = 66;
   uint32_t _maxPayloadMillis = 3934;
   uint32_t _activityAt = 0;
@@ -36,20 +68,111 @@ class CustomSX1262 : public SX1262 {
   bool _rx_ps_rf_rx_disabled = false;
   uint32_t _rxDutyCycleTransitionUs = 1000;
   SX1262ProfileSwitchState _profileSwitch{MC_SX1262_FAST_PROFILE_SWITCH != 0};
+  uint8_t _profileSwitchFeatures = defaultProfileSwitchFeatures();
   uint32_t _profileFastResumes = 0;
   bool _coldStandby = true;
   bool _tcxoWakePending = false;
 
   public:
+    uint32_t getTcxoDelay() const { return tcxoDelay; }
     CustomSX1262(Module *mod) : SX1262(mod) { }
 
-    void setProfileSwitchOptimization(bool enabled) {
-      _profileSwitch.enabled = enabled;
+    uint8_t regulatorModes() const { return _regulator.modes(); }
+    mesh::power::RegulatorMode defaultRegulatorMode() const { return _regulator.defaultMode(); }
+    bool configureBootRegulator(mesh::power::RegulatorMode mode) { return _regulator.configureBoot(mode); }
+    mesh::power::RegulatorMode activeRegulatorMode() const { return _regulator.activeMode(); }
+    void invalidateMorseModemCache() {
       _profileSwitch.invalidate();
+      _coldStandby = true;
+      _tcxoWakePending = false;
+    }
+    // These public initializers can change packet type before returning an
+    // error. Revoke ownership before entering RadioLib, rather than waiting
+    // for a later standby/reset to happen. Preserve the inherited float APIs.
+    using SX1262::beginFSK;
+    using SX1262::beginLRFHSS;
+    int16_t begin(const ConfigLoRa_t& config) override {
+      invalidateMorseModemCache();
+      return SX1262::begin(config);
+    }
+    int16_t beginFSK(const ConfigFSK_t& config) override {
+      invalidateMorseModemCache();
+      return SX1262::beginFSK(config);
+    }
+    int16_t beginLRFHSS(const ConfigLRFHSS_t& config) override {
+      invalidateMorseModemCache();
+      return SX1262::beginLRFHSS(config);
+    }
+    int16_t setModem(ModemType_t modem) override {
+      invalidateMorseModemCache();
+      return SX1262::setModem(modem);
+    }
+    int16_t setMorseFastRssi() {
+      return setSX126xMorseRssiWindow(this);
+    }
+    float getMorseRssi() {
+      uint8_t raw = 0;
+      const int16_t status = this->getMod()->SPIreadStream(RADIOLIB_SX126X_CMD_GET_RSSI_INST, &raw, 1);
+      return status == RADIOLIB_ERR_NONE ? raw * -0.5f : NAN;
+    }
+
+    uint8_t defaultProfileSwitchFeatures() const {
+      return mesh::RadioSwitchTuning::Batch
+          | (MC_SX1262_FAST_PROFILE_SWITCH ? mesh::RadioSwitchTuning::Warm : 0)
+          | (MC_SX1262_FAST_FS ? mesh::RadioSwitchTuning::Fs : 0)
+          | (MC_SX1262_FAST_PACKET_CACHE ? mesh::RadioSwitchTuning::Packet : 0)
+          | (MC_SX1262_FAST_IQ_CACHE ? mesh::RadioSwitchTuning::Iq : 0)
+          | (MC_SX1262_FAST_MODEM_CACHE ? mesh::RadioSwitchTuning::Modem : 0);
+    }
+    uint8_t profileSwitchCapabilities() const {
+      uint8_t features = defaultProfileSwitchFeatures();
+#ifdef MC_SX1262_HIL
+      // Lab images retain their explicit per-shortcut experiments even when a
+      // production macro defaults off. Ordinary builds never gain these caps.
+      if (MC_SX1262_FAST_PROFILE_SWITCH)
+        features |= mesh::RadioSwitchTuning::Fs | mesh::RadioSwitchTuning::Packet
+            | mesh::RadioSwitchTuning::Iq | mesh::RadioSwitchTuning::Modem;
+#endif
+      return features;
+    }
+    uint8_t getProfileSwitchFeatures() const {
+      uint8_t features = _profileSwitchFeatures;
+#ifdef MC_SX1262_HIL
+      // Legacy lab commands directly select these booleans. Reflect them in
+      // the same getter used by the production feature gates and new CLI.
+      features &= ~(mesh::RadioSwitchTuning::Fs | mesh::RadioSwitchTuning::Packet
+          | mesh::RadioSwitchTuning::Iq | mesh::RadioSwitchTuning::Modem);
+      if (hilUseFsOnRetune) features |= mesh::RadioSwitchTuning::Fs;
+      if (hilSkipUnchangedPacket) features |= mesh::RadioSwitchTuning::Packet;
+      if (hilSkipUnchangedIq) features |= mesh::RadioSwitchTuning::Iq;
+      if (hilSkipConfirmedModemQuery) features |= mesh::RadioSwitchTuning::Modem;
+#endif
+      return features & profileSwitchCapabilities();
+    }
+    void setProfileSwitchFeatures(uint8_t features) {
+      _profileSwitchFeatures = features & profileSwitchCapabilities();
+#ifdef MC_SX1262_HIL
+      hilUseFsOnRetune = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Fs) != 0;
+      hilSkipUnchangedPacket = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Packet) != 0;
+      hilSkipUnchangedIq = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Iq) != 0;
+      hilSkipConfirmedModemQuery = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Modem) != 0;
+#endif
+      _profileSwitch.enabled = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Warm) != 0;
+      _profileSwitch.invalidate();
+    }
+    void setProfileSwitchOptimization(bool enabled) {
+      setProfileSwitchFeatures(enabled ? profileSwitchCapabilities() : 0);
     }
     void beginProfileSwitch(bool continuousRx) { _profileSwitch.begin(continuousRx, standbyXOSC); }
     void endProfileSwitch(bool success) { _profileSwitch.end(success); }
     bool profileSwitchFailed() const { return _profileSwitch.failed(); }
+#if (defined(MC_NRF_RADIO_PROFILE_PRIORITY) && MC_NRF_RADIO_PROFILE_PRIORITY) \
+    || (defined(MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD) && MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD)
+    bool hilOwnsWarmProfileRetune() const {
+      return _profileSwitch.open && _profileSwitch.active
+          && _profileSwitch.rxValid && !_coldStandby;
+    }
+#endif
     uint32_t getOptimizedProfileSwitches() const { return _profileFastResumes; }
 #ifdef MC_SX1262_HIL
     // Same-image lab baseline: force only 0x8B, preserving fast RX ownership.
@@ -57,8 +180,11 @@ class CustomSX1262 : public SX1262 {
     // Same-image A/B overrides; these default off on every HIL reboot.
     bool hilUseFsOnRetune = false;
     bool hilSkipUnchangedPacket = false;
+    bool hilSkipUnchangedIq = false;
+    bool hilSkipConfirmedModemQuery = false;
     float hilFrequencyMHz() const { return freqMHz; }
-    uint32_t hilFsEntries = 0, hilPacketSkips = 0;
+    uint32_t hilFsEntries = 0, hilPacketSkips = 0, hilIqWorkaroundSkips = 0;
+    uint32_t hilModemQuerySkips = 0;
 #endif
 
     int16_t restoreTcxoAfterSleep() {
@@ -74,12 +200,15 @@ class CustomSX1262 : public SX1262 {
     }
 
     int16_t standby() override {
+#if MESH_RADIO_TRACE_ENABLED
+      traceOperation(mesh::radiotrace::Reconfigure);
+#endif
       const bool alreadyAwake = !_coldStandby && _profileSwitch.active && _profileSwitch.rxValid;
       if (!alreadyAwake) _profileSwitch.invalidate();
       int16_t rc;
-      bool useFs = MC_SX1262_FAST_FS != 0;
+      bool useFs = (getProfileSwitchFeatures() & mesh::RadioSwitchTuning::Fs) != 0;
 #ifdef MC_SX1262_HIL
-      useFs = hilUseFsOnRetune;
+      useFs = useFs && hilUseFsOnRetune;
 #endif
       if (alreadyAwake && useFs) {
         getMod()->setRfSwitchState(Module::MODE_IDLE);
@@ -98,6 +227,9 @@ class CustomSX1262 : public SX1262 {
       return rc;
     }
     int16_t standby(uint8_t mode) override {
+#if MESH_RADIO_TRACE_ENABLED
+      traceOperation(mesh::radiotrace::Reconfigure);
+#endif
       _profileSwitch.invalidate();
       int16_t rc = SX1262::standby(mode);
       if (rc == RADIOLIB_ERR_NONE) rc = restoreTcxoAfterSleep();
@@ -110,14 +242,26 @@ class CustomSX1262 : public SX1262 {
     // retaining the requested warm policy for subsequent established RX.
     int16_t sleep() override { return sleep(true); }
     int16_t sleep(bool retainConfig) {
+#if MESH_RADIO_TRACE_ENABLED
+      traceOperation(mesh::radiotrace::Recovery);
+#endif
       _profileSwitch.invalidate();
       _coldStandby = true;
       const int16_t rc = SX1262::standby(RADIOLIB_SX126X_STANDBY_RC);
       _tcxoWakePending = tcxoVoltage > 0.0f;
       return rc == RADIOLIB_ERR_NONE ? SX1262::sleep(retainConfig) : rc;
     }
-    int16_t reset(bool verify = true) { _profileSwitch.invalidate(); _coldStandby = true; _tcxoWakePending = false; return SX1262::reset(verify); }
+    int16_t reset(bool verify = true) {
+#if MESH_RADIO_TRACE_ENABLED
+      traceOperation(mesh::radiotrace::Recovery);
+#endif
+      _profileSwitch.invalidate(); _coldStandby = true; _tcxoWakePending = false;
+      return SX1262::reset(verify);
+    }
     int16_t stageMode(RadioModeType_t mode, RadioModeConfig_t* cfg) override {
+#if MESH_RADIO_TRACE_ENABLED
+      traceOperation(mode == RADIOLIB_RADIO_MODE_TX ? mesh::radiotrace::Transmit : mesh::radiotrace::Rearm);
+#endif
       // All ordinary RX/TX staging rebuilds hardware state. In particular TX
       // changes IRQ mapping, packet length and buffer contents/base settings.
       _profileSwitch.invalidate();
@@ -153,6 +297,37 @@ class CustomSX1262 : public SX1262 {
     int16_t invertIQ(bool enable) override {
       _profileSwitch.invalidatePacket();
       return SX1262::invertIQ(enable);
+    }
+
+    // MeshCore and Meshtext share CRC-on, explicit-header, normal-IQ LoRa
+    // packet settings. Only an acknowledged owned RX-to-RX hop may stage
+    // these fields: startReceive() then commits one complete packet tuple,
+    // including RadioLib's fixInvertedIQ register workaround, before SetRx.
+    // Ordinary setup/TX/CAD/sleep/recovery retains the normal setter path.
+    int16_t setProfileProtocol(uint8_t syncWord) {
+      const bool stage = _profileSwitch.canResumeFast();
+      const int16_t rc = SX1262::setSyncWord(syncWord);
+      if (rc != RADIOLIB_ERR_NONE) {
+        _profileSwitch.packetResult(rc, preambleLengthLoRa, crcTypeLoRa,
+                                   implicitLen, headerType, invertIQEnabled);
+        return rc;
+      }
+      if (!stage) {
+        int16_t state = setCRC(1);
+        if (state == RADIOLIB_ERR_NONE) state = explicitHeader();
+        if (state == RADIOLIB_ERR_NONE) state = invertIQ(false);
+        return state;
+      }
+
+      crcTypeLoRa = RADIOLIB_SX126X_LORA_CRC_ON;
+      implicitLen = 0xff; // RadioLib explicitHeader() default receive length.
+      headerType = RADIOLIB_SX126X_LORA_HEADER_EXPLICIT;
+      invertIQEnabled = RADIOLIB_SX126X_LORA_IQ_STANDARD;
+      // Even an unchanged software tuple must be acknowledged once after the
+      // protocol write. Failed packet/IQ-workaround/SetRx commands revoke the
+      // owned context; the wrapper restores the old protocol with full setup.
+      _profileSwitch.invalidatePacket();
+      return RADIOLIB_ERR_NONE;
     }
 
     // Ordinary setters can change hardware or leave RadioLib's fields updated
@@ -196,8 +371,25 @@ class CustomSX1262 : public SX1262 {
       if (index == sizeof(bandwidths) / sizeof(bandwidths[0])) {
         return RADIOLIB_ERR_INVALID_BANDWIDTH;
       }
-      if (getPacketType() != RADIOLIB_SX126X_PACKET_TYPE_LORA) {
-        _profileSwitch.invalidateModulation();
+      bool queryModem = true;
+#if MC_SX1262_FAST_MODEM_CACHE || defined(MC_SX1262_HIL)
+      bool reuseModem = (getProfileSwitchFeatures() & mesh::RadioSwitchTuning::Modem) != 0;
+#ifdef MC_SX1262_HIL
+      reuseModem = reuseModem && hilSkipConfirmedModemQuery;
+#endif
+      // rxValid is established only after full RX setup confirms LoRa, or by
+      // resuming that same owned context. A successful owned standby, warm
+      // oscillator and continuous RX are required. TX/CAD staging, ordinary
+      // standby, sleep, reset, duty cycling and command errors revoke it.
+      // A caller using base-qualified GODMODE/raw SPI to change packet type
+      // must revoke ownership first, just as for the packet/IQ caches.
+      queryModem = !reuseModem || !_profileSwitch.canResumeFast();
+#ifdef MC_SX1262_HIL
+      if (!queryModem) ++hilModemQuerySkips;
+#endif
+#endif
+      if (queryModem && getPacketType() != RADIOLIB_SX126X_PACKET_TYPE_LORA) {
+        _profileSwitch.invalidate();
         return RADIOLIB_ERR_WRONG_MODEM;
       }
 
@@ -207,7 +399,8 @@ class CustomSX1262 : public SX1262 {
       const uint8_t effectiveLdro = ldroAuto
           ? ((float(uint32_t(1) << sf) / bw) >= 16.0f ? 1 : 0)
           : ldrOptimize;
-      const bool unchanged = _profileSwitch.matchesModulation(
+      const bool unchanged = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Batch)
+          && _profileSwitch.matchesModulation(
           sf, codes[index], cr - 4, effectiveLdro);
       const auto oldSf = spreadingFactor;
       const auto oldBw = bandwidth;
@@ -241,6 +434,10 @@ class CustomSX1262 : public SX1262 {
                   uint8_t syncWord = RADIOLIB_SX126X_SYNC_WORD_PRIVATE, int8_t power = 10,
                   uint16_t preambleLength = 8, float tcxoVoltage = 1.6,
                   bool useRegulatorLDO = false) {
+      useRegulatorLDO = _regulator.beginInitialization(useRegulatorLDO
+          ? mesh::power::RegulatorMode::Ldo : mesh::power::RegulatorMode::Dcdc)
+          == mesh::power::RegulatorMode::Ldo;
+      MESH_DEBUG_PRINTLN("SX1262 regulator requested: %s", useRegulatorLDO ? "LDO" : "DC-DC");
       _profileSwitch.invalidate();
       // A held dual-profile oscillator must not be selected during reset or
       // setup, before DIO3/TCXO configuration has been restored. Restore the
@@ -254,7 +451,20 @@ class CustomSX1262 : public SX1262 {
                                     tcxoVoltage, useRegulatorLDO);
       if (state == RADIOLIB_ERR_NONE) state = applyMeshCoreTcxoDelay();
       standbyXOSC = savedStandbyXosc;
-      return state;
+      return _regulator.finishInitialization(state);
+    }
+
+    // The GFSK reset used by Morse must retain the same boot choice and must
+    // invalidate reported active state when native initialization fails.
+    int16_t beginFSK(float freq = 434.0, float br = 4.8, float freqDev = 5.0,
+                     float rxBw = 156.2, int8_t power = 10, uint16_t preambleLength = 16,
+                     float tcxoVoltage = 1.6, bool useRegulatorLDO = false) override {
+      useRegulatorLDO = _regulator.beginInitialization(useRegulatorLDO
+          ? mesh::power::RegulatorMode::Ldo : mesh::power::RegulatorMode::Dcdc)
+          == mesh::power::RegulatorMode::Ldo;
+      const int16_t status = SX1262::beginFSK(freq, br, freqDev, rxBw, power,
+          preambleLength, tcxoVoltage, useRegulatorLDO);
+      return _regulator.finishInitialization(status);
     }
 
     // Read tcxoVoltage back from the chip object rather than from the argument:
@@ -324,9 +534,14 @@ class CustomSX1262 : public SX1262 {
       constexpr bool useRegulatorLDO = false;
   #endif
 
-      MESH_DEBUG_PRINTLN("SX1262 regulator requested: %s", useRegulatorLDO ? "LDO" : "DC-DC");
-
-  #if defined(P_LORA_SCLK)
+  #if defined(STATION_G3_ESP32)
+      // Reinitialization/watchdog recovery must keep the boot-selected slot;
+      // the build's historical slot macros are not the live SPI routing.
+      if (spi) {
+        const auto& pins = station_g3::activePins();
+        spi->begin(pins.sck, pins.miso, pins.mosi);
+      }
+  #elif defined(P_LORA_SCLK)
     #ifdef NRF52_PLATFORM
       if (spi) { spi->setPins(P_LORA_MISO, P_LORA_SCLK, P_LORA_MOSI); spi->begin(); }
     #elif defined(RP2040_PLATFORM)
@@ -406,6 +621,11 @@ class CustomSX1262 : public SX1262 {
     int16_t startReceiveDutyCycle(uint32_t rxPeriod, uint32_t sleepPeriod,
                                   RadioLibIrqFlags_t irqFlags = RADIOLIB_IRQ_RX_DEFAULT_FLAGS,
                                   RadioLibIrqFlags_t irqMask = RADIOLIB_IRQ_RX_DEFAULT_MASK) {
+#if MESH_RADIO_TRACE_ENABLED
+      const bool tracing = mesh::radiotrace::trace().pending();
+      const uint64_t trace_before = tracing ? mesh::radiotrace::nowUs() : 0;
+      if (tracing) traceOperation(mesh::radiotrace::Rearm);
+#endif
       _profileSwitch.invalidate();
       _coldStandby = true;
       int16_t state = SX1262::startReceiveDutyCycle(rxPeriod, sleepPeriod, irqFlags, irqMask);
@@ -415,6 +635,14 @@ class CustomSX1262 : public SX1262 {
         // while the SX1262 alternates between its RX and sleep windows.
         this->mod->setRfSwitchState(Module::MODE_RX);
       }
+      if (state == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
+#if MESH_RADIO_TRACE_ENABLED
+      if (tracing) mesh::radiotrace::trace().receiveEntry(static_cast<PhysicalLayer*>(this),
+          trace_before, mesh::radiotrace::nowUs(), state);
+#endif
       return state;
     }
 
@@ -480,8 +708,20 @@ class CustomSX1262 : public SX1262 {
       }
 
       this->mod->setRfSwitchState(this->txMode);
+#if MESH_RADIO_TRACE_ENABLED
+      const bool tracing = mesh::radiotrace::trace().pending();
+      const uint64_t trace_before = tracing ? mesh::radiotrace::nowUs() : 0;
+      if (tracing) mesh::radiotrace::trace().transmitLaunchBegin(static_cast<PhysicalLayer*>(this), trace_before);
+#endif
       int16_t state = this->setTx(RADIOLIB_SX126X_TX_TIMEOUT_NONE);
+#if MESH_RADIO_TRACE_ENABLED
+      const uint64_t trace_after = tracing ? mesh::radiotrace::nowUs() : 0;
+#endif
       if (state != RADIOLIB_ERR_NONE) {
+#if MESH_RADIO_TRACE_ENABLED
+        if (tracing) mesh::radiotrace::trace().transmitLaunch(static_cast<PhysicalLayer*>(this),
+            trace_before, trace_after, 0, state);
+#endif
         this->stagedMode = RADIOLIB_RADIO_MODE_NONE;
         return state;
       }
@@ -490,35 +730,99 @@ class CustomSX1262 : public SX1262 {
       while (isChipBusy()) {
         this->mod->hal->yield();
         if (this->mod->hal->millis() - started >= SX126X_TX_BUSY_TIMEOUT_MS) {
+#if MESH_RADIO_TRACE_ENABLED
+          if (tracing) mesh::radiotrace::trace().transmitLaunch(static_cast<PhysicalLayer*>(this),
+              trace_before, trace_after, 0, RADIOLIB_ERR_SPI_CMD_TIMEOUT);
+#endif
           this->stagedMode = RADIOLIB_RADIO_MODE_NONE;
           return RADIOLIB_ERR_SPI_CMD_TIMEOUT;
         }
       }
 
+#if MESH_RADIO_TRACE_ENABLED
+      if (tracing) {
+        const uint64_t after = mesh::radiotrace::nowUs();
+        mesh::radiotrace::trace().transmitLaunch(static_cast<PhysicalLayer*>(this), trace_before, trace_after, after, RADIOLIB_ERR_NONE);
+      }
+#endif
       this->stagedMode = RADIOLIB_RADIO_MODE_NONE;
       return RADIOLIB_ERR_NONE;
     }
 
+#if MC_SX1262_FAST_IQ_CACHE || defined(MC_SX1262_HIL)
+    // Firmware-level direct register/packet writes are not an acknowledged
+    // owned RX tuple, even when they fail or restore the same software IQ.
+    int16_t writeRegister(uint16_t address, const uint8_t* data, uint8_t size) {
+      _profileSwitch.invalidatePacket();
+      return SX1262::writeRegister(address, data, size);
+    }
+    int16_t setPacketParams(uint16_t preamble, uint8_t crc, uint8_t payload,
+                            uint8_t header, uint8_t iq) {
+      _profileSwitch.invalidatePacket();
+      return SX1262::setPacketParams(preamble, crc, payload, header, iq);
+    }
+  private:
+    int16_t writeProfilePacketParams(bool reuseIq) {
+      if (!reuseIq) {
+        return setPacketParams(preambleLengthLoRa, crcTypeLoRa, implicitLen,
+                               headerType, invertIQEnabled);
+      }
+      // Only the acknowledged IQ workaround is retained. A changed preamble
+      // still needs the COMPLETE ordinary SetPacketParams command. Preserve
+      // its on-wire field order and Module BUSY/status/error handling.
+      const uint8_t data[] = {
+          static_cast<uint8_t>(preambleLengthLoRa >> 8),
+          static_cast<uint8_t>(preambleLengthLoRa), headerType,
+          static_cast<uint8_t>(implicitLen),
+          crcTypeLoRa, invertIQEnabled};
+      return getMod()->SPIwriteStream(RADIOLIB_SX126X_CMD_SET_PACKET_PARAMS,
+                                     data, sizeof(data));
+    }
+  public:
+#endif
+
     int16_t startReceive() override {
+#if MESH_RADIO_TRACE_ENABLED
+      const bool tracing = mesh::radiotrace::trace().pending();
+      const uint64_t trace_before = tracing ? mesh::radiotrace::nowUs() : 0;
+      if (tracing) traceOperation(mesh::radiotrace::Rearm);
+#endif
       if (_profileSwitch.canResumeFast()) {
         // Existing continuous RX already established buffer bases and the
         // MeshCore IRQ map (including preamble detection). No TX/CAD/sleep/
         // reset/staging may intervene without revoking that context.
-        bool skipPacket = MC_SX1262_FAST_PACKET_CACHE != 0;
+        bool skipPacket = (getProfileSwitchFeatures() & mesh::RadioSwitchTuning::Packet) != 0;
 #ifdef MC_SX1262_HIL
-        skipPacket = hilSkipUnchangedPacket;
+        skipPacket = skipPacket && hilSkipUnchangedPacket;
 #endif
         skipPacket = skipPacket && _profileSwitch.matchesPacket(
             preambleLengthLoRa, crcTypeLoRa, implicitLen,
             headerType, invertIQEnabled);
+#if MC_SX1262_FAST_IQ_CACHE || defined(MC_SX1262_HIL)
+        bool reuseIq = (getProfileSwitchFeatures() & mesh::RadioSwitchTuning::Iq) != 0;
+#ifdef MC_SX1262_HIL
+        reuseIq = reuseIq && hilSkipUnchangedIq;
+#endif
+        // Capture this capability BEFORE revoking rxValid for the command
+        // sequence. Packet/IQ setters, protocol changes, sleep, reset, TX/CAD,
+        // duty cycling and command failures revoke the acknowledged tuple.
+        reuseIq = reuseIq && _profileSwitch.matchesPacketIq(invertIQEnabled);
+#endif
         _profileSwitch.rxValid = false;  // fail closed on any command error
         int16_t rc = clearIrqStatus();
 #ifdef MC_SX1262_HIL
         if (rc == RADIOLIB_ERR_NONE && skipPacket) ++hilPacketSkips;
 #endif
         if (rc == RADIOLIB_ERR_NONE && !skipPacket) {
+#if MC_SX1262_FAST_IQ_CACHE || defined(MC_SX1262_HIL)
+          rc = writeProfilePacketParams(reuseIq);
+#ifdef MC_SX1262_HIL
+          if (rc == RADIOLIB_ERR_NONE && reuseIq) ++hilIqWorkaroundSkips;
+#endif
+#else
           rc = setPacketParams(preambleLengthLoRa, crcTypeLoRa, implicitLen,
                                headerType, invertIQEnabled);
+#endif
           _profileSwitch.packetResult(rc, preambleLengthLoRa, crcTypeLoRa,
                                       implicitLen, headerType, invertIQEnabled);
         }
@@ -528,9 +832,17 @@ class CustomSX1262 : public SX1262 {
           rc = setRx(rxTimeout);  // original BUSY waits and status checks
         }
         stagedMode = RADIOLIB_RADIO_MODE_NONE;
-        if (rc == RADIOLIB_ERR_NONE) ++_profileFastResumes;
+        if (rc == RADIOLIB_ERR_NONE) {
+          ++_profileFastResumes;
+          _activityAt = 0;
+          _headerSeen = false;
+        }
         _coldStandby = rc != RADIOLIB_ERR_NONE;
         _profileSwitch.rxResult(rc, true);
+#if MESH_RADIO_TRACE_ENABLED
+        if (tracing) mesh::radiotrace::trace().receiveEntry(static_cast<PhysicalLayer*>(this),
+            trace_before, mesh::radiotrace::nowUs(), rc);
+#endif
         return rc;
       }
       // Make preamble detection visible to CAD while retaining RadioLib's
@@ -539,6 +851,12 @@ class CustomSX1262 : public SX1262 {
           RADIOLIB_SX126X_RX_TIMEOUT_INF,
           RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
           RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+      // Acknowledged RX entry cleared the previous hardware IRQs. Its local
+      // activity latches must not classify the next packet as old activity.
+      if (rc == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
       const bool reusable = rc == RADIOLIB_ERR_NONE && _profileSwitch.enabled
           && getPacketType() == RADIOLIB_SX126X_PACKET_TYPE_LORA;
       _coldStandby = rc != RADIOLIB_ERR_NONE;
@@ -547,11 +865,46 @@ class CustomSX1262 : public SX1262 {
         _profileSwitch.packetResult(rc, preambleLengthLoRa, crcTypeLoRa,
                                     implicitLen, headerType, invertIQEnabled);
       }
+#if MESH_RADIO_TRACE_ENABLED
+      if (tracing) mesh::radiotrace::trace().receiveEntry(static_cast<PhysicalLayer*>(this),
+          trace_before, mesh::radiotrace::nowUs(), rc);
+#endif
       return rc;
     }
 
+#if MESH_RADIO_TRACE_ENABLED
+    uint32_t getIrqFlags() override {
+      // Preserve the existing transaction and return bytes, including its
+      // legacy error behavior. Only the trace retains the checked SPI result;
+      // an unverified zero must never become an event-time lower bound.
+      const bool tracing = mesh::radiotrace::trace().pending();
+      const uint64_t before = tracing ? mesh::radiotrace::nowUs() : 0;
+      uint8_t data[] = {0, 0};
+      const int16_t result = this->mod->SPIreadStream(RADIOLIB_SX126X_CMD_GET_IRQ_STATUS, data, 2);
+      const uint32_t irq = (uint32_t(data[0]) << 8) | data[1];
+      if (tracing) mesh::radiotrace::trace().irq(static_cast<PhysicalLayer*>(this),
+          before, mesh::radiotrace::nowUs(), result, irq);
+      return irq;
+    }
+#endif
+
     bool isReceiving() {
-      if (isChipBusy()) return false;   // asleep, cannot be mid-receive
+#if MESH_RADIO_TRACE_ENABLED
+      const bool tracing = mesh::radiotrace::trace().pending();
+      const uint64_t trace_before = tracing ? mesh::radiotrace::nowUs() : 0;
+      const auto observed = [this, tracing, trace_before](bool held, bool header, mesh::radiotrace::Reason reason) {
+        if (tracing) mesh::radiotrace::trace().activity(static_cast<PhysicalLayer*>(this),
+            trace_before, mesh::radiotrace::nowUs(), held, header, reason);
+        return held;
+      };
+#endif
+      if (isChipBusy()) {
+#if MESH_RADIO_TRACE_ENABLED
+        return observed(false, false, mesh::radiotrace::FlagsCleared);
+#else
+        return false;   // asleep, cannot be mid-receive
+#endif
+      }
 
       uint32_t irq = getIrqFlags();
       bool preamble = irq & RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED; // bit 2
@@ -562,13 +915,21 @@ class CustomSX1262 : public SX1262 {
         clearIrqFlags(RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED | RADIOLIB_SX126X_IRQ_HEADER_VALID | RADIOLIB_SX126X_IRQ_HEADER_ERR | RADIOLIB_SX126X_IRQ_SYNC_WORD_VALID);
         _activityAt = 0;
         _headerSeen = false;
+#if MESH_RADIO_TRACE_ENABLED
+        return observed(false, false, mesh::radiotrace::HeaderError);
+#else
         return false;
+#endif
       }
       if (!header && _headerSeen) {
         // Another path consumed the header IRQ; reset only our local timer.
         _activityAt = 0;
         _headerSeen = false;
+#if MESH_RADIO_TRACE_ENABLED
+        return observed(false, false, mesh::radiotrace::FlagsCleared);
+#else
         return false;
+#endif
       }
       if (header) {
         if (!_headerSeen) { _headerSeen = true; _activityAt = now; };
@@ -576,9 +937,17 @@ class CustomSX1262 : public SX1262 {
           MESH_DEBUG_PRINTLN("Clearing header IRQ after %ums", _maxPayloadMillis);
           clearIrqFlags(RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED | RADIOLIB_SX126X_IRQ_HEADER_VALID | RADIOLIB_SX126X_IRQ_HEADER_ERR | RADIOLIB_SX126X_IRQ_SYNC_WORD_VALID);
           _activityAt = 0; _headerSeen = false;
+#if MESH_RADIO_TRACE_ENABLED
+          return observed(false, true, mesh::radiotrace::PayloadExpired);
+#else
           return false;
+#endif
         }
+#if MESH_RADIO_TRACE_ENABLED
+        return observed(true, true, mesh::radiotrace::None);
+#else
         return true;
+#endif
       }
 
       if (preamble) {
@@ -588,12 +957,24 @@ class CustomSX1262 : public SX1262 {
           _activityAt = 0;
           MESH_DEBUG_PRINTLN("Clearing preamble IRQ after %ums", _preambleMillis);
 
+#if MESH_RADIO_TRACE_ENABLED
+          return observed(false, false, mesh::radiotrace::PreambleExpired);
+#else
           return false;
+#endif
         }
+#if MESH_RADIO_TRACE_ENABLED
+        return observed(true, false, mesh::radiotrace::None);
+#else
         return true;
+#endif
       }
       _activityAt = 0; _headerSeen = false;
+#if MESH_RADIO_TRACE_ENABLED
+      return observed(false, false, mesh::radiotrace::FlagsCleared);
+#else
       return false;
+#endif
     }
 
     bool canUseRxPowerSavingDutyCycle(uint32_t rx_us, uint32_t sleep_us) const {

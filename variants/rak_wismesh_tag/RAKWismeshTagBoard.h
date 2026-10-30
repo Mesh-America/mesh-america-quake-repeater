@@ -14,8 +14,13 @@ public:
   void begin();
 
 #if defined(P_LORA_TX_LED) && defined(LED_STATE_ON)
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, !LED_STATE_ON);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, LED_STATE_ON);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LED_STATE_ON);   // turn TX LED on
   }
   void onAfterTransmit() override {
     digitalWrite(P_LORA_TX_LED, !LED_STATE_ON);   // turn TX LED off
@@ -23,6 +28,8 @@ public:
 #endif
 
   #define BATTERY_SAMPLES 8
+
+  bool supportsBatteryCalibration() const override { return true; }
 
   uint16_t getBattMilliVolts() override {
     analogReadResolution(12);
@@ -33,7 +40,7 @@ public:
     }
     raw = raw / BATTERY_SAMPLES;
 
-    return (ADC_MULTIPLIER * raw) / 4096;
+    return calibrateBatteryMillivolts((ADC_MULTIPLIER * raw) / 4096);
   }
 
   const char* getManufacturerName() const override {
@@ -53,7 +60,7 @@ public:
 
     // set led on and wait for button release before poweroff
     #ifdef LED_PIN
-    digitalWrite(LED_PIN, HIGH);
+    if (mesh::leds::enabled()) digitalWrite(LED_PIN, HIGH);
     #endif
     #ifdef BUTTON_PIN
     // wismesh tag uses LOW to indicate button is pressed, wait until it goes HIGH to indicate it was released

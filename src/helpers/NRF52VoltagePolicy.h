@@ -22,6 +22,8 @@ uint16_t configuredAdcPermille();
 uint8_t configuredBatteryPercent(uint16_t mv);
 bool setConfiguredBootlock(uint16_t mv);
 bool setConfiguredCutoff(uint16_t mv);
+bool setConfiguredAdcMultiplier(float multiplier, char* reply,
+                               size_t reply_capacity);
 bool isVoltagePolicyCommand(const char* command);
 bool handleVoltagePolicyCommand(const char* command, char* reply,
                                 size_t reply_capacity);

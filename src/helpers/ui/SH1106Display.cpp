@@ -2,6 +2,17 @@
 #include <Adafruit_GrayOLED.h>
 #include "Adafruit_SH110X.h"
 
+#if defined(ESP32_PLATFORM)
+// One fixed monochrome framebuffer and one BusIO adapter survive begin(),
+// including retries. Count the linked global display again conservatively,
+// plus metadata for both heap allocations. Shared Wire belongs to the core.
+static_assert(SH1106Display::FRAMEBUFFER_BYTES == 1024,
+              "Update the SH1106 OLED framebuffer budget");
+static_assert(sizeof(SH1106Display) + SH1106Display::FRAMEBUFFER_BYTES
+                  + sizeof(Adafruit_I2CDevice) + 64 <= 2048,
+              "Update the SH1106 OLED runtime budget");
+#endif
+
 bool SH1106Display::i2c_probe(TwoWire &wire, uint8_t addr)
 {
   wire.beginTransmission(addr);
@@ -10,15 +21,15 @@ bool SH1106Display::i2c_probe(TwoWire &wire, uint8_t addr)
 }
 
 // Color scheme
-ColorVal UIColor::window_bkg = SH110X_BLACK;
-ColorVal UIColor::title_bkg = SH110X_BLACK;
-ColorVal UIColor::title_txt = SH110X_WHITE;
-ColorVal UIColor::primary_txt = SH110X_WHITE;
-ColorVal UIColor::secondary_txt = SH110X_WHITE;
-ColorVal UIColor::warning_txt = SH110X_WHITE;
-ColorVal UIColor::popup_bkg = SH110X_BLACK;
-ColorVal UIColor::popup_txt = SH110X_WHITE;
-ColorVal UIColor::corp_blue = SH110X_WHITE;
+__attribute__((weak)) ColorVal UIColor::window_bkg = SH110X_BLACK;
+__attribute__((weak)) ColorVal UIColor::title_bkg = SH110X_BLACK;
+__attribute__((weak)) ColorVal UIColor::title_txt = SH110X_WHITE;
+__attribute__((weak)) ColorVal UIColor::primary_txt = SH110X_WHITE;
+__attribute__((weak)) ColorVal UIColor::secondary_txt = SH110X_WHITE;
+__attribute__((weak)) ColorVal UIColor::warning_txt = SH110X_WHITE;
+__attribute__((weak)) ColorVal UIColor::popup_bkg = SH110X_BLACK;
+__attribute__((weak)) ColorVal UIColor::popup_txt = SH110X_WHITE;
+__attribute__((weak)) ColorVal UIColor::corp_blue = SH110X_WHITE;
 
 bool SH1106Display::begin()
 {

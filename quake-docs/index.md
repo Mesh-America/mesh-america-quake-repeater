@@ -39,7 +39,7 @@ features:
     details: A restart or update will not set the repeater's clock back, which would otherwise stop the MeshCore app logging in.
   - iconName: cpu-chip-01
     title: A normal repeater first
-    details: Built on Keymind Cascade for the RAK3401 and the RAK10703 kit. It repeats like any other node, with or without a sensor fitted.
+    details: Built on Keymind Cascade 1.18 for the RAK3401 (1 W) and for the RAK4631 on a RAK19003 (the RAK10703 kit) or RAK19007 base. It repeats like any other node, with or without a sensor fitted.
 ---
 
 ## What an alert looks like

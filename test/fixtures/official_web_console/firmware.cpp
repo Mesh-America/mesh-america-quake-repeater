@@ -24,6 +24,10 @@ struct Stream {
   }
 } console;
 namespace mesh {
+namespace power {
+// The command-pump fixture isolates USB/CLI timing from regulator storage.
+void serviceRegulatorSettings() {}
+}
 void serviceUsbLoggingPort() {}
 void serviceUsbTerminalPort() {}
 bool takeUsbTerminalSessionReset() { return false; }
@@ -43,6 +47,7 @@ struct MyMesh {
   Prefs* _prefs = &prefs;
   Sensors* _sensors = &sensors;
   unsigned saves = 0;
+  bool dual_radio_active = false;
   void savePrefs() { ++saves; }
   void set(const char* config, char* reply) { @SETTER@ }
   void get(const char* config, char* reply) { @GETTER@ }
@@ -53,12 +58,13 @@ struct MyMesh {
   }
   void cancelPendingSerialOutput() {}
   bool hasPendingSerialOutput() { return false; }
+  bool isDualRadioActive() { return dual_radio_active; }
   Prefs* getNodePrefs() { return _prefs; }
-  unsigned getPowerSaveSleepSeconds(unsigned limit) { return limit; }
+  unsigned getPowerSaveSleepMilliseconds(unsigned limit) { return limit; }
   bool millisHasNowPassed(unsigned deadline) { return millis() > deadline; }
 } the_mesh;
 static ESP32Board board;
-static constexpr unsigned POWERSAVING_FIRSTSLEEP_SECS = 120;
+static constexpr unsigned POWERSAVING_FIRSTSLEEP_SECS = 300;
 static constexpr size_t LOCAL_SERIAL_COMMAND_MAX = 159;
 static char command[LOCAL_SERIAL_COMMAND_MAX + 2] = {};
 static bool command_overflow = false;

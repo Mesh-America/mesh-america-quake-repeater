@@ -715,6 +715,7 @@ void ClientACL::load(FILESYSTEM* fs, const mesh::LocalIdentity& self_id) {
           c.last_timestamp = UINT32_MAX;
         }
         self_id.calcSharedSecret(c.shared_secret, pub_key);  // recalculate shared secrets in case our private key changed
+        c.permissions_are_explicit = true; // this record was deliberately retained by the role's save policy
         clients[num_clients++] = c;
       }
       file.close();
@@ -894,6 +895,22 @@ bool ClientACL::clear() {
   return true;
 }
 
+int ClientACL::removeGuestClients() {
+  int retained = 0;
+  const int previous_count = num_clients;
+  for (int i = 0; i < previous_count; ++i) {
+    if ((clients[i].permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) continue;
+    if (retained != i) clients[retained] = clients[i];
+    ++retained;
+  }
+  const int removed = previous_count - retained;
+  if (removed != 0) {
+    memset(clients + retained, 0, sizeof(ClientInfo) * size_t(removed));
+    num_clients = retained;
+  }
+  return removed;
+}
+
 ClientInfo* ClientACL::getClient(const uint8_t* pubkey, int key_len) {
   if (pubkey == NULL || key_len <= 0 || key_len > PUB_KEY_SIZE) return NULL;
   for (int i = 0; i < num_clients; i++) {
@@ -908,7 +925,9 @@ ClientInfo* ClientACL::putClient(const mesh::Identity& id, uint8_t init_perms) {
   ClientInfo* oldest = NULL;
   for (int i = 0; i < num_clients; i++) {
     if (id.matches(clients[i].id)) return &clients[i];  // already known
-    if (!clients[i].isProtectedManager() && clients[i].last_activity < min_time) {
+    if (!clients[i].isProtectedManager()
+        && !(protect_explicit_permissions && clients[i].permissions_are_explicit)
+        && clients[i].last_activity < min_time) {
       oldest = &clients[i];
       min_time = oldest->last_activity;
     }
@@ -953,6 +972,7 @@ bool ClientACL::applyPermissions(const mesh::LocalIdentity& self_id, const uint8
     if (c == NULL) return false;
 
     c->permissions = perms;  // update their permissions
+    c->permissions_are_explicit = true;
     self_id.calcSharedSecret(c->shared_secret, pubkey);
   }
   return true;

@@ -18,8 +18,11 @@ public:
   T1Board() : periph_power(PIN_TFT_VDD_CTL, PIN_TFT_VDD_CTL_ACTIVE), NRF52Board("T1_OTA") {}
 
   void begin();
+  void applyLedPolicy() override;
   void onBeforeTransmit() override;
   void onAfterTransmit() override;
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
   const char* getManufacturerName() const override;
   void shutdownPeripherals() override;

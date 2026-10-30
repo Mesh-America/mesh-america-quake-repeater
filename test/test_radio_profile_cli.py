@@ -1,5 +1,6 @@
 """Run the production shared profile command parser and persistence with a memory FS."""
 from pathlib import Path
+import itertools
 import shutil
 import subprocess
 import tempfile
@@ -12,18 +13,24 @@ class RadioProfileCLITest(unittest.TestCase):
         compiler = shutil.which('g++') or shutil.which('clang++')
         self.assertIsNotNone(compiler)
         with tempfile.TemporaryDirectory() as work:
-            exe = Path(work) / 'profiles.exe'
-            subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra',
-                '-I', str(ROOT/'test/fixtures/radio_profiles/mocks'),
-                '-I', str(ROOT/'test/mocks'), '-I', str(ROOT/'src'),
-                str(ROOT/'src/helpers/RadioProfileCLI.cpp'),
-                str(ROOT/'test/fixtures/radio_profiles/cli_test.cpp'),
-                '-o', str(exe)], check=True, capture_output=True, text=True)
-            for scenario in (None, 'permanent_order', 'temporary_boundary', 'lease_creation',
-                             'save_failure', 'schedule_permutations', 'storage_isolation',
-                             'relative_schedule'):
-                with self.subTest(scenario=scenario or 'commands_persistence_and_timers'):
-                    subprocess.run([str(exe)] + ([scenario] if scenario else []), check=True)
+            # Compact STM32 images omit fleet staging. Both paths must preserve
+            # local schedules, persistence retries and temporary lease bounds.
+            for fleet_enabled, carrier_enabled in itertools.product((False, True), repeat=2):
+                exe = Path(work) / f'profiles-{int(fleet_enabled)}-{int(carrier_enabled)}.exe'
+                subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra',
+                    f'-DMESH_ENABLE_FLEET_CONTROL={int(fleet_enabled)}',
+                    f'-DMESH_ENABLE_CARRIER_TOOLS={int(carrier_enabled)}',
+                    '-I', str(ROOT/'test/fixtures/radio_profiles/mocks'),
+                    '-I', str(ROOT/'test/mocks'), '-I', str(ROOT/'src'),
+                    str(ROOT/'src/helpers/RadioProfileCLI.cpp'),
+                    str(ROOT/'test/fixtures/radio_profiles/cli_test.cpp'),
+                    '-o', str(exe)], check=True, capture_output=True, text=True)
+                for scenario in (None, 'permanent_order', 'temporary_boundary', 'lease_creation',
+                                 'save_failure', 'schedule_permutations', 'storage_isolation',
+                                 'relative_schedule', 'spectrum_overlap', 'mediamesh'):
+                    with self.subTest(fleet=fleet_enabled, carrier=carrier_enabled,
+                                      scenario=scenario or 'commands_persistence_and_timers'):
+                        subprocess.run([str(exe)] + ([scenario] if scenario else []), check=True)
 
 if __name__ == '__main__':
     unittest.main()

@@ -122,6 +122,18 @@ static const uint8_t AREF = PIN_AREF;
 #define PIN_SPI1_MOSI (30)
 #define PIN_SPI1_SCK (3)
 
+// Optional private SX1262 on a RAK4631 core running this external-radio image.
+// These pads are unconnected on a RAK3401 core. The external RAK13302 remains
+// on SPI1; ordinary RAK4631 firmware instead uses its onboard chip as primary.
+#define ONBOARD_LORA_NSS (42)     // P1.10
+#define ONBOARD_LORA_SCLK (43)    // P1.11
+#define ONBOARD_LORA_MOSI (44)    // P1.12
+#define ONBOARD_LORA_MISO (45)    // P1.13
+#define ONBOARD_LORA_BUSY (46)    // P1.14
+#define ONBOARD_LORA_DIO_1 (47)   // P1.15
+#define ONBOARD_LORA_RESET (38)   // P1.06
+#define ONBOARD_LORA_ANT_SW (37)  // P1.05
+
 	static const uint8_t SS = 42;
 	static const uint8_t MOSI = PIN_SPI_MOSI;
 	static const uint8_t MISO = PIN_SPI_MISO;
@@ -162,7 +174,10 @@ static const uint8_t AREF = PIN_AREF;
 //   Setting IO3 HIGH enables the FEM (LNA for RX, PA path for TX).
 //   CTX is connected to SX1262 DIO2 - the radio handles TX/RX switching
 //   in hardware via SetDIO2AsRfSwitchCtrl (microsecond-accurate, no GPIO needed).
-//   The 5V boost for the PA is enabled by WB_IO2 (P0.34 = PIN_3V3_EN).
+//   WB_IO2 (P1.02 = PIN_3V3_EN) switches the module's 3V3_S supply. The
+//   RAK13302 VD boost defaults to EN=IO2 (R27 DNC, R28 fitted). Legacy VC
+//   defaults to EN=VBAT (R27 fitted, R28 DNC), so IO2 can disable its booster
+//   only after the resistor modification. External 5V is not software-gated.
 #define SX126X_POWER_EN (21)        // P0.21 = IO3 -> SKY66122 CSD+CPS (FEM enable)
 
 // CTX is driven by SX1262 DIO2, not a GPIO

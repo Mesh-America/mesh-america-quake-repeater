@@ -21,11 +21,18 @@ protected:
 public:
   ThinkNodeM6Board() : NRF52Board("THINKNODE_M6_OTA") {}
   void begin();
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
 
 #if defined(P_LORA_TX_LED)
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
   }
   void onAfterTransmit() override {
     digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED off
@@ -39,8 +46,7 @@ public:
   bool hasUsbPowerDetect() const override { return true; }
 
   bool isUsbPowered() override {
-    // P0.13 is the dedicated USB / external power-detect line on the M6 PCB
-    // (same pin the Meshtastic M6 variant uses for USB detection).
+    // P0.13 is the dedicated USB / external power-detect line on the M6 PCB.
     return digitalRead(EXT_PWR_DETECT) == EXT_PWR_DETECT_VALUE;
   }
 

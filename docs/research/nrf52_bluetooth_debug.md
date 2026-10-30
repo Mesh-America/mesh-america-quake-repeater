@@ -49,6 +49,14 @@ application may have the misleading USB product name T1000-E-BOOT.
 - get bluetooth.trace: format, latest sequence, capacity and dropped writes.
 - get bluetooth.trace.state: advertising, connection, security, UART
   notification state, MTU, app traffic and queues.
+- get bluetooth.trace.stack: actual running SoftDevice firmware ID and SDK
+  query status. This is a live query, independent of build and bootloader labels.
+- get bluetooth.trace.advertiser: live active/idle advertising set counts,
+  status, own advertising address and privacy mode. The cached framework flag
+  is also included for comparison. No peer addresses or IRKs are requested.
+- get bluetooth.trace.identity: own GAP name/address and payload lengths.
+- get bluetooth.trace.advertising: bounded copies of the public advertising
+  and scan-response payloads, up to 31 bytes each.
 - get bluetooth.trace.stats: cumulative connects, disconnects, secured
   sessions, RX/TX operations and last disconnect reason/time.
 - get bluetooth.trace.timing: uptime, maximum loop gap, maximum stack
@@ -59,6 +67,8 @@ The debug commands are restricted to local Companion transport requests and
 are not exposed through remote mesh management. Replies and raw records are
 decoded by the exporter. Sequence gaps and overwritten records are reported.
 Diagnostic contention is counted and dropped rather than blocking BLE.
+The exporter retains unsupported-command replies from older format-2 images;
+missing newer readbacks do not prevent export of their event rings.
 
 ## Reading the result
 

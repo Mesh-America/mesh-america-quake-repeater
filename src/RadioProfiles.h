@@ -9,6 +9,7 @@ namespace mesh {
 
 enum class RadioProfileMode : uint8_t { Off = 0, Rx = 1, RxTx = 2 };
 enum class RadioCrossMode : uint8_t { Auto = 0, On = 1, Off = 2 };
+enum class RadioProfileProtocol : uint8_t { MeshCore = 0, Meshtext = 1, Ethernet = 2 };
 
 // These are modulation profiles of ONE transceiver, never additional radios.
 struct RadioProfileParams {
@@ -17,10 +18,11 @@ struct RadioProfileParams {
   uint16_t preamble = 0;  // 0 = automatic, otherwise symbols
   uint8_t sf = 0;
   uint8_t cr = 0;
+  RadioProfileProtocol protocol = RadioProfileProtocol::MeshCore;
 
   bool operator==(const RadioProfileParams& other) const {
     return freq == other.freq && bw == other.bw && sf == other.sf
-        && cr == other.cr && preamble == other.preamble;
+        && cr == other.cr && preamble == other.preamble && protocol == other.protocol;
   }
   bool operator!=(const RadioProfileParams& other) const { return !(*this == other); }
 };
@@ -38,14 +40,22 @@ class RadioProfiles {
   static constexpr double MinListenSymbols = 4.6;
   static constexpr double SlowListenSymbols = MinListenSymbols;
   static constexpr double MinFastListenSymbols = MinListenSymbols;
+#if defined(MESH_HIL_MESHTEXT_LISTEN_SYMBOLS)
+  // Opt-in RF experiment only: no production dwell/default changes. Compare
+  // foreign-network acquisition independently from normal MeshCore scanning.
+  static_assert(MESH_HIL_MESHTEXT_LISTEN_SYMBOLS > 0
+      && MESH_HIL_MESHTEXT_LISTEN_SYMBOLS <= 64,
+      "MESH_HIL_MESHTEXT_LISTEN_SYMBOLS must be greater than 0 and at most 64");
+#endif
   static constexpr uint8_t AcquisitionSymbols = 8;
   static constexpr uint16_t MaxPreamble = 65528;
-  static constexpr uint16_t MaxAutomaticPreamble = 128;
+  static constexpr uint16_t MaxAutomaticPreamble = 512;
   // Successful RX-to-RX hops self-test the board-specific switch allowance.
   // Packet receptions can extend a visit. No fixed loop allowance is added to
   // the self-tested, guarded switch time in the idle-scan timing model.
   static constexpr uint32_t LoopBudgetUs = 0;
   static constexpr uint8_t SwitchTestSamplesPerDirection = 4;
+  static constexpr uint32_t SwitchRecommendationWindowMs = 120000;
 
   struct ChirpTiming {
     bool valid = false;
@@ -61,7 +71,7 @@ class RadioProfiles {
   RadioProfileConfig secondary;
   bool primary_temporary = false;
   bool secondary_temporary = false;
-  RadioCrossMode cross = RadioCrossMode::Auto;
+  RadioCrossMode cross = RadioCrossMode::Off;
   // Infrastructure opts into BOTH at startup; Companions keep their own
   // contact/channel policy. Force applies only to locally generated replies.
   uint8_t reply_tx = RADIO_TX_AUTO;
@@ -74,19 +84,40 @@ class RadioProfiles {
   uint32_t longest_switch_us = 0;
   uint32_t switch_test_max_us[2] = {};
   uint8_t switch_test_samples[2] = {};
+  uint32_t switch_runtime_started_ms = 0;
+  bool switch_runtime_started = false;
+  bool switch_runtime_ready = false;
 
   void resetSwitchTest() {
     switch_test_max_us[0] = switch_test_max_us[1] = 0;
     switch_test_samples[0] = switch_test_samples[1] = 0;
+    switch_runtime_started_ms = 0;
+    switch_runtime_started = switch_runtime_ready = false;
   }
-  void sampleSwitch(uint8_t from, uint8_t to, uint32_t elapsed_us) {
+  void sampleSwitch(uint8_t from, uint8_t to, uint32_t elapsed_us, uint32_t now_ms = 0) {
     if (!enabled() || from > 1 || to > 1 || from == to || !elapsed_us) return;
     if (switch_test_samples[from] < SwitchTestSamplesPerDirection) ++switch_test_samples[from];
     if (elapsed_us > switch_test_max_us[from]) switch_test_max_us[from] = elapsed_us;
+    // Delay only the displayed recommendation. Startup readiness, guarded
+    // maxima, automatic preambles and scanner behavior remain unchanged.
+    if (!switch_runtime_started) {
+      switch_runtime_started = true;
+      switch_runtime_started_ms = now_ms;
+    }
+    if (switchTestReady()
+        && uint32_t(now_ms - switch_runtime_started_ms) >= SwitchRecommendationWindowMs)
+      switch_runtime_ready = true;
   }
   bool switchTestReady() const {
     return switch_test_samples[0] >= SwitchTestSamplesPerDirection
         && switch_test_samples[1] >= SwitchTestSamplesPerDirection;
+  }
+  bool recommendationReady() const { return switch_runtime_ready; }
+  uint32_t recommendationRemainingMs(uint32_t now_ms) const {
+    if (recommendationReady()) return 0;
+    if (!switch_runtime_started) return SwitchRecommendationWindowMs;
+    const uint32_t elapsed = now_ms - switch_runtime_started_ms;
+    return elapsed < SwitchRecommendationWindowMs ? SwitchRecommendationWindowMs - elapsed : 0;
   }
   uint32_t switchBudgetUs() const {
     const uint32_t observed = switch_test_max_us[0] > switch_test_max_us[1]
@@ -102,8 +133,9 @@ class RadioProfiles {
         || (reply_rx_override && secondary.mode == RadioProfileMode::Rx)));
   }
   bool canCross() const {
-    return cross == RadioCrossMode::On || (cross == RadioCrossMode::Auto
-        && primary_temporary == secondary_temporary);
+    return primary.protocol == secondary.params.protocol
+        && (cross == RadioCrossMode::On || (cross == RadioCrossMode::Auto
+        && primary_temporary == secondary_temporary));
   }
   uint8_t transmitMask(uint8_t origin) const {
     if (origin > 1) origin = 0;
@@ -114,13 +146,18 @@ class RadioProfiles {
   const RadioProfileParams& params(uint8_t profile) const {
     return profile == 1 ? secondary.params : primary;
   }
-  static bool valid(const RadioProfileParams& p) {
-    if (!isfinite(p.freq) || !isfinite(p.bw) || p.freq < 150 || p.freq > 2500
+  static bool valid(const RadioProfileParams& p, bool extended_bandwidths = true) {
+    if (!(p.freq >= 137 && p.freq <= 2500)
         || p.sf < 5 || p.sf > 12 || p.cr < 5 || p.cr > 8
+        || (p.protocol != RadioProfileProtocol::MeshCore && p.protocol != RadioProfileProtocol::Meshtext
+            && p.protocol != RadioProfileProtocol::Ethernet)
         || (p.preamble != 0 && (p.preamble < 8 || p.preamble > MaxPreamble))) return false;
+    // The first ten entries are the shared SX126x/SX127x bandwidth subset.
     static constexpr float bandwidths[] = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f,
-                               62.5f, 125, 250, 500, 1000, 812.5f, 1625};
-    for (float bw : bandwidths) if (fabsf(p.bw - bw) < 0.01f) return true;
+                               62.5f, 125, 250, 500, 41.67f, 83.34f, 101.56f, 203.125f,
+                               406.25f, 812.5f, 1000, 1625};
+    const size_t count = extended_bandwidths ? sizeof(bandwidths) / sizeof(bandwidths[0]) : 10;
+    for (size_t i = 0; i < count; ++i) if (fabsf(p.bw - bandwidths[i]) < 0.01f) return true;
     return false;
   }
   static double symbolUs(const RadioProfileParams& p) {
@@ -134,13 +171,13 @@ class RadioProfiles {
     const double symbol = symbolUs(p);
     if (symbol <= 0) return false;
     const int de = symbol >= 16000 ? 1 : 0;
-    const int denominator = 4 * (p.sf - 2 * de);
+    const int denominator = p.sf - 2 * de;
     // The payload expression is integral apart from this small rational
     // ceiling. Preserve even invalid-SF behavior: a zero denominator was
     // infinite (and failed the limit), while signed division rounds a
     // negative quotient toward zero, exactly its mathematical ceiling.
     if (!denominator) return false;
-    const int numerator = 8 * 255 - 4 * p.sf + (p.sf <= 6 ? 20 : 28) + 16;
+    const int numerator = 2 * 255 - p.sf + (p.sf <= 6 ? 9 : 11);
     const double payload = 8 + (denominator > 0
         ? (numerator + denominator - 1) / denominator : numerator / denominator) * 8;
     // RadioLib's microsecond airtime calculation multiplies by four before
@@ -156,7 +193,14 @@ class RadioProfiles {
   }
   static uint32_t minimumListenUs(const RadioProfileParams& p, bool slow = false) {
     const double symbol = symbolUs(p);
+#if defined(MESH_HIL_MESHTEXT_LISTEN_SYMBOLS)
+    const double baseline = slow ? SlowListenSymbols : MinFastListenSymbols;
+    const double symbols = p.protocol == RadioProfileProtocol::Meshtext
+        && MESH_HIL_MESHTEXT_LISTEN_SYMBOLS > baseline
+        ? MESH_HIL_MESHTEXT_LISTEN_SYMBOLS : baseline;
+#else
     const double symbols = slow ? SlowListenSymbols : MinFastListenSymbols;
+#endif
     return isfinite(symbol) && symbol > 0 && symbol <= UINT32_MAX / symbols
         ? (uint32_t)ceil(symbols * symbol) : 0;
   }
@@ -204,14 +248,15 @@ class RadioProfiles {
   }
   uint32_t listenUs(uint8_t profile, uint16_t slow_preamble = 0) const {
     const uint8_t slow = slowerProfile();
-    const double minimum = minimumListenUs(params(profile), enabled() && profile == slow);
-    if (!enabled() || profile == slow) return (uint32_t)ceil(minimum);
+    const uint32_t minimum = minimumListenUs(params(profile), enabled() && profile == slow);
+    if (!enabled() || profile == slow) return minimum;
     if (!slow_preamble) slow_preamble = preamble(slow, 32);
     const double available = double(slow_preamble) / 2.0 * symbolUs(params(slow))
         - minimumListenUs(params(slow), true) - 2.0 * switchBudgetUs() - LoopBudgetUs;
     // Rejected previews must not cause an out-of-range floating-to-int cast.
+    // In the positive branch, truncation already rounds down to whole us.
     return available > UINT32_MAX ? UINT32_MAX
-        : available > minimum ? (uint32_t)floor(available) : (uint32_t)minimum;
+        : available > minimum ? (uint32_t)available : minimum;
   }
   ChirpTiming chirpTiming() const {
     if (!enabled()) return {};
@@ -219,8 +264,18 @@ class RadioProfiles {
   }
   uint16_t preamble(uint8_t profile, uint16_t single_profile_default) const {
     const auto& p = params(profile);
+    // The foreign network's wire format has a fixed 16-symbol preamble;
+    // MeshCore's scan recommendations must never silently lengthen it.
+    if (p.protocol == RadioProfileProtocol::Meshtext) return 16;
     if (p.preamble) return p.preamble;
     if (!enabled()) return single_profile_default;
+    // A foreign profile cannot teach MeshCore peers our scan timing. Keep
+    // the normal network's canonical TX preamble (including during startup),
+    // since peers' RXPS header windows depend on it. Scanning remains best
+    // effort; chirpTiming() still reports any longer capture recommendation.
+    if (profile == 0 && p.protocol == RadioProfileProtocol::MeshCore
+        && secondary.params.protocol == RadioProfileProtocol::Meshtext)
+      return single_profile_default;
     // Do not expose an unmeasured short preamble while the startup test runs.
     if (!switchTestReady()) return MaxAutomaticPreamble;
     double symbols = automaticPreamble(profile);
@@ -233,8 +288,11 @@ class RadioProfiles {
     for (uint8_t i = 0; i < (enabled() ? 2 : 1); ++i) {
       if (!valid(params(i)) || !safePreamble(params(i), preamble(i, 32))) return false;
     }
-    // Recommendations over 128 are reported as unsafe, but the profile can
+    // Recommendations above the automatic cap remain visible, but the profile can
     // still run at the cap when its physical preamble is legal.
+    // A foreign network fixes its own preamble and cannot advertise our scan
+    // cycle. Accept safe wire settings, but do not claim loss-free scanning.
+    if (enabled() && primary.protocol != secondary.params.protocol) return true;
     if (enabled()) {
       const uint8_t slow = slowerProfile();
       const double available = double(preamble(slow, 32)) / 2.0 * symbolUs(params(slow))

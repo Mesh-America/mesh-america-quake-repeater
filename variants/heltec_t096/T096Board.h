@@ -25,8 +25,11 @@ public:
   void attachDynamicPrefs(KeyValueStore* prefs);
   bool handleCommand(const char* command, uint32_t sender_timestamp, char* reply) override;
 
+  void applyLedPolicy() override;
   void onBeforeTransmit(void) override;
   void onAfterTransmit(void) override;
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
   const char* getManufacturerName() const override ;
   void shutdownPeripherals() override;

@@ -43,10 +43,15 @@ for utility in profile_switch_t096_sx1262 profile_four_tx_v4_rx xiao_s3_partitio
     heltec_v4_partition_migrator_lora_repeater \
     heltec_v4_partition_migrator_lora_repeater_lora_ota_no_external_sensors \
     Xiao_S3_WIO_partition_expander \
-    Heltec_v3_repeater_observer_mqtt_sim; do
+    Heltec_v3_repeater_observer_mqtt_sim \
+    RAK_4631_repeater_rak15002_sd_seeder_only; do
   is_redundant_bulk_build_target "$utility" \
     || fail "release matrix includes development utility $utility"
 done
+
+if is_nrf52_sensor_ota_pair_target RAK_4631_repeater_rak15002_sd_seeder_only; then
+  fail "source-only SD archive was rewritten into a self-updating receiver pair"
+fi
 
 # Reduced RAK profiles all retain the compact INA set, but GPS depends on
 # whether the bridge already owns Serial1. Keep those independent contracts so
@@ -104,7 +109,7 @@ grep -Fq 'void HeltecRC32Board::onBootComplete()' \
 grep -Fq 'current_mhz > ESP32_POST_BOOT_CPU_FREQ' \
   variants/heltec_rc32/HeltecRC32Board.cpp \
   || fail "RC32 post-boot clock transition overrides lower power-saving clocks"
-grep -Fq 'return ESP32_POST_BOOT_CPU_FREQ;' examples/companion_radio/main.cpp \
+grep -Fq 'return ESP32_POST_BOOT_CPU_FREQ;' src/helpers/esp32/CpuClockPolicy.h \
   || fail "Companion power saving ignores the RC32 post-boot nominal clock"
 grep -Fq 'board.onBootComplete();' examples/simple_sensor/main.cpp \
   || fail "sensor firmware never applies board post-boot policy"
@@ -185,6 +190,34 @@ require("Heltec_E290_companion_usb_ble", "build_flags", "ENABLE_USB_INTERFACE")
 require("Heltec_E290_companion_usb_ble", "build_flags", "BLE_PIN_CODE=123456")
 require("Heltec_T190_companion_radio_usb_ble_", "build_flags", "ENABLE_USB_INTERFACE")
 require("Heltec_T190_companion_radio_usb_ble_", "build_flags", "BLE_PIN_CODE=123456")
+waveshare_full = "Waveshare_S3_LR1121_companion_radio_full"
+require(waveshare_full, "board", "esp32-s3-zero")
+require(waveshare_full, "board_build.flash_mode", "dio")
+for flag in (
+    "BOARD_HAS_PSRAM", "RADIO_CLASS=CustomLR1121", "WRAPPER_CLASS=CustomLR1121Wrapper",
+    "LR1121_FORCE_HP_PA", "LR11X0_DIO3_TCXO_VOLTAGE=1.8", "P_LORA_NSS=42",
+    "P_LORA_DIO_1=38", "P_LORA_RESET=39", "P_LORA_BUSY=41", "P_LORA_SCLK=40",
+    "P_LORA_MISO=46", "P_LORA_MOSI=45", "MAX_CONTACTS=350", "MAX_GROUP_CHANNELS=40",
+    "OFFLINE_QUEUE_SIZE=256", "ENABLE_USB_INTERFACE",
+):
+    require(waveshare_full, "build_flags", flag)
+require(waveshare_full, "build_src_filter", "variants/waveshare_esp32s3_lr1121")
+
+wio_l2_full = "Wio_Tracker_L2_companion_radio_full"
+require(wio_l2_full, "board", "seeed_wio_tracker_l2")
+require(wio_l2_full, "board_build.flash_mode", "dio")
+for flag in (
+    "SEEED_WIO_TRACKER_L2", "USE_SX1262", "DISPLAY_CLASS=WioTrackerL2Display",
+    "HAS_TOUCH=1", "AUTO_OFF_MILLIS=60000", "ENV_INCLUDE_GPS=1", "PIN_GPS_TX=18",
+    "PIN_GPS_RX=17", "ENV_SKIP_GPS_DETECT=1", "ENV_INCLUDE_INA219=0",
+    "MAX_CONTACTS=350", "MAX_GROUP_CHANNELS=40", "OFFLINE_QUEUE_SIZE=256",
+    "ENABLE_USB_INTERFACE",
+):
+    require(wio_l2_full, "build_flags", flag)
+require(wio_l2_full, "build_src_filter", "variants/wio-tracker-l2")
+require(wio_l2_full, "build_src_filter", "examples/companion_radio/ui-new")
+require(wio_l2_full, "lib_deps", "LovyanGFX @ 1.2.30")
+require(wio_l2_full, "lib_deps", "arduino-audio-driver/archive/v0.2.1.zip")
 require("heltec_v4_expansionkit_tft_companion_radio_full_femon", "platform", "platformio/espressif32@6.11.0")
 require("heltec_v4_expansionkit_tft_companion_radio_full_femon", "build_flags", "ARDUINO_USB_MODE=1")
 full_env_names = sorted(
@@ -229,6 +262,8 @@ for env_name in (
     "Station_G3_ESP32_companion_radio_full",
     "Heltec_v3_companion_radio_full",
     "heltec_tracker_v2_companion_radio_full_femon",
+    "Waveshare_S3_LR1121_companion_radio_full",
+    "Wio_Tracker_L2_companion_radio_full",
 ):
     require(env_name, "platform", "platformio/espressif32@6.11.0")
     reject(env_name, "platform", "55.03.311")
@@ -429,7 +464,13 @@ for env_name in (
 
 rak_usb = "RAK_3401_companion_radio_usb"
 require(rak_usb, "build_flags", "RAK_BOARD")
-require(rak_usb, "build_flags", "FORCE_GPS_ALIVE")
+require(rak_usb, "build_flags", "RAK_3401")
+require(rak_usb, "build_flags", "PIN_GPS_EN=-1")
+reject(rak_usb, "build_flags", "FORCE_GPS_ALIVE")
+for env_name in ("RAK_4631_companion_radio_usb", "RAK_4631_repeater"):
+    require(env_name, "build_flags", "RAK_4631")
+    require(env_name, "build_flags", "PIN_GPS_EN=-1")
+    reject(env_name, "build_flags", "FORCE_GPS_ALIVE")
 '
 
 # Every qualified ESP32 Companion layout publishes one Full image even when
@@ -446,6 +487,7 @@ init_project_context >/dev/null
   mapfile -t menu_targets < <(get_interactive_build_targets)
   menu_text=$(printf '%s\n' "${menu_targets[@]}")
   for expected in Heltec_v3_companion_radio_full Heltec_v3_repeater \
+      Waveshare_S3_LR1121_companion_radio_full Wio_Tracker_L2_companion_radio_full \
       LilyGo_TLora_V2_1_1_6_repeater \
       LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_ \
       RAK_3401_repeater \
@@ -457,6 +499,8 @@ init_project_context >/dev/null
       || fail "ordinary board menu omitted needed choice $expected"
   done
   for hidden in Heltec_v3_companion_radio_usb Heltec_v3_companion_radio_ble \
+      Waveshare_S3_LR1121_companion_radio_usb Waveshare_S3_LR1121_companion_radio_ble \
+      Wio_Tracker_L2_companion_radio_usb Wio_Tracker_L2_companion_radio_ble \
       Heltec_v3_repeater_observer_mqtt \
       Heltec_v3_repeater_lora_ota_no_external_sensors \
       RAK_3401_repeater_lora_ota_no_external_sensors \
@@ -674,6 +718,136 @@ for room_ota_env in solarxiao_33S_room_server_lora_ota \
   printf '%s\n' "$room_release_targets" | grep -Fx "$room_ota_env" >/dev/null \
     || fail "room-server release resolution omitted $room_ota_env"
 done
+
+# SolarXiao Room normally uses the module's onboard QSPI, not an additional
+# internal-only choice. Keep direct recovery recipes and their OTA identities
+# intact while excluding them from every ordinary selection path.
+solar_room_targets=$(resolve_room_server_firmwares)
+solar_all_targets=$(resolve_all_firmwares)
+solar_logging_targets=$(resolve_logging_matrix_firmwares)
+solar_menu_targets=$(get_interactive_build_targets)
+for solar_board in solarxiao_30S solarxiao_33S; do
+  legacy_room=${solar_board}_room_server
+  qspi_room=${legacy_room}_lora_ota
+  is_supported_build_env "$legacy_room" \
+    || fail "$legacy_room explicit compatibility recipe disappeared"
+  validate_build_target "$legacy_room" \
+    || fail "$legacy_room explicit compatibility recipe is invalid"
+  is_redundant_bulk_build_target "$legacy_room" \
+    || fail "$legacy_room internal-only recipe remains an ordinary build"
+  is_redundant_bulk_build_target "${legacy_room^^}" \
+    || fail "$legacy_room retirement policy is not case insensitive"
+  [ "$(get_pio_build_env "$legacy_room")" = "$legacy_room" ] \
+    || fail "$legacy_room silently changed its PlatformIO recipe"
+  [ "$(get_nrf52_sensor_ota_pair_target "$legacy_room")" = "$legacy_room" ] \
+    || fail "$legacy_room silently changed its OTA identity"
+  [ "$(get_nrf52_sensor_ota_pair_target "$qspi_room")" = "$qspi_room" ] \
+    || fail "$qspi_room lost its distinct QSPI OTA identity"
+  for solar_selection in "$room_release_targets" "$solar_room_targets" \
+      "$solar_all_targets" "$solar_logging_targets" "$solar_menu_targets"; do
+    if printf '%s\n' "$solar_selection" | grep -Fx "$legacy_room" >/dev/null; then
+      fail "$legacy_room leaked into an ordinary build selection"
+    fi
+    printf '%s\n' "$solar_selection" | grep -Fx "$qspi_room" >/dev/null \
+      || fail "$qspi_room missing from an ordinary build selection"
+  done
+  (
+    REQUIRE_OTA_UPDATES=0
+    resolve_command_targets build-firmware "$legacy_room"
+    [ "${#RESOLVED_BUILD_TARGETS[@]}" -eq 1 ] \
+      && [ "${RESOLVED_BUILD_TARGETS[0]}" = "$legacy_room" ] \
+      || fail "$legacy_room direct recovery build changed its exact target"
+  )
+done
+if is_solarxiao_internal_room_compatibility_target Xiao_nrf52_room_server \
+    || is_solarxiao_internal_room_compatibility_target solarxiao_30S_repeater \
+    || is_solarxiao_internal_room_compatibility_target solarxiao_33S_room_server_lora_ota; then
+  fail "SolarXiao internal Room policy retired an unrelated recipe"
+fi
+
+# Every supported onboard-QSPI Room has a normal exact external identity,
+# while old internal identities stay directly buildable without being remapped.
+for qspi_board in Xiao_nrf52 \
+    ikoka_nano_nrf_22dbm ikoka_nano_nrf_30dbm ikoka_nano_nrf_33dbm \
+    ikoka_stick_nrf_22dbm ikoka_stick_nrf_30dbm ikoka_stick_nrf_33dbm \
+    ikoka_handheld_nrf_e22_30dbm LilyGo_T-Echo SenseCap_Solar \
+    ThinkNode_M1 ThinkNode_M6 WioTrackerL1 LilyGo_T-Echo-Lite; do
+  legacy_room=${qspi_board}_room_server
+  legacy_alias=${legacy_room}_lora_ota_no_external_sensors
+  qspi_room=${legacy_room}_lora_ota
+  [ "$(get_onboard_qspi_normal_replacement "$legacy_room")" = "$qspi_room" ] \
+    || fail "$legacy_room lacks its normal QSPI replacement"
+  for old in "$legacy_room" "$legacy_alias"; do
+    is_supported_build_env "$old" || fail "$old lost explicit compatibility builds"
+    is_redundant_bulk_build_target "$old" || fail "$old remains an ordinary Room choice"
+    [ "$(get_pio_build_env "$old")" = "$legacy_room" ] \
+      || fail "$old changed its original internal recipe"
+  done
+  for selection in "$room_release_targets" "$solar_room_targets" \
+      "$solar_all_targets" "$solar_logging_targets" "$solar_menu_targets"; do
+    grep -Fxq "$qspi_room" <<<"$selection" || fail "$qspi_room missing from ordinary selection"
+    if grep -Fxq -e "$legacy_room" -e "$legacy_alias" <<<"$selection"; then
+      fail "$legacy_room internal identity leaked into ordinary selection"
+    fi
+  done
+  (
+    REQUIRE_OTA_UPDATES=0
+    resolve_command_targets build-firmware "$legacy_room"
+    [ "${#RESOLVED_BUILD_TARGETS[@]}" -eq 1 ] \
+      && [ "${RESOLVED_BUILD_TARGETS[0]}" = "$legacy_alias" ] \
+      || fail "$legacy_room direct build lost its deployed internal pair identity"
+  )
+done
+repeater_release_targets=$(print_release_firmware_targets get-repeater-firmwares-to-build)
+for board in LilyGo_T-Echo SenseCap_Solar ThinkNode_M1 ThinkNode_M6 WioTrackerL1; do
+  canonical=${board}_repeater
+  alias=${canonical}_lora_ota_no_external_sensors
+  is_supported_build_env "$alias" || fail "$alias lost its exact deployed recipe"
+  for selection in "$repeater_release_targets" "$solar_all_targets" \
+      "$solar_logging_targets" "$solar_menu_targets"; do
+    grep -Fxq "$canonical" <<<"$selection" || fail "$canonical missing its normal QSPI pair"
+    if grep -Fxq "$alias" <<<"$selection"; then fail "$alias duplicates its normal QSPI pair"; fi
+  done
+done
+for selection in "$repeater_release_targets" "$solar_all_targets" \
+    "$solar_logging_targets" "$solar_menu_targets"; do
+  grep -Fxq LilyGo_T-Echo-Lite_repeater_lora_ota <<<"$selection" \
+    || fail "Lite QSPI repeater missing from ordinary selection"
+  if grep -Fxq -e LilyGo_T-Echo-Lite_repeater \
+      -e LilyGo_T-Echo-Lite_repeater_lora_ota_no_external_sensors \
+      -e Xiao_nrf52_repeater_bridge_rs232 \
+      -e Xiao_nrf52_repeater_bridge_rs232_lora_ota_no_external_sensors <<<"$selection"; then
+    fail "internal Lite/bridge identity leaked into ordinary selection"
+  fi
+done
+for pending in muzi_base_duo_repeater_lora_ota muzi_base_duo_room_server_lora_ota \
+    muzi_base_uno_repeater_lora_ota muzi_base_uno_room_server_lora_ota \
+    LilyGo_T-Echo_Card_repeater_lora_ota LilyGo_T-Echo_Card_room_server_lora_ota \
+    Nano_G2_Ultra_repeater_lora_ota Nano_G2_Ultra_room_server_lora_ota; do
+  is_supported_build_env "$pending" || fail "$pending qualification recipe missing"
+  for selection in "$room_release_targets" "$repeater_release_targets" "$solar_all_targets" \
+      "$solar_logging_targets" "$solar_menu_targets"; do
+    if grep -Fxq "$pending" <<<"$selection"; then fail "$pending escaped qualification quarantine"; fi
+  done
+  (
+    BUILD_PROFILE_FOR_TARGET=standard
+    ESP32_FULL_BUILD=0
+    BUILD_CAPABILITIES=() BUILD_EXPECTATIONS=() BUILD_APPLICATION_EXPECTATIONS=() BUILD_REDUCTIONS=()
+    declare_build_capability_contract "$pending" NRF52_PLATFORM
+    [[ " ${BUILD_CAPABILITIES[*]} " == *" hardware.qualification.pending "* ]] \
+      || fail "$pending lacks its package publication prohibition"
+  )
+done
+(
+  BUILD_PROFILE_FOR_TARGET=standard
+  ESP32_FULL_BUILD=0
+  BUILD_CAPABILITIES=() BUILD_EXPECTATIONS=() BUILD_APPLICATION_EXPECTATIONS=() BUILD_REDUCTIONS=()
+  declare_build_capability_contract Xiao_nrf52_repeater NRF52_PLATFORM
+  [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.rs232="* \
+      && " ${BUILD_APPLICATION_EXPECTATIONS[*]} " == *"bridge.rs232.merged="* ]] \
+    || fail "merged XIAO bridge lacks linked driver and packaged runtime proof"
+)
+
 sensor_release_targets=$(resolve_sensor_firmwares)
 while IFS='|' read -r sensor_env sensor_ota_env; do
   is_supported_build_env "$sensor_ota_env" \
@@ -884,6 +1058,10 @@ Heltec_T190_companion_radio_usb_ble_|Heltec_T190_companion_radio_full_|Heltec_T1
 SenseCapIndicator-ESPNow_comp_radio_usb|SenseCapIndicator-ESPNow_companion_radio_full|SenseCapIndicator-ESPNow_comp_radio_usb
 SenseCapIndicator-LoRa_comp_radio_usb_wifi|SenseCapIndicator-LoRa_companion_radio_full|SenseCapIndicator-LoRa_comp_radio_usb_wifi
 SenseCapIndicator-LoRa-N16R2_comp_radio_usb_wifi|SenseCapIndicator-LoRa-N16R2_companion_radio_full|SenseCapIndicator-LoRa-N16R2_comp_radio_usb_wifi
+Waveshare_S3_LR1121_companion_radio_usb|Waveshare_S3_LR1121_companion_radio_full|Waveshare_S3_LR1121_companion_radio_full
+Waveshare_S3_LR1121_companion_radio_ble|Waveshare_S3_LR1121_companion_radio_full|Waveshare_S3_LR1121_companion_radio_full
+Wio_Tracker_L2_companion_radio_usb|Wio_Tracker_L2_companion_radio_full|Wio_Tracker_L2_companion_radio_full
+Wio_Tracker_L2_companion_radio_ble|Wio_Tracker_L2_companion_radio_full|Wio_Tracker_L2_companion_radio_full
 FULL_COMPANION_SPECS
 
 # The Full overlay, not the historical transport used as its build base, owns
@@ -1186,6 +1364,23 @@ apply_esp32_full_shared_bridge_profile Station_G2_repeater_observer_mqtt
   || fail "Station G2 Full MQTT image did not report ESP-NOW capability"
 [[ "$PLATFORMIO_BUILD_FLAGS" != *"ESPNOW_BRIDGE_MERGED"* ]] \
   || fail "Station G2 existing MQTT default changed during ESP-NOW composition"
+[[ "$PLATFORMIO_BUILD_FLAGS" == *"-DWITH_UDP_BRIDGE=1"* ]] \
+  || fail "Station G2 Full repeater did not enable UDP bridge support"
+[[ "$PLATFORMIO_BUILD_SRC_FILTER" == *"helpers/bridges/UDPBridge.cpp"* \
+    && "$PLATFORMIO_BUILD_SRC_FILTER" == *"helpers/UDPBridgeSettings.cpp"* ]] \
+  || fail "Station G2 Full repeater did not include UDP bridge and settings sources"
+[[ " ${BUILD_CAPABILITIES[*]} " == *" bridge.udp "* ]] \
+  || fail "Station G2 Full repeater omitted the UDP capability"
+(
+  PLATFORMIO_BUILD_FLAGS=""
+  PLATFORMIO_BUILD_SRC_FILTER=""
+  BUILD_CAPABILITIES=()
+  apply_esp32_full_shared_bridge_profile Station_G2_room_server_observer_mqtt
+  [[ "$PLATFORMIO_BUILD_FLAGS" != *"WITH_UDP_BRIDGE"* \
+      && "$PLATFORMIO_BUILD_SRC_FILTER" != *"UDPBridge"* ]] \
+    || fail "room server acquired unsupported UDP repeater wiring"
+)
+
 [[ "$(get_unified_full_infrastructure_target Station_G2_repeater_bridge_espnow)" \
     = "Station_G2_repeater_observer_mqtt" ]] \
   || fail "Station G2 Full ESP-NOW target did not resolve to the combined MQTT recipe"
@@ -1211,12 +1406,20 @@ for plain_target in heltec_v4_tft_repeater Heltec_v2_repeater \
     || fail "$plain_target Full image omitted the actual ESP-NOW driver source"
   [[ " ${BUILD_CAPABILITIES[*]} " == *" bridge.espnow "* ]] \
     || fail "$plain_target Full image omitted the ESP-NOW capability"
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *"-DWITH_UDP_BRIDGE=1"* \
+      && "$PLATFORMIO_BUILD_SRC_FILTER" == *"helpers/bridges/UDPBridge.cpp"* ]] \
+    || fail "$plain_target Full image omitted default-off UDP support"
+  [[ " ${BUILD_CAPABILITIES[*]} " == *" bridge.udp "* ]] \
+    || fail "$plain_target Full image omitted UDP capability"
+
   (
     BUILD_PROFILE_FOR_TARGET=full
     BUILD_EXPECTATIONS=()
     declare_build_capability_contract "$plain_target" ESP32_PLATFORM
     [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.espnow=_ZN12ESPNowBridge5beginEv"* ]] \
       || fail "$plain_target Full image does not require a linked ESP-NOW driver"
+    [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.udp=_ZN9UDPBridge5beginEv"* ]] \
+      || fail "$plain_target Full image does not require a linked UDP driver"
   )
 done
 for existing_target in Heltec_v2_repeater_bridge_espnow \
@@ -1246,7 +1449,7 @@ done
 )
 for primary_flag in MESH_PRIMARY_ESPNOW MESH_ESPNOW_RADIO; do
   (
-    pio_env_option_contains() { [ "$3" = "$primary_flag" ]; }
+    pio_env_has_effective_define() { [ "$2" = "$primary_flag" ]; }
     PLATFORMIO_BUILD_FLAGS=""
     PLATFORMIO_BUILD_SRC_FILTER=""
     if supports_esp32_full_shared_espnow heltec_v4_tft_repeater; then

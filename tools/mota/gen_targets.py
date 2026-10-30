@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from collections import Counter
+from itertools import groupby
 import subprocess
 import sys
 from functools import lru_cache
@@ -26,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "src" / "helpers" / "ota" / "OtaTargets.h"
 INTERNAL_BOOTLOADER_TARGETS = ROOT / "tools" / "mota" / "nrf52_internal_bootloader_targets.txt"
 NAME_DECODE_CHUNK_SIZE = 512
+RAK_FULL_NAME_DECODE_CHUNK_SIZE = 4096
 
 
 def resolved_config():
@@ -125,9 +129,87 @@ def _compressed_name_chunks(rows, max_chunk_size):
     return bytes(data), tuple(offsets), tuple(len(raw) for raw in raw_chunks), tuple(firsts)
 
 
+def grouped_name_chunks(rows, max_chunk_size=RAK_FULL_NAME_DECODE_CHUNK_SIZE):
+    """Share complete role suffixes and contiguous board prefixes, retaining order.
+
+    Each independent chunk contains its own bounded suffix dictionary followed
+    by board groups. One record reconstructs a board base, then lists every role
+    index for that contiguous run. IDs/names remain byte-for-byte unchanged.
+    """
+    return _grouped_name_chunks(tuple(rows), max_chunk_size)
+
+
+@lru_cache(maxsize=8)
+def _grouped_name_chunks(rows, max_chunk_size):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from zopfli_compress import MAXIMUM_ITERATIONS, raw_deflate_compress
+
+    if not rows or max_chunk_size < 1024 or max_chunk_size > 65535:
+        raise ValueError("OTA grouped-name chunk size or inventory is invalid")
+    parts = []
+    for _, name in rows:
+        encoded = name.encode("utf-8")
+        if b"\0" in encoded or len(encoded) > 255:
+            raise ValueError(f"OTA target name is not encodable: {name!r}")
+        role = re.search(r"_(?:companion(?:_radio)?|comp_radio|repeater|repeatr|room_server|room_svr|sensor|kiss_modem|terminal_chat|term_chat|partition_expander)(?:_|$)", name, re.I)
+        parts.append((name[:role.start()], name[role.start():]) if role else (name, ""))
+    frequency = Counter(suffix for _, suffix in parts if suffix)
+    suffixes = sorted(frequency)
+    # Leave at least half the same scratch buffer for records. Rare/future
+    # suffixes can stay in the board base without losing or renaming a target.
+    while len(suffixes) > 254 or 1 + sum(len(s.encode("utf-8")) + 1 for s in suffixes) > max_chunk_size // 2:
+        suffixes.remove(min(suffixes, key=lambda suffix: (frequency[suffix], -len(suffix), suffix)))
+    suffixes.insert(0, "")
+    indices = {suffix: index for index, suffix in enumerate(suffixes)}
+    dictionary = b"".join(suffix.encode("utf-8") + b"\0" for suffix in suffixes)
+    header = bytes([len(suffixes)]) + len(dictionary).to_bytes(2, "little") + dictionary
+    chosen = [(base, suffix) if suffix in indices else (name, "")
+              for (_, name), (base, suffix) in zip(rows, parts)]
+    records = []
+    for base, run in groupby(chosen, key=lambda part: part[0]):
+        roles = [indices[suffix] for _, suffix in run]
+        for start in range(0, len(roles), 255):
+            records.append((base.encode("utf-8"), bytes(roles[start:start + 255])))
+    raw_chunks, firsts, row = [], [0], 0
+    current, previous = bytearray(header), b""
+    for base, roles in records:
+        prefix = 0
+        while prefix < min(len(previous), len(base)) and previous[prefix] == base[prefix]:
+            prefix += 1
+        record = bytes([prefix]) + base[prefix:] + b"\0" + bytes([len(roles)]) + roles
+        if len(current) + len(record) > max_chunk_size:
+            raw_chunks.append(bytes(current)); firsts.append(row)
+            current, previous = bytearray(header), b""
+            record = b"\0" + base + b"\0" + bytes([len(roles)]) + roles
+        if len(header) + len(record) > max_chunk_size:
+            raise ValueError("OTA board-name group exceeds its bounded chunk")
+        current.extend(record); previous = base; row += len(roles)
+    raw_chunks.append(bytes(current)); firsts.append(len(rows))
+    data, offsets = bytearray(), [0]
+    for raw in raw_chunks:
+        data.extend(raw_deflate_compress(raw, numiterations=MAXIMUM_ITERATIONS)); offsets.append(len(data))
+    if len(data) > 65535 or len(rows) > 65535:
+        raise ValueError("OTA grouped-name data exceeds uint16_t restart offsets")
+    return bytes(data), tuple(offsets), tuple(map(len, raw_chunks)), tuple(firsts)
+
+
 def generate_header(rows):
-    data, offsets, raw_lengths, firsts = compressed_name_chunks(rows)
     capacity = max((len(name.encode("utf-8")) + 1 for _, name in rows), default=1)
+
+    def chunk_tables(chunk_size, grouped=False):
+        codec = grouped_name_chunks if grouped else compressed_name_chunks
+        data, offsets, raw_lengths, firsts = codec(rows, chunk_size)
+        lines = [f"  enum {{ DECODE_CHUNK_BYTES = {chunk_size} }};"]
+        for name, values in (("OFFSETS", offsets), ("RAW_LENGTHS", raw_lengths), ("FIRSTS", firsts)):
+            lines += [f"  static const uint16_t {name}[] = {{"]
+            lines += ["    " + ", ".join(str(value) for value in values[i:i + 12]) + ","
+                      for i in range(0, len(values), 12)]
+            lines += ["  };"]
+        lines += [f"  // {len(data)} encoded bytes; {len(raw_lengths)} independent chunks, at most {chunk_size} decoded bytes.",
+                  "  static const uint8_t NAMES[] = {"]
+        lines += ["    " + ", ".join(f"0x{byte:02x}" for byte in data[i:i + 16]) + ","
+                  for i in range(0, len(data), 16)]
+        return lines + ["  };"]
 
     out = [
         "#pragma once",
@@ -151,6 +233,10 @@ def generate_header(rows):
         "",
         "#if OTA_TARGET_NAME_TABLE && OTA_TARGET_NAME_FRONT_CODED",
         '  #include "tinf/tinf.h"',
+        "  #if defined(OTA_RAK15002_SD_STORE) && defined(COMPANION_RADIO_FULL)",
+        "    #include <stdlib.h>",
+        '    #include "Utils.h"',
+        "  #endif",
         "#endif",
         "",
         "namespace mesh { namespace ota {",
@@ -163,37 +249,102 @@ def generate_header(rows):
         "inline const char* ota_target_env_name(uint32_t target_id, char* buffer, size_t capacity) {",
         "  if (!buffer || !capacity) return nullptr;",
         "  buffer[0] = 0;",
+        "#if defined(OTA_RAK15002_SD_STORE) && defined(COMPANION_RADIO_FULL)",
+        "  // Fingerprints filter candidates only. Reconstructed names must match the entire",
+        "  // existing SHA-256:4 target ID, so collisions never produce a wrong target name.",
+        "  static const uint8_t FINGERPRINTS[] = {",
+    ]
+    out += ["    " + ", ".join(f"0x{tid & 0xff:02x}" for tid, _ in rows[i:i + 16]) + ","
+            for i in range(0, len(rows), 16)]
+    out += ["  };"] + chunk_tables(RAK_FULL_NAME_DECODE_CHUNK_SIZE, grouped=True)
+    out += [
+        "  // Rare display lookup: one heap buffer, each candidate chunk decoded once.",
+        "  // Keep complete names private until both ID and caller capacity are validated.",
+        "  struct Scratch { uint8_t* bytes; ~Scratch() { free(bytes); } } scratch = {nullptr};",
+        "  char name[OTA_TARGET_ENV_NAME_CAPACITY];",
+        "  const uint8_t fingerprint = (uint8_t)target_id;",
+        "  for (unsigned group = 0; group < sizeof(RAW_LENGTHS) / sizeof(RAW_LENGTHS[0]); group++) {",
+        "    unsigned candidate = FIRSTS[group];",
+        "    while (candidate < FIRSTS[group + 1] && FINGERPRINTS[candidate] != fingerprint) candidate++;",
+        "    if (candidate == FIRSTS[group + 1]) continue;",
+        "    if (!scratch.bytes) scratch.bytes = (uint8_t*)malloc(DECODE_CHUNK_BYTES);",
+        "    if (!scratch.bytes) return nullptr;",
+        "    uint8_t* raw = scratch.bytes;",
+        "    unsigned int produced = DECODE_CHUNK_BYTES;",
+        "    if (tinf_uncompress_exact(raw, &produced, NAMES + OFFSETS[group],",
+        "                              OFFSETS[group + 1] - OFFSETS[group]) != TINF_OK ||",
+        "        produced != RAW_LENGTHS[group]) return nullptr;",
+        "    if (produced < 3) return nullptr;",
+        "    const unsigned suffix_count = raw[0];",
+        "    const size_t suffix_bytes = (size_t)raw[1] | (size_t)raw[2] << 8;",
+        "    if (!suffix_count || suffix_bytes > produced - 3) return nullptr;",
+        "    const uint8_t* suffixes = raw + 3;",
+        "    const uint8_t* record = suffixes + suffix_bytes;",
+        "    const uint8_t* end = raw + produced;",
+        "    const uint8_t* checked_suffix = suffixes;",
+        "    for (unsigned n = 0; n < suffix_count; n++) {",
+        "      while (checked_suffix < record && *checked_suffix) checked_suffix++;",
+        "      if (checked_suffix == record) return nullptr;",
+        "      checked_suffix++;",
+        "    }",
+        "    if (checked_suffix != record) return nullptr;",
+        "    size_t previous_length = 0;",
+        "    unsigned row = FIRSTS[group];",
+        "    while (row < FIRSTS[group + 1]) {",
+        "      if (record == end) return nullptr;",
+        "      size_t base_length = *record++;",
+        "      if (base_length > previous_length || base_length >= sizeof(name)) return nullptr;",
+        "      while (record < end && *record) {",
+        "        if (base_length + 1 >= sizeof(name)) return nullptr;",
+        "        name[base_length++] = (char)*record++;",
+        "      }",
+        "      if (record == end) return nullptr;",
+        "      record++;",
+        "      previous_length = base_length;",
+        "      if (record == end) return nullptr;",
+        "      const unsigned aliases = *record++;",
+        "      if (!aliases || aliases > FIRSTS[group + 1] - row || aliases > (size_t)(end - record)) return nullptr;",
+        "      for (unsigned alias = 0; alias < aliases; alias++, row++) {",
+        "        const unsigned suffix_index = *record++;",
+        "        if (suffix_index >= suffix_count) return nullptr;",
+        "        if (FINGERPRINTS[row] != fingerprint) continue;",
+        "        const uint8_t* suffix = suffixes;",
+        "        for (unsigned n = 0; n < suffix_index; n++) {",
+        "          while (*suffix) suffix++;",
+        "          suffix++;",
+        "        }",
+        "        size_t length = base_length;",
+        "        while (*suffix) {",
+        "          if (length + 1 >= sizeof(name)) return nullptr;",
+        "          name[length++] = (char)*suffix++;",
+        "        }",
+        "        name[length] = 0;",
+        "        uint8_t hash[4];",
+        "        mesh::Utils::sha256(hash, sizeof(hash), (const uint8_t*)name, length);",
+        "        const uint32_t id = (uint32_t)hash[0] | (uint32_t)hash[1] << 8 |",
+        "                            (uint32_t)hash[2] << 16 | (uint32_t)hash[3] << 24;",
+        "        if (id != target_id) continue;",
+        "        if (length >= capacity) return nullptr;",
+        "        memcpy(buffer, name, length + 1);",
+        "        return buffer;",
+        "      }",
+        "    }",
+        "    if (record != end) return nullptr;",
+        "  }",
+        "  return nullptr;",
+        "#else",
         "  static const uint32_t IDS[] = {",
     ]
     out += ["    " + ", ".join(f"0x{tid:08x}" for tid, _ in rows[i:i + 8]) + ","
             for i in range(0, len(rows), 8)]
+    out += ["  };"] + chunk_tables(NAME_DECODE_CHUNK_SIZE)
     out += [
-        "  };",
-        "  static const uint16_t OFFSETS[] = {",
-    ]
-    out += ["    " + ", ".join(str(offset) for offset in offsets[i:i + 12]) + ","
-            for i in range(0, len(offsets), 12)]
-    out += ["  };", "  static const uint16_t RAW_LENGTHS[] = {"]
-    out += ["    " + ", ".join(str(length) for length in raw_lengths[i:i + 12]) + ","
-            for i in range(0, len(raw_lengths), 12)]
-    out += ["  };", "  static const uint16_t FIRSTS[] = {"]
-    out += ["    " + ", ".join(str(first) for first in firsts[i:i + 12]) + ","
-            for i in range(0, len(firsts), 12)]
-    out += [
-        "  };",
-        f"  // {len(data)} encoded bytes; {len(raw_lengths)} independent chunks, at most {NAME_DECODE_CHUNK_SIZE} decoded bytes.",
-        "  static const uint8_t NAMES[] = {",
-    ]
-    out += ["    " + ", ".join(f"0x{byte:02x}" for byte in data[i:i + 16]) + ","
-            for i in range(0, len(data), 16)]
-    out += [
-        "  };",
         "  for (unsigned i = 0; i < sizeof(IDS) / sizeof(IDS[0]); i++) {",
         "    if (IDS[i] != target_id) continue;",
         "    unsigned group = 0;",
         "    while (i >= FIRSTS[group + 1]) group++;",
-        f"    uint8_t raw[{NAME_DECODE_CHUNK_SIZE}];",
-        "    unsigned int produced = sizeof raw;",
+        "    uint8_t raw[DECODE_CHUNK_BYTES];",
+        "    unsigned int produced = DECODE_CHUNK_BYTES;",
         "    if (tinf_uncompress_exact(raw, &produced, NAMES + OFFSETS[group],",
         "                              OFFSETS[group + 1] - OFFSETS[group]) != TINF_OK ||",
         "        produced != RAW_LENGTHS[group]) return nullptr;",
@@ -217,6 +368,7 @@ def generate_header(rows):
         "    return buffer;",
         "  }",
         "  return nullptr;",
+        "#endif",
         "}",
         "#else",
         "// target_id -> env name, or nullptr if unknown. Linear scan; lookups are rare.",

@@ -36,9 +36,15 @@ public:
   void attachDynamicPrefs(KeyValueStore* prefs) { (void)prefs; }  // no-op
 
 #ifdef P_LORA_TX_LED
-  void onBeforeTransmit() override { digitalWrite(P_LORA_TX_LED, HIGH); }
+  void applyLedPolicy() override {
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);
+  }
+
+  void onBeforeTransmit() override { if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH); }
   void onAfterTransmit() override { digitalWrite(P_LORA_TX_LED, LOW); }
 #endif
+
+  bool supportsBatteryCalibration() const override { return true; }
 
   uint16_t getBattMilliVolts() override {
 #if defined(PIN_VBAT_READ) && defined(ADC_MULTIPLIER)
@@ -50,7 +56,7 @@ public:
     }
     raw = raw / BATTERY_SAMPLES;
 
-    return (ADC_MULTIPLIER * raw) / 4096;
+    return calibrateBatteryMillivolts((ADC_MULTIPLIER * raw) / 4096);
 #else
     return 0;
 #endif

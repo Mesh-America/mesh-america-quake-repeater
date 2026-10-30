@@ -4,8 +4,8 @@
 
 # Companion contact caches
 
-Full Companions on ESP32 and nRF52 without PSRAM, plus the high-contact RAK4631
-USB/BLE profiles, keep 16 outgoing paths
+Full Companions on ESP32 and nRF52 without PSRAM, plus nRF52 USB/BLE
+profiles with more than 300 contacts, keep 16 outgoing paths
 and 16 shared secrets in RAM. Every contact remains in the contact table;
 selecting a different contact loads its saved path as needed. This recovers
 about 25.4 KiB of internal RAM in the 350-contact ESP32 qualification builds.
@@ -14,11 +14,21 @@ See the [qualification results](../test-results/companion_contact_cache_results.
 six-board RAM comparison, physical tests, and shared-secret timings.
 
 PSRAM boards retain their existing complete contact table in external RAM.
-Most legacy USB/BLE/WiFi Companion profiles retain inline paths and secrets.
-The high-contact RAK4631 USB/BLE profiles also enable the same cache,
+Lower-contact legacy profiles and ordinary ESP32 USB/BLE/WiFi Companion
+profiles retain inline paths and secrets. High-contact nRF52 USB/BLE profiles
+(including Wio Tracker L1) enable the same cache,
 keeping all 350 contacts while making room for the shared 256-frame offline/DM
 pool. The build flag `MESH_CONTACT_CACHE=0` or `1` overrides this policy for
 qualification; it is not a runtime feature switch.
+
+The ordinary Wio Tracker L1 BLE build reproduced a runtime RAM failure with
+48,964 bytes available against 59,968 required. Enabling the existing cache
+for high-contact nRF52 profiles recovered 30,200 bytes: the linked build has
+79,164 bytes available and a 19,196-byte margin against the unchanged budget.
+It keeps 350 contacts, 40 channels and 256 normal offline frames. As on the
+cached RAK profiles, up to 15 held one-key DMs temporarily use queue slots;
+their storage is shared instead of reserving a second pool. This is a
+linked-capacity result, not a physical load/soak test.
 
 ## Paths and persistence
 
@@ -36,10 +46,56 @@ before replacing the file or recovering a saved transaction.
 Changing a copied contact preserves the old path for a pending app response
 or rollback. Dirty entries are saved before eviction. If storage cannot be
 read, written, or represented completely, the operation fails instead of
-silently losing a contact or sending along a different route. Reboot retries
-an incomplete load from the preserved files. The path checksum also rejects
+sending along a different route. Contact I/O failures request bounded recovery
+between callbacks. A raw cached-path read fault first rechecks the current
+immutable paths without resetting accepted RAM changes or their save deadline.
+Persistent faults or uncertain file publication reload a readable live image,
+otherwise a readable backup, and discard only unrecoverable contact data if
+neither works. Recovery releases a pending contact-list snapshot before resetting
+the table but preserves its requesting route; the changed table revision starts
+a fresh list that can finish normally. Explicit session cancellation still stops
+the stream. nRF52 preserves
+healthy pages when another page is damaged. No archival `.bad` files are kept.
+If damaged contacts cannot be removed, the node remains usable with volatile
+contacts; explicit saves still report failure, while reboot/shutdown remain
+available. Identity, credentials, channels and unrelated settings are not erased.
+Allocation/capacity failures and shared filesystem-migration authority errors
+are not corrupt-contact evidence and do not authorize this reset. Failed source
+discovery also preserves contact files; if authority stays unknown, use volatile
+contacts instead of deleting readable pages or selecting a potentially stale view.
+The path checksum also rejects
 a cold path changed underneath a live handle; it does not add a new checksum
 to the legacy ESP32 on-disk format.
+
+### Legacy interrupted contact saves
+
+ESP32, RP2040 and STM32 Companions can load the complete records before a
+partial final record in a legacy `/contacts3` file. This includes cached and
+uncached ESP32 builds. The file must contain at least one whole 152-byte
+record, and every whole record must be readable.
+The partial record is ignored; loading does not truncate the source. The next
+successful ordinary contact save writes the complete loaded contacts through
+the platform's existing transaction writer.
+
+On ESP32 and RP2040, this salvage applies only when the presence check reports
+`/contacts3.bak` absent. A readable complete backup takes precedence over the
+incomplete primary. An unreadable backup keeps the existing bounded retry and
+recovery behavior; the partial primary is not used to declare that backup
+expendable. ESP32 also defers salvage when backup presence is uncertain.
+RP2040's filesystem API does not distinguish a metadata I/O error from a
+missing file. STM32 does not select a contact backup.
+
+This recovers a readable prefix from an interrupted older in-place save, not
+arbitrary corruption. Legacy records have no file checksum, and the existing
+route validation and repair still apply. A file with no complete record, or
+one that remains unreadable after recovery retries, can still be discarded by
+contact-only recovery. Failure to remove damaged data leaves contacts volatile
+and explicit saves unavailable, without erasing identity or unrelated settings.
+
+nRF52 retains its separate legacy-size validation and paged-store migration;
+this partial-tail salvage does not apply to nRF52. The existing
+[ExtraFS recovery guide](../test-results/nrf52_companion_storage_recovery.md)
+describes its separate mount and metadata recovery boundaries.
 
 ## Shared secrets and power
 
@@ -158,10 +214,31 @@ partition table. Subsequent WiFi updates must fit the new slots. An
 application-only update from the ordinary single-slot Full layout cannot
 change that layout or enable WiFi OTA.
 
+## Shared contact index storage
+
+Companion and terminal-chat builds share compact contact indexes in
+`BaseChatMesh`. Tables with at most 65,535 total slots use 16-bit sort and
+matching-result entries; larger configurations retain the original `int` type.
+Contact limits, PSRAM allocation fallback and saved/wire formats are unchanged.
+
+On the existing 32-bit platforms, a static 350-contact table saves 764 bytes
+from these arrays; a static 100-contact table saves 264 bytes. A 350-contact
+PSRAM configuration saves 96 internal bytes and 716 PSRAM bytes. Cached nRF52
+records also shrink from 96 to 92 bytes by moving runtime storage bookkeeping
+into an alignment gap. The matched RAK4631 Full build saves 2,200 static RAM
+bytes in total. These figures do not describe infrastructure ACL tables.
+
+See the [2026-10-19 qualification report](../test-results/contact_memory_2026-10-19.md)
+for source-bound builds, tests and remaining board-specific memory limits.
+
 ## Regression checks
 
 ```sh
+python3 -B test/test_contact_indices.py
+python3 -B test/test_companion_contact_lifetime.py
 python3 -B test/test_contact_cache.py
+python3 -B test/test_companion_uncached_storage.py
+python3 -B test/test_companion_contact_partial_tail.py
 python3 -B test/test_companion_contact_persistence_contract.py
 python3 -B test/test_companion_contact_stream_contract.py
 python3 -B test/test_nrf52_extrafs_contract.py
@@ -176,6 +253,10 @@ adapters. They exercise 350 routes, eviction, snapshot rollback, page
 migration, identity changes, read/write/rename faults, handle exhaustion,
 packet release on a failed path read, and recovery after a simulated reset
 between file renames. They do not simulate a physical flash power cut.
+The partial-tail tests also check readable-prefix preservation, backup
+precedence, deferred normalization on save and reload on ESP32, RP2040 and
+STM32 using filesystem adapters. Real flash power-loss and full-volume
+qualification remains separate from these host checks.
 
 `tools/hil/contact_cache_serial_stress.py` checks all 350 paths over USB,
 replaces them with a different generation, and optionally exercises secret

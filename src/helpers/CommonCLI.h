@@ -14,7 +14,19 @@
 #include <helpers/DynamicConfigSerializer.h>
 #include <helpers/RepeaterRadioTiming.h>
 #include <helpers/RadioProfileCLI.h>
+#include <helpers/MorseReplyHandoff.h>
 #include <helpers/WirelessControl.h>
+#include <helpers/FleetCommand.h>
+#include <helpers/BatteryForwarding.h>
+#if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+#include <helpers/SdCardCLI.h>
+#endif
+#if defined(WITH_UDP_BRIDGE)
+#include <helpers/UDPBridgePrefs.h>
+#endif
+#if MESH_ENABLE_FLEET_CONTROL
+#include <helpers/FleetChannel.h>
+#endif
 
 #ifndef DEFAULT_CAD_ENABLED
   #define DEFAULT_CAD_ENABLED 0
@@ -27,7 +39,7 @@
 #include <helpers/UserGpio.h>
 #endif
 
-#if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_MQTT_BRIDGE)
+#if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_MQTT_BRIDGE) || defined(WITH_UDP_BRIDGE)
 #define WITH_BRIDGE
 #endif
 
@@ -157,6 +169,9 @@ public:
   char bridge_secret[16] = {}; // for XOR encryption of bridge packets (ESP-NOW only)
   // Power setting
   uint8_t powersaving_enabled = DEFAULT_POWERSAVING_ENABLED ? 1 : 0; // boolean
+#if defined(ESP32_PLATFORM)
+  uint16_t cpu_freq_mhz = 0; // 0=Auto; checked ESP32-only append-only footer
+#endif
   uint8_t reboot_interval = 0; // hours, 0-255 (default 0=disable)
   // Gps settings
   uint8_t gps_enabled = 0;
@@ -209,6 +224,12 @@ public:
   // retain bridge_enabled as their legacy alias and mirror it on save.
   // Appended after the profile markers, never beside the legacy bridge byte.
   uint8_t rs232_bridge_enabled = 0;
+  // Default standby is negotiated by a valid heartbeat reply. Stock peers
+  // never arm it. Explicit force (2) also permits unconfirmed-link standby.
+  // Stored in a checked append-only tail, never in the legacy bridge layout.
+  uint8_t rs232_autosleep = 1;
+  uint8_t rs232_heartbeat = 1;
+  uint16_t rs232_idle_seconds = 300;
   // Appended after the ESP-NOW intent. Zero keeps the board's legacy cadence.
   uint16_t gps_sync_interval_hours = 0;
   uint8_t retry_preset = 0;
@@ -267,6 +288,10 @@ public:
   uint8_t flood_retry_group_max_path = 0; // PAYLOAD_TYPE_GRP_DATA retry path gate; 0xFF = use only the general gate
   uint8_t rx_watchdog_enabled = mesh::RepeaterRadioTiming::DEFAULT_RX_WATCHDOG_ENABLED;
   uint8_t system_watchdog_enabled = 0; // nRF52 main-loop hardware watchdog (boolean; default on)
+#if defined(RAK_4631)
+  // Checked append-only file footer; never shifts existing preference offsets.
+  uint8_t peripherals_shared = 0; // 0=GPS-only, 1=shared; applied only at boot
+#endif
 
 private:
   class RadioPrefs : public CommonRadioPrefs {
@@ -291,10 +316,19 @@ private:
       def("agc_int", _parent->agc_reset_interval);
       def("hash_mode", _parent->path_hash_mode);
       def("multi_ack", _parent->multi_acks);
+      def("rxps_en", _parent->rx_powersaving_enabled);
+      def("rxps_rx_us", _parent->rx_ps_rx_us);
+      def("rxps_sleep_us", _parent->rx_ps_sleep_us);
+      def("rxps_level", _parent->rx_ps_level);
+      def("rxps_preamble", _parent->rx_ps_preamble);
     }
 
   public:
     explicit RadioPrefs(NodePrefs* parent) : _parent(parent) { }
+    RxPowerSavingConfig readRxPowerSavingConfig() const override {
+      return {_parent->rx_powersaving_enabled, _parent->rx_ps_rx_us,
+              _parent->rx_ps_sleep_us, _parent->rx_ps_level, _parent->rx_ps_preamble};
+    }
     // CommonRadioPrefs interface
     float getFreq() const override { return _parent->freq; }
     void setFreq(float f) override { _parent->freq = f; markDirty(); }
@@ -348,6 +382,11 @@ private:
       def("format", _parent->bridge_format);
       def("usb_log", _parent->usb_logging_enabled);
       def("usb_dbg", _parent->usb_debug_enabled);
+#ifdef WITH_RS232_BRIDGE
+      def("rs232_heartbeat", _parent->rs232_heartbeat);
+      def("rs232_autosleep", _parent->rs232_autosleep);
+      def("rs232_idle", _parent->rs232_idle_seconds);
+#endif
     }
 
   public:
@@ -378,6 +417,10 @@ private:
     void structure() override {
       def("adc_mult", _parent->adc_multiplier);
       def("pwr_sav_en", _parent->powersaving_enabled);
+      def("pwr_reboot_int", _parent->reboot_interval);
+#if defined(ESP32_PLATFORM)
+      def("cpu_freq", _parent->cpu_freq_mhz);
+#endif
     }
 
   public:
@@ -445,6 +488,7 @@ public:
         repeat(this), room(this), custom(&radio) { }
 
   CommonRadioPrefs* getRadioPrefs() { return &radio; }
+  const CommonRadioPrefs* getRadioPrefs() const { return &radio; }
   KeyValueStore* getCustom() { return &custom; }
 
   bool isDirty() const override { return ConfigSerializer::isDirty() || radio.isDirty() || custom.isDirty(); }
@@ -476,8 +520,13 @@ struct LegacyObserverTail {
 };
 #endif
 
-class CommonCLICallbacks {
+class CommonCLICallbacks
+#if MESH_ENABLE_FLEET_CONTROL
+  : public mesh::FleetReplyHooks
+#endif
+{
 public:
+  virtual bool supportsFleetControl() const { return false; }
   // True only after an actual NTP response this boot, not a plausible RTC.
   virtual bool managementNtpSynced() const { return false; }
   virtual mesh::Radio* getProfileRadio() { return nullptr; }
@@ -614,6 +663,48 @@ public:
   virtual bool restartRs232Bridge() { return restartBridge(); }
   virtual bool isEspNowBridgeRunning() { return isBridgeRunning(); }
   virtual bool isRs232BridgeRunning() const { return isBridgeRunning(); }
+#if defined(WITH_UDP_BRIDGE)
+  virtual const mesh::bridge::udp::Prefs* getUDPBridgePrefs() const { return nullptr; }
+  virtual bool setUDPBridgePrefs(const mesh::bridge::udp::Prefs& prefs) {
+    (void)prefs; return false;
+  }
+  virtual void formatUDPBridgeStatus(char* reply, size_t capacity) {
+    snprintf(reply, capacity, "Error: UDP bridge unavailable");
+  }
+  virtual void formatUDPBridgeStats(const char* page, char* reply, size_t capacity) {
+    (void)page;
+    snprintf(reply, capacity, "Error: UDP bridge unavailable");
+  }
+  virtual bool sendUDPBridgeTest(uint8_t peer_index, uint32_t nonce) {
+    (void)peer_index; (void)nonce; return false;
+  }
+  virtual bool resetUDPBridgeStats() { return false; }
+  virtual bool setUDPBridgeNetworkState(bool enabled) { (void)enabled; return false; }
+  virtual bool isUDPBridgeNetworkEnabled() const { return false; }
+#endif
+  virtual void formatRs232Status(char* reply) { strcpy(reply, "RS232 unavailable"); }
+#if defined(WITH_RS232_BRIDGE)
+  virtual void formatRs232Transport(char* reply, size_t capacity) {
+    snprintf(reply, capacity, "Error: RS232 diagnostics unavailable");
+  }
+  virtual void formatRs232Stats(const char* page, char* reply, size_t capacity) {
+    (void)page;
+    snprintf(reply, capacity, "Error: RS232 diagnostics unavailable");
+  }
+  virtual bool sendRs232Test(uint32_t nonce) { (void)nonce; return false; }
+  virtual bool resetRs232Stats() { return false; }
+#endif
+#if defined(WITH_ESPNOW_BRIDGE)
+  virtual void formatEspNowStatus(char* reply, size_t capacity) {
+    snprintf(reply, capacity, "Error: ESP-NOW diagnostics unavailable");
+  }
+  virtual void formatEspNowStats(const char* page, char* reply, size_t capacity) {
+    (void)page;
+    snprintf(reply, capacity, "Error: ESP-NOW diagnostics unavailable");
+  }
+  virtual bool sendEspNowTest(uint32_t nonce) { (void)nonce; return false; }
+  virtual bool resetEspNowStats() { return false; }
+#endif
 
   virtual void restartBridgeSlot(int slot) {
     // Default: fall back to full restart
@@ -780,6 +871,7 @@ class LegacyUpgradeGate;
 namespace mesh {
 class ManagementReporter;
 struct DataRouteState;
+class BeaconManager;
 }
 class CommonCLI {
   mesh::ManagementReporter* _management = nullptr;
@@ -794,12 +886,30 @@ class CommonCLI {
   NodePrefs* _prefs;
   CommonCLICallbacks* _callbacks;
   mesh::MainBoard* _board;
+#if MESH_ENABLE_BATTERY_FORWARDING
+  FILESYSTEM* _battery_forward_fs = nullptr;
+  mesh::batteryforward::Settings _battery_forward_settings;
+  mutable mesh::batteryforward::State _battery_forward_state;
+  void loadBatteryForwarding(FILESYSTEM* fs);
+  bool saveBatteryForwarding(const mesh::batteryforward::Settings& settings);
+  void loopBatteryForwarding(bool force = false) const;
+  bool handleBatteryForwardingCommand(const char* command, char* reply);
+#else
+  void loadBatteryForwarding(FILESYSTEM*) {}
+  void loopBatteryForwarding(bool = false) const {}
+  bool handleBatteryForwardingCommand(const char*, char*) { return false; }
+#endif
+  uint16_t batteryEmptyMv() const;
+  uint16_t batteryFullMv() const;
 #if defined(WITH_ESPNOW_BRIDGE) \
     || (defined(WITH_MQTT_BRIDGE) && defined(LIGHTWEIGHT_WIFI_OTA))
   // Browser OTA restores only transports it actually paused, not saved
   // defaults suspended by an unconfigured first-boot setup session.
   bool _wifi_ota_resume_mqtt = false;
   bool _wifi_ota_resume_espnow = false;
+#endif
+#if defined(WITH_UDP_BRIDGE)
+  bool _wifi_ota_resume_udp = false;
 #endif
 #if defined(ESP32_PLATFORM) || defined(USER_GPIO_CONTROL)
   UserGpio _user_gpio;
@@ -809,10 +919,7 @@ class CommonCLI {
   ClientACL* _acl;
   char tmp[COMMON_CLI_TMP_LEN];
 #if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
-  bool _sdcard_format_recorded = false;
-  bool _sdcard_erase_recorded = false;
-  uint32_t _sdcard_format_at = 0;
-  uint32_t _sdcard_erase_at = 0;
+  mesh::cli::SdCardCLIState _sdcard_cli;
 #endif
 #ifdef WITH_MQTT_BRIDGE
   MQTTPrefs _mqtt_prefs;
@@ -831,12 +938,25 @@ class CommonCLI {
   bool _common_save_succeeded = false;
   uint32_t _prefs_save_failures = 0;
   mesh::RadioProfileCLI _radio_profiles;
+#if MESH_ENABLE_TX_BEACONS
+  mesh::BeaconManager* _beacons = nullptr;
+  void beginBeacons();
+  void loopBeacons();
+  void suspendBeacons();
+  bool handleBeaconCommand(const char* command, char* reply, size_t capacity);
+#endif
+  mesh::MorseReplyHandoff _morse_reply;
+#if MESH_ENABLE_FLEET_CONTROL
+  mesh::FleetChannel* _fleet_channel = nullptr;  // allocate only when enrolled
+  bool handleFleetCommand(const char* command, char* reply);
+#endif
 
   mesh::RTCClock* getRTCClock() { return _rtc; }
   void savePrefs(
       PrefsSaveRouting::Scope scope = PrefsSaveRouting::Scope::Common);
   bool trySavePrefs(
       PrefsSaveRouting::Scope scope = PrefsSaveRouting::Scope::Common);
+  bool applyAndSaveAdcMultiplier(float multiplier, char* reply, size_t capacity);
   bool saveObserverPrefs();
   void loadPrefsInt(FILESYSTEM* _fs, const char* filename);
 #ifdef WITH_MQTT_BRIDGE
@@ -852,6 +972,15 @@ class CommonCLI {
   void handleRegionCmd(char* command, char* reply);
   void handleGetCmd(uint32_t sender_timestamp, char* command, char* reply);
   void handleSetCmd(uint32_t sender_timestamp, char* command, char* reply);
+#if defined(WITH_RS232_BRIDGE)
+  bool handleRs232DiagnosticCommand(uint32_t sender_timestamp, const char* command, char* reply);
+#endif
+#if defined(WITH_ESPNOW_BRIDGE)
+  bool handleEspNowDiagnosticCommand(uint32_t sender_timestamp, const char* command, char* reply);
+#endif
+#if defined(WITH_UDP_BRIDGE)
+  bool handleUDPBridgeCommand(uint32_t sender_timestamp, const char* command, char* reply);
+#endif
   void handleDelCmd(char* command, char* reply);
 #if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
   bool handleSdCardGetCmd(const char* config, char* reply);
@@ -887,6 +1016,11 @@ public:
                               uint16_t preamble);
   mesh::RadioProfileCLI& radioProfiles() { return _radio_profiles; }
   const mesh::RadioProfileCLI& radioProfiles() const { return _radio_profiles; }
+  mesh::MorseReplyHandoff& morseReply() { return _morse_reply; }
+  const mesh::MorseReplyHandoff& morseReply() const { return _morse_reply; }
+#if MESH_ENABLE_FLEET_CONTROL
+  mesh::FleetChannel* fleetChannel() { return _fleet_channel; }
+#endif
   static bool calculateRxPowerSavingLevel(uint32_t level, uint8_t sf, float bw, uint32_t preamble,
                                           uint32_t* rx_us, uint32_t* sleep_us);
   static bool recalculateRxPowerSavingFromLevel(NodePrefs* prefs);
@@ -903,6 +1037,14 @@ public:
       FILESYSTEM* _fs,
       PrefsSaveRouting::Scope scope = PrefsSaveRouting::Scope::Both);
   void loop();
+#if MESH_ENABLE_BATTERY_FORWARDING
+  bool batteryAllowsForward(bool flood) const;
+  bool batteryAllowsTransmit(const mesh::Packet* packet) const;
+#else
+  bool batteryAllowsForward(bool) const { return true; }
+  bool batteryAllowsTransmit(const mesh::Packet*) const { return true; }
+#endif
+  uint8_t batteryPercent(uint16_t mv) const;
   bool hasActiveUserGpioTimer() const;
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   mesh::MainBoard* getBoard() { return _board; }

@@ -17,11 +17,18 @@ class ThinkNodeM1Board : public NRF52Board {
 public:
   ThinkNodeM1Board() : NRF52Board("THINKNODE_M1_OTA") {}
   void begin();
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
 
   #if defined(P_LORA_TX_LED)
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
   }
   void onAfterTransmit() override {
     digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED off

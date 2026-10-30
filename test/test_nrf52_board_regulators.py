@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""Board startup approves DC/DC hardware and defers activation to saved policy."""
+import configparser
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+from cpp_source import body
+
+ROOT = Path(__file__).resolve().parents[1]
+
+# Each target has manufacturer/board-designer circuit evidence recorded in
+# docs/power_saving_diagnostics.md. Do not infer eligibility from inheritance.
+VERIFIED_BOARDS = (
+    ('heltec_t1/T1Board.cpp', 'T1Board', True),
+    ('heltec_mesh_solar/MeshSolarBoard.cpp', 'MeshSolarBoard', False),
+    ('heltec_tower_v2/HeltecTowerV2Board.cpp', 'HeltecTowerV2Board', True),
+    ('mesh_pocket/MeshPocket.cpp', 'HeltecMeshPocket', False),
+    ('lilygo_techo/TechoBoard.cpp', 'TechoBoard', False),
+    ('ikoka_handheld_nrf/IkokaNrf52Board.cpp', 'IkokaNrf52Board', False),
+    ('ikoka_nano_nrf/IkokaNanoNRFBoard.cpp', 'IkokaNanoNRFBoard', False),
+    ('ikoka_stick_nrf/IkokaStickNRFBoard.cpp', 'IkokaStickNRFBoard', False),
+    ('minewsemi_me25ls01/MinewsemiME25LS01Board.cpp', 'MinewsemiME25LS01Board', False),
+    ('nano_g2_ultra/nano-g2.cpp', 'NanoG2Ultra', False),
+)
+
+HARNESS = r'''
+#include <cassert>
+#include <cstdint>
+#define PIN_BOARD_SDA 1
+#define PIN_BOARD_SCL 2
+#define PIN_USER_BTN 9
+#define PIN_USER_BTN_ANA 31
+#define PIN_WIRE_SDA 1
+#define PIN_WIRE_SCL 2
+#define P_LORA_TX_LED 28
+#define BUTTON_PIN 9
+#define DISPLAY_CLASS TestDisplay
+#define DISPLAY_ROTATION 0
+constexpr int INPUT = 0, OUTPUT = 1, INPUT_PULLUP = 2, LOW = 0, HIGH = 1;
+constexpr int PIN_VBAT_READ = 5, WB_IO2 = 34, SX126X_POWER_EN = 37;
+constexpr int PIN_VBAT = 5, VBAT_ENABLE = 14, PIN_BAT_CTL = 15, LED_PIN = 28;
+constexpr int PIN_GPS_EN = 10, PIN_GPS_RESET = 11, PIN_GPS_STANDBY = 12;
+constexpr int PIN_BUTTON1 = 38, EXT_NOTIFY_OUT = 4, GPS_EN = PIN_GPS_STANDBY;
+constexpr int PIN_SENSOR_EN = 13, PIN_BUZZER = 16;
+constexpr int PIN_BUZZER_VOLTAGE_MULTIPLIER_1 = 17, PIN_BUZZER_VOLTAGE_MULTIPLIER_2 = 18;
+constexpr int LED_STATE_ON = 1, PIN_GPS_EN_ACTIVE = 1, PIN_SENSOR_EN_ACTIVE = 1;
+constexpr int GPS_RESET_MODE = 0;
+constexpr int NRF_POWER_DCDC_ENABLE = 1, NRF_POWER_DCDC_DISABLE = 0;
+static unsigned base_calls, sdk_calls, voltage_checks;
+static uint8_t softdevice;
+struct Power { unsigned DCDCEN; } power;
+#define NRF_POWER (&power)
+namespace mesh_nrf52 {
+void softdeviceIsEnabled(uint8_t& enabled) { enabled = softdevice; }
+}
+void sd_power_dcdc_mode_set(int mode) {
+  assert(base_calls == 1 && softdevice && mode == NRF_POWER_DCDC_ENABLE);
+  ++sdk_calls;
+}
+void requireDeferredDcdc() {
+  assert(base_calls == 1);
+  assert(sdk_calls == 0 && power.DCDCEN == 0);
+}
+void pinMode(int, int) { requireDeferredDcdc(); }
+void digitalWrite(int, int) { requireDeferredDcdc(); }
+void delay(unsigned) {}
+void meshSolarStart() { requireDeferredDcdc(); }
+struct Bus {
+  void setPins(int, int) { requireDeferredDcdc(); }
+  void begin() { requireDeferredDcdc(); }
+} Wire;
+struct Uart { void begin(unsigned) { requireDeferredDcdc(); } } Serial;
+struct Peripheral {
+  void begin() { requireDeferredDcdc(); }
+  void init() { requireDeferredDcdc(); }
+};
+struct Config {} power_config;
+struct NRF52Board {
+  bool cpu_dcdc_supported = false;
+  void begin() { ++base_calls; }
+};
+struct NRF52BoardDCDC : NRF52Board { void begin(); };
+struct @BOARD@ : NRF52BoardDCDC {
+  Peripheral periph_power, loRaFEMControl;
+  unsigned btn_prev_state = 0;
+  void begin();
+  void checkBootVoltage(const Config*) {
+    ++voltage_checks;
+    requireDeferredDcdc();
+  }
+};
+@METHODS@
+int main() {
+  for (softdevice = 0; softdevice < 2; ++softdevice) {
+    power.DCDCEN = base_calls = sdk_calls = voltage_checks = 0;
+    @BOARD@ board;
+    board.begin();
+    assert(base_calls == 1 && voltage_checks == @VOLTAGE_CHECKS@);
+    assert(board.cpu_dcdc_supported);
+    assert(sdk_calls == 0 && power.DCDCEN == 0);
+  }
+}
+'''
+
+
+class Nrf52BoardRegulatorTests(unittest.TestCase):
+    def run_startup(self, filename, board, flags=(), power_management=True,
+                    has_voltage_check=True):
+        methods = body((ROOT / 'src/helpers/NRF52Board.cpp').read_text(),
+                       'void NRF52BoardDCDC::begin()')
+        methods += body((ROOT / filename).read_text(), f'void {board}::begin()')
+        source = HARNESS.replace('@BOARD@', board).replace('@METHODS@', methods)
+        source = source.replace('@VOLTAGE_CHECKS@', str(int(power_management and has_voltage_check)))
+        if power_management:
+            flags = (*flags, '-DNRF52_POWER_MANAGEMENT=1')
+        with tempfile.TemporaryDirectory(prefix='meshcore-board-regulator-') as tmp:
+            cpp, binary = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
+            cpp.write_text(source, encoding='ascii')
+            built = subprocess.run([
+                os.environ.get('CXX', 'c++'), '-std=c++17', '-Wall', '-Wextra',
+                '-Werror', *flags, str(cpp), '-o', str(binary)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_rak4631_defers_dcdc_until_saved_policy_is_loaded(self):
+        # Board startup must not force either saved mode before policy loads,
+        # regardless of SoftDevice state or obsolete downstream flags.
+        for flags in ((), ('-DRAK4631_COMPANION_FORCE_LDO=1',)):
+            with self.subTest(flags=flags):
+                self.run_startup('variants/rak4631/RAK4631Board.cpp', 'RAK4631Board', flags)
+
+    def test_verified_boards_defer_dcdc_until_peripherals_and_policy_are_ready(self):
+        for filename, board, has_voltage_check in VERIFIED_BOARDS:
+            for power_management in (False, True):
+                with self.subTest(board=board, power_management=power_management):
+                    self.run_startup('variants/' + filename, board,
+                                     power_management=power_management,
+                                     has_voltage_check=has_voltage_check)
+
+    def test_rak_companion_profiles_do_not_force_ldo(self):
+        config = configparser.ConfigParser(interpolation=None)
+        config.read(ROOT / 'variants/rak4631/platformio.ini')
+        for role in ('usb', 'ble', 'ethernet', 'full'):
+            with self.subTest(role=role):
+                section = config[f'env:RAK_4631_companion_radio_{role}']
+                self.assertNotIn('RAK4631_COMPANION_FORCE_LDO', section['build_flags'])
+        self.assertEqual(config['env:RAK_4631_companion_radio_full']['extends'],
+                         'env:RAK_4631_companion_radio_usb')
+
+    def test_nano_header_approves_dcdc_and_preserves_virtual_base_identity(self):
+        # The extracted startup harness supplies its own board declaration.
+        # Compile the real Nano declaration too: approving the initializer
+        # without inheriting the DC/DC board must not silently pass coverage.
+        with tempfile.TemporaryDirectory(prefix='meshcore-nano-regulator-') as tmp:
+            folder = Path(tmp)
+            (folder / 'helpers').mkdir()
+            (folder / 'WVariant.h').write_text('#include <cstdint>\n', encoding='ascii')
+            (folder / 'Arduino.h').write_text(r'''
+#pragma once
+#include <cstdint>
+constexpr int LOW = 0, NRF_GPIO_PIN_NOPULL = 0, NRF_GPIO_PIN_SENSE_LOW = 0;
+inline void digitalWrite(int, int) {}
+inline int digitalPinToInterrupt(int pin) { return pin; }
+inline void nrf_gpio_cfg_sense_input(int, int, int) {}
+''', encoding='ascii')
+            (folder / 'MeshCore.h').write_text('', encoding='ascii')
+            (folder / 'helpers/NRF52Board.h').write_text(r'''
+#pragma once
+#include <cstdint>
+class NRF52Board {
+public:
+  const char* ota_name;
+  explicit NRF52Board(const char* name) : ota_name(name) {}
+  virtual void begin() {}
+  virtual uint16_t getBattMilliVolts() = 0;
+  virtual bool supportsBatteryCalibration() const { return false; }
+  virtual const char* getManufacturerName() const = 0;
+  virtual void shutdownPeripherals() {}
+};
+// Match the production virtual base and lack of a default NRF52Board ctor.
+class NRF52BoardDCDC : virtual public NRF52Board {
+public:
+  NRF52BoardDCDC() {}
+  void begin() override {}
+};
+''', encoding='ascii')
+            cpp, binary = folder / 'test.cpp', folder / 'test'
+            cpp.write_text(r'''
+#include "nano-g2.h"
+#include <cassert>
+#include <cstring>
+#include <type_traits>
+static_assert(std::is_base_of<NRF52BoardDCDC, NanoG2Ultra>::value,
+              "Nano must expose the circuit-approved regulator modes");
+void NanoG2Ultra::begin() {}
+uint16_t NanoG2Ultra::getBattMilliVolts() { return 0; }
+int main() {
+  NanoG2Ultra board;
+  assert(std::strcmp(board.ota_name, "NANO_G2_OTA") == 0);
+  assert(std::strcmp(board.getManufacturerName(), "Nano G2 Ultra") == 0);
+  assert(static_cast<NRF52Board*>(&board) ==
+         static_cast<NRF52Board*>(static_cast<NRF52BoardDCDC*>(&board)));
+}
+''', encoding='ascii')
+            built = subprocess.run([
+                os.environ.get('CXX', 'c++'), '-std=c++17', '-I', tmp,
+                '-I', str(ROOT / 'variants/nano_g2_ultra'), str(cpp), '-o', str(binary)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+if __name__ == '__main__':
+    unittest.main()

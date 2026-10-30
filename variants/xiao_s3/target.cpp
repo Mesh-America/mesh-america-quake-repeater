@@ -1,13 +1,16 @@
 #include <Arduino.h>
 #include "target.h"
+#include <helpers/radiolib/SX126xBufferedRadioHal.h>
 
 XiaoS3Board board;
 
 #if defined(P_LORA_SCLK)
   static SPIClass spi;
-  RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi);
+  static SX126xBufferedRadioHal radio_hal(spi);
+  RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #else
-  RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+  static SX126xBufferedRadioHal radio_hal(SPI, MC_SX1262_SPI_HZ, true);
+  RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #endif
 
 WRAPPER_CLASS radio_driver(radio, board);
@@ -24,7 +27,8 @@ EnvironmentSensorManager sensors;
 bool radio_init() {
   fallback_clock.begin();
   rtc_clock.begin(Wire);
-  pinMode(21, INPUT);
+  digitalWrite(PIN_STATUS_LED, !LED_STATE_ON);
+  pinMode(PIN_STATUS_LED, OUTPUT);
   pinMode(48, OUTPUT);
 
   #if defined(P_LORA_SCLK)

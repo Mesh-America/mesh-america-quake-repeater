@@ -23,6 +23,7 @@ HARNESS = r'''
 #include <cstring>
 #include <initializer_list>
 #include "examples/simple_repeater/RateLimiter.h"
+#include "src/RadioProfiles.h"
 @CONSTANTS@
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 static uint32_t now_ms = 100;
@@ -47,10 +48,24 @@ struct Identity {
 struct Packet {
   uint8_t payload[64] = {};
   uint8_t payload_len = 0;
+  uint8_t tx_radio = RADIO_TX_AUTO;
+  uint8_t radio_profile = 1;
+  bool radio_reply = true, radio_bound = false, radio_reply_force = false, radio_local = true;
   int8_t _snr = -20;
+  uint8_t getPayloadType() const { return PAYLOAD_TYPE_CONTROL; }
   float getSNR() const { return _snr / 4.0f; }
   int getRSSI() const { return -90; }
 };
+struct Radio {
+  mesh::RadioProfiles state;
+  bool available = true;
+  const mesh::RadioProfiles* profiles() const { return available ? &state : nullptr; }
+};
+struct Dispatcher {
+  const Radio* _radio;
+  uint8_t getTransmitProfileMask(const Packet* packet) const;
+};
+@DISPATCHER@
 }
 struct MyMesh {
   struct {
@@ -63,6 +78,8 @@ struct MyMesh {
     uint32_t getCurrentTime() const { return now; }
   } rtc_clock;
   RateLimiter @LIMITER@;
+  mesh::Radio radio;
+  mesh::Radio* _radio = &radio;
   mesh::Identity self_id, neighbour;
   mesh::Packet response;
   uint32_t pending_discover_tag = 0, pending_discover_until = 1000;
@@ -90,6 +107,10 @@ struct MyMesh {
   }
   void sendZeroHop(mesh::Packet* packet, uint32_t delay) {
     require(packet == &response, "radio sent the wrong reply packet");
+    require(packet->tx_radio == mesh::RADIO_TX_PRIMARY,
+            "discovery response was not restricted to the main radio");
+    require(mesh::Dispatcher{_radio}.getTransmitProfileMask(packet) == 1,
+            "dispatcher would send discovery response on radio2 or both profiles");
     ++sent_packets;
     sent_delay = delay;
   }
@@ -103,9 +124,10 @@ struct MyMesh {
 };
 @HANDLER@
 static mesh::Packet request(bool prefix = false, uint32_t since = 0,
-                            bool include_since = false) {
+                            bool include_since = false, bool include_radio2 = false) {
   mesh::Packet packet;
-  packet.payload[0] = CTL_TYPE_NODE_DISCOVER_REQ | (prefix ? 1 : 0);
+  packet.payload[0] = CTL_TYPE_NODE_DISCOVER_REQ | (prefix ? 1 : 0)
+      | (include_radio2 ? 2 : 0);
   packet.payload[1] = 1 << ADV_TYPE_REPEATER;
   const uint32_t tag = 0x78563412;
   std::memcpy(packet.payload + 2, &tag, sizeof(tag));
@@ -118,13 +140,14 @@ static void policy() {
     for (uint16_t flood : {uint16_t(0), uint16_t(30)}) {
       for (bool repeat_off : {false, true}) {
         for (bool prefix : {false, true}) {
+         for (bool include_radio2 : {false, true}) {
           MyMesh receiver;
           receiver._prefs.advert_interval = local;
           receiver._prefs.flood_advert_interval = flood;
           receiver._prefs.disable_fwd = repeat_off;
           const bool hidden = local == 0 && flood == 0;
           require(receiver.isHiddenNode() == hidden, "hidden predicate misread advert intervals");
-          auto packet = request(prefix);
+          auto packet = request(prefix, 0, false, include_radio2);
           receiver.onControlDataRecv(&packet);
           if (hidden) {
             require(receiver.create_attempts == 0 && receiver.sent_packets == 0,
@@ -133,36 +156,41 @@ static void policy() {
             require(receiver.create_attempts == 1 && receiver.sent_packets == 1,
                     "visible node or repeat-off observer lost discovery");
           }
+         }
         }
       }
     }
   }
 }
 static void gates() {
+ for (unsigned flags = 0; flags < 4; ++flags) {
   for (size_t length = 0; length < 6; ++length) {
     MyMesh receiver;
-    auto packet = request();
+    auto packet = request(flags & 1, 0, false, flags & 2);
     packet.payload_len = length;
     receiver.onControlDataRecv(&packet);
     require(receiver.create_attempts == 0, "truncated request produced a reply");
   }
   for (uint8_t filter : {uint8_t(0), uint8_t(1 << 3)}) {
     MyMesh receiver;
-    auto packet = request();
+    auto packet = request(flags & 1, 0, false, flags & 2);
     packet.payload[1] = filter;
     receiver.onControlDataRecv(&packet);
     require(receiver.create_attempts == 0, "unrelated node filter produced a reply");
   }
   for (uint32_t since : {499U, 500U, 501U}) {
     MyMesh receiver;
-    auto packet = request(false, since, true);
+    auto packet = request(flags & 1, since, true, flags & 2);
     receiver.onControlDataRecv(&packet);
     require(receiver.sent_packets == (since <= 500 ? 1U : 0U),
             "discovery timestamp boundary changed");
   }
+ }
   MyMesh limited;
   auto packet = request();
   for (unsigned count = 1; count <= 5; ++count) {
+    // The optional trailer and key-prefix flags share one limiter.
+    packet.payload[0] = CTL_TYPE_NODE_DISCOVER_REQ | ((count - 1) & 3);
     limited.onControlDataRecv(&packet);
     require(limited.sent_packets == (count <= 4 ? count : 4),
             "discovery rate limit changed");
@@ -204,6 +232,106 @@ static void wire() {
   require(exhausted.create_attempts == 1 && exhausted.sent_packets == 0,
           "allocation failure attempted to transmit a reply");
 }
+static uint32_t little_endian(const uint8_t* bytes) {
+  return uint32_t(bytes[0]) | (uint32_t(bytes[1]) << 8)
+      | (uint32_t(bytes[2]) << 16) | (uint32_t(bytes[3]) << 24);
+}
+static void radio2_wire() {
+  for (bool prefix : {false, true}) {
+    for (bool temporary : {false, true}) {
+      for (auto mode : {mesh::RadioProfileMode::Rx, mesh::RadioProfileMode::RxTx}) {
+        for (float bandwidth : {62.5f, 125.0f, 250.0f}) {
+          MyMesh receiver;
+          auto& profiles = receiver.radio.state;
+          profiles.secondary.mode = mode;
+          // Strict decimal CLI parsing may land one float ULP below the
+          // literal. Both values must round back to the requested 911150 kHz.
+          profiles.secondary.params.freq = temporary ? nextafterf(911.150f, 0.0f) : 911.150f;
+          profiles.secondary.params.bw = bandwidth;
+          profiles.secondary.params.sf = 7;
+          profiles.secondary.params.cr = 5;
+          profiles.secondary_temporary = temporary;
+          // Ordinary discovery must remain byte-for-byte compatible, even
+          // while a temporary radio2 profile and cross-radio replies are active.
+          profiles.cross = mesh::RadioCrossMode::On;
+          profiles.reply_tx = mesh::RADIO_TX_BOTH;
+          profiles.reply_force = true;
+          auto original = request(prefix);
+          receiver.onControlDataRecv(&original);
+          const size_t offset = 6 + (prefix ? 8 : PUB_KEY_SIZE);
+          require(receiver.response.payload_len == offset,
+                  "unsolicited radio2 trailer changed ordinary discovery");
+          uint8_t baseline[6 + PUB_KEY_SIZE];
+          std::memcpy(baseline, receiver.response.payload, offset);
+          auto opted_in = request(prefix, 0, false, true);
+          receiver.onControlDataRecv(&opted_in);
+          require(receiver.response.payload_len == offset + 12,
+                  "active MeshCore radio2 reply has the wrong trailer length");
+          require(std::memcmp(baseline, receiver.response.payload, offset) == 0,
+                  "radio2 trailer changed the existing discovery fields");
+          const uint8_t* trailer = receiver.response.payload + offset;
+          const uint8_t flags = mode == mesh::RadioProfileMode::Rx ? 3 : 5;
+          require(trailer[0] == 1 && trailer[1] == (flags | (temporary ? 8 : 0)),
+                  "radio2 version, configured/mode or temporary flags changed");
+          require(little_endian(trailer + 2) == 911150,
+                  "radio2 frequency was truncated or encoded in the wrong units/order");
+          require(little_endian(trailer + 6) == uint32_t(bandwidth * 1000),
+                  "radio2 bandwidth lost fractional kHz or used the wrong units/order");
+          require(trailer[10] == 7 && trailer[11] == 5,
+                  "radio2 spreading factor or coding rate changed");
+          require(receiver.sent_packets == 2 && receiver.sent_delay == 28,
+                  "extended discovery changed zero-hop reply count or random delay");
+          // The unchanged full-key parser accepts optional trailing bytes.
+          MyMesh peer;
+          peer.pending_discover_tag = 0x78563412;
+          receiver.response.payload[6] ^= 1; // A different repeater identity.
+          peer.onControlDataRecv(&receiver.response);
+          require(peer.neighbours == (prefix ? 0U : 1U),
+                  "optional trailer broke full-key discovery parsing");
+        }
+      }
+    }
+  }
+}
+static void radio2_disabled() {
+  for (bool prefix : {false, true}) {
+    for (int inactive_reason : {0, 1, 2, 3, 4}) {
+      MyMesh receiver;
+      auto& profiles = receiver.radio.state;
+      profiles.secondary.params.freq = 911.150f;
+      profiles.secondary.params.bw = 250;
+      profiles.secondary.params.sf = 7;
+      profiles.secondary.params.cr = 5;
+      profiles.secondary_temporary = true;
+      if (inactive_reason == 0) receiver.radio.available = false;
+      if (inactive_reason >= 2) {
+        profiles.secondary.mode = mesh::RadioProfileMode::RxTx;
+        profiles.secondary.params.protocol = inactive_reason == 2
+            ? mesh::RadioProfileProtocol::Meshtext : mesh::RadioProfileProtocol::Ethernet;
+      }
+      if (inactive_reason == 4) {
+        profiles.secondary.mode = static_cast<mesh::RadioProfileMode>(3);
+        profiles.secondary.params.protocol = mesh::RadioProfileProtocol::MeshCore;
+      }
+      auto packet = request(prefix, 0, false, true);
+      receiver.onControlDataRecv(&packet);
+      const size_t offset = 6 + (prefix ? 8 : PUB_KEY_SIZE);
+      require(receiver.response.payload_len == offset + 2,
+              "unavailable/off/foreign radio2 advertised usable MeshCore settings");
+      require(receiver.response.payload[offset] == 1 && receiver.response.payload[offset + 1] == 0,
+              "disabled radio2 did not use the two-byte version/off trailer");
+      require(std::memcmp(receiver.response.payload + 6, receiver.self_id.pub_key,
+                          prefix ? 8 : PUB_KEY_SIZE) == 0,
+              "disabled radio2 trailer overwrote the public key or prefix");
+    }
+    MyMesh exhausted;
+    exhausted.fail_allocation = true;
+    auto packet = request(prefix, 0, false, true);
+    exhausted.onControlDataRecv(&packet);
+    require(exhausted.create_attempts == 1 && exhausted.sent_packets == 0,
+            "extended discovery allocation failure attempted transmission");
+  }
+}
 static void received() {
   MyMesh receiver;
   receiver._prefs.advert_interval = 0;
@@ -241,6 +369,8 @@ int main(int argc, char** argv) {
   if (std::strcmp(argv[1], "policy") == 0) policy();
   else if (std::strcmp(argv[1], "gates") == 0) gates();
   else if (std::strcmp(argv[1], "wire") == 0) wire();
+  else if (std::strcmp(argv[1], "radio2_wire") == 0) radio2_wire();
+  else if (std::strcmp(argv[1], "radio2_disabled") == 0) radio2_disabled();
   else if (std::strcmp(argv[1], "received") == 0) received();
   else return 2;
 }
@@ -256,6 +386,8 @@ class RepeaterDiscoveryTests(unittest.TestCase):
         source = (ROOT / "examples/simple_repeater/MyMesh.cpp").read_text()
         header = (ROOT / "examples/simple_repeater/MyMesh.h").read_text()
         handler = extract_braced(source, "void MyMesh::onControlDataRecv(")
+        dispatcher = extract_braced((ROOT / "src/Dispatcher.cpp").read_text(),
+                                    "uint8_t Dispatcher::getTransmitProfileMask(")
         hidden = extract_braced(header, "bool isHiddenNode() const")
         constants = []
         for text, name in (
@@ -263,6 +395,8 @@ class RepeaterDiscoveryTests(unittest.TestCase):
             (source, "CTL_TYPE_NODE_DISCOVER_RESP"),
             ((ROOT / "src/helpers/AdvertDataHelpers.h").read_text(), "ADV_TYPE_REPEATER"),
             ((ROOT / "src/MeshCore.h").read_text(), "PUB_KEY_SIZE"),
+            ((ROOT / "src/Packet.h").read_text(), "PAYLOAD_TYPE_CONTROL"),
+            ((ROOT / "src/Packet.h").read_text(), "PAYLOAD_TYPE_OTA"),
         ):
             constants.append(re.search(rf"^#define {name}\s+[^\n]+", text, re.M).group())
         limiter = re.search(r"discover_limiter\(\d+,\s*\d+\)", source).group()
@@ -277,6 +411,7 @@ class RepeaterDiscoveryTests(unittest.TestCase):
             code = (HARNESS.replace("@CONSTANTS@", "\n".join(constants))
                     .replace("@LIMITER@", limiter)
                     .replace("@HIDDEN@", hidden)
+                    .replace("@DISPATCHER@", dispatcher)
                     .replace("@HANDLER@", body))
             work = Path(cls.temporary.name)
             cpp, binary = work / f"{name}.cpp", work / name
@@ -309,6 +444,14 @@ class RepeaterDiscoveryTests(unittest.TestCase):
 
     def test_hidden_nodes_still_process_matching_discovery_responses(self):
         checked = self.run_case("received")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_requested_active_radio2_trailer_bytes_and_legacy_parser(self):
+        checked = self.run_case("radio2_wire")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_unavailable_disabled_and_foreign_profiles_have_only_off_marker(self):
+        checked = self.run_case("radio2_disabled")
         self.assertEqual(checked.returncode, 0, checked.stderr)
 
     def test_removed_hidden_protection_fails_the_same_policy_contract(self):

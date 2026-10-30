@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import unittest
 
+from test_replay_reset_integration import extract_braced
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -220,7 +222,7 @@ class RegularFileReadTest(unittest.TestCase):
                               "static File openFloodSettingsWrite(")
         verification = section("examples/simple_repeater/MyMesh.cpp",
                                "static uint32_t updateFloodSettingsHash(",
-                               "static uint8_t batteryPercentFromMilliVolts(")
+                               "static bool parseBatteryAlertPercent(")
         program = program.replace("@FLOOD_VERIFY@", read_helper + verification)
         for platform in ("ESP32_PLATFORM", "NRF52_PLATFORM", "RP2040_PLATFORM", "STM32_PLATFORM"):
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp:
@@ -249,9 +251,11 @@ class RegularFileReadTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn("mesh::openFileRead(", section(path, marker, end))
         for role in ("simple_repeater", "simple_room_server"):
-            dump = section(f"examples/{role}/MyMesh.cpp", "void MyMesh::dumpLogFile()",
-                           "bool MyMesh::hasPendingSerialOutput()")
-            self.assertEqual(dump.count("mesh::openFileRead(_fs, PACKET_LOG_FILE)"), 2)
+            source = (ROOT / f"examples/{role}/MyMesh.cpp").read_text(encoding="utf-8")
+            dump = extract_braced(source, "void MyMesh::dumpLogFile()")
+            # Command-output, cooperative USB and immediate USB destinations
+            # must all reject phantom directories through the guarded reader.
+            self.assertEqual(dump.count("mesh::openFileRead(_fs, PACKET_LOG_FILE)"), 3)
             self.assertNotIn("_fs->open(", dump)
 
 

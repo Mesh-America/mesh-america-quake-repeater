@@ -1,6 +1,8 @@
 #pragma once
 
 #include <RadioLib.h>
+#include <math.h>
+#include "SX126xMorseRssi.h"
 
 #ifndef SX126X_TX_BUSY_TIMEOUT_MS
 #define SX126X_TX_BUSY_TIMEOUT_MS 1000UL
@@ -14,6 +16,23 @@ class CustomLLCC68 : public LLCC68 {
 
   public:
     CustomLLCC68(Module *mod) : LLCC68(mod) { }
+    int16_t setProfileProtocol(uint8_t syncWord) {
+      // Retain RadioLib's ordinary setters: this wrapper does not own the
+      // CustomSX1262 fast RX packet cache, despite sharing its chip family.
+      int16_t status = LLCC68::setSyncWord(syncWord);
+      if (status == RADIOLIB_ERR_NONE) status = LLCC68::setCRC(1);
+      if (status == RADIOLIB_ERR_NONE) status = LLCC68::explicitHeader();
+      if (status == RADIOLIB_ERR_NONE) status = LLCC68::invertIQ(false);
+      return status;
+    }
+    int16_t setMorseFastRssi() {
+      return setSX126xMorseRssiWindow(this);
+    }
+    float getMorseRssi() {
+      uint8_t raw = 0;
+      const int16_t status = this->getMod()->SPIreadStream(RADIOLIB_SX126X_CMD_GET_RSSI_INST, &raw, 1);
+      return status == RADIOLIB_ERR_NONE ? raw * -0.5f : NAN;
+    }
 
   #ifdef RP2040_PLATFORM
     bool std_init(SPIClassRP2040* spi = NULL)
@@ -105,10 +124,15 @@ class CustomLLCC68 : public LLCC68 {
     }
 
     int16_t startReceive() override {
-      return LLCC68::startReceive(
+      const int16_t status = LLCC68::startReceive(
           RADIOLIB_SX126X_RX_TIMEOUT_INF,
           RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
           RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+      if (status == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
+      return status;
     }
 
     bool isReceiving() {

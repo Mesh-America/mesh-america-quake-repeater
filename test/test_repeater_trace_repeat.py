@@ -81,7 +81,7 @@ int main() {
       if (fault == 2) cli.fs.fail_read_open = true;
       if (fault == 3) cli.fs.fail_rename = 1;
       cli.set(desired ? "repeat.trace on" : "repeat.trace off", reply);
-      assert(!strcmp(reply, "Error: Repeat trace not saved; unchanged"));
+      assert(!strcmp(reply, "Error: save unconfirmed; reboot may differ"));
       assert(cli.prefs.trace_when_repeat_off == uint8_t(!desired));
       assert(cli.fs.files["/com_prefs"] == committed);
       assert(cli.callbacks.retry_updates == callbacks_before);
@@ -216,7 +216,7 @@ def production_harness(source, header):
         'SERIALIZER': 'template<typename Writer>\n' + extract_braced(
             source, 'static bool writeCommonPrefsImage('),
         'STORE': extract_braced(source, 'class CommonPrefsFileStore'),
-        'METHODS': methods,
+        'METHODS': ("\n#include <stddef.h>\ntemplate<typename Writer>\n" + extract_braced(source, "static void writeCommonRetryPrefs(") + "\n" + methods),
         'DYNAMIC': extract_braced(header, 'class RepeatPrefs :'),
         'SET_DEBUG': extract_braced(setter, branch), 'SET_MASTER': '',
         'GET_DEBUG': extract_braced(getter, branch), 'GET_MASTER': '',

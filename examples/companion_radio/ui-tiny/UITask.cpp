@@ -3,6 +3,7 @@
   #include <helpers/ui/SmallMessageText.h>
 #endif
 #include <helpers/TxtDataHelpers.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <helpers/ui/BluetoothPairingUiPolicy.h>
 #include <helpers/ui/RadioProfileDisplayPage.h>
 #include <helpers/ui/RadioProfileSystemStatus.h>
@@ -167,13 +168,21 @@ class HomeScreen : public UIScreen {
   int sensors_nb = 0;
   bool sensors_scroll = false;
   int sensors_scroll_offset = 0;
-  int next_sensors_refresh = 0;
+  uint32_t last_sensors_refresh = 0;
   uint32_t _radio_profile_page_started_at = 0;
   uint8_t _radio_status_page = 0;
   bool _dual_radio_enabled_seen = false;
 
   void refresh_sensors() {
-    if (millis() > next_sensors_refresh) {
+#if AUTO_OFF_MILLIS > 0
+    const uint32_t refresh_interval = 5000;
+#else
+    const uint32_t refresh_interval = 60000;
+#endif
+    // Empty data requests an initial/forced sample. Elapsed time also handles
+    // returning to this page after more than half a millis() cycle.
+    if (sensors_lpp.getSize() == 0
+        || static_cast<uint32_t>(millis() - last_sensors_refresh) >= refresh_interval) {
       sensors_lpp.reset();
       sensors_nb = 0;
       sensors_lpp.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
@@ -185,11 +194,7 @@ class HomeScreen : public UIScreen {
         sensors_nb ++;
       }
       sensors_scroll = sensors_nb > UI_RECENT_LIST_SIZE;
-#if AUTO_OFF_MILLIS > 0
-      next_sensors_refresh = millis() + 5000; // refresh sensor values every 5 sec
-#else
-      next_sensors_refresh = millis() + 60000; // refresh sensor values every 1 min
-#endif
+      last_sensors_refresh = millis();
     }
   }
 
@@ -574,7 +579,7 @@ public:
 #if UI_SENSORS_PAGE == 1
     if (c == KEY_ENTER && _page == HomePage::SENSORS) {
       _task->toggleGPS();
-      next_sensors_refresh=0;
+      sensors_lpp.reset();
       return true;
     }
 #endif
@@ -661,9 +666,13 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
 
 #if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   vibration.begin();
+  vibration.quiet(_node_prefs->vibe_quiet);
 #endif
 
   ui_started_at = millis();
+  _startup_complete = false;
+  next_batt_chck = _next_refresh = ui_started_at;
+  _alert[0] = 0;
   _alert_expiry = 0;
 
   splash = new SplashScreen(this);
@@ -700,7 +709,7 @@ if (_notification_outputs & mesh::notify::Sound) switch(t){
 }
 #endif
 
-#ifdef PIN_VIBRATION
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   // Trigger vibration for all UI events except none
   if ((_notification_outputs & mesh::notify::Vibration) && t != UIEventType::none) {
     vibration.trigger();
@@ -738,27 +747,29 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text,
     if (shouldWakeDisplayForMessage()) {
       _display->wake(mesh::ui::DisplayWake::Message);
     }
-    if (_display->isOn()) _next_refresh = 0;
+    if (_display->isOn()) _next_refresh = millis();
   }
 }
 
 void UITask::userLedHandler() {
+  if (!mesh::leds::enabled()) return;
   if (_notification_led_owned || !(_notification_outputs & mesh::notify::Led)) return;
 #ifdef PIN_STATUS_LED
-  int cur_time = millis();
-  if (cur_time > next_led_change) {
+  const uint32_t cur_time = millis();
+  // Phase age also survives long notification-owned or disabled intervals.
+  if (static_cast<uint32_t>(cur_time - last_led_change) > led_phase_millis) {
     if (led_state == 0) {
       led_state = 1;
       if (_msgcount > 0) {
-        last_led_increment = LED_ON_MSG_MILLIS;
+        led_phase_millis = LED_ON_MSG_MILLIS;
       } else {
-        last_led_increment = LED_ON_MILLIS;
+        led_phase_millis = LED_ON_MILLIS;
       }
-      next_led_change = cur_time + last_led_increment;
     } else {
       led_state = 0;
-      next_led_change = cur_time + LED_CYCLE_MILLIS - last_led_increment;
+      led_phase_millis = LED_CYCLE_MILLIS - led_phase_millis;
     }
+    last_led_change = cur_time;
     digitalWrite(PIN_STATUS_LED, led_state == LED_STATE_ON);
   }
 #endif
@@ -766,7 +777,7 @@ void UITask::userLedHandler() {
 
 void UITask::setCurrScreen(UIScreen* c) {
   curr = c;
-  _next_refresh = 100;
+  _next_refresh = millis();
 }
 
 bool UITask::isPairingScreenActive() const {
@@ -785,13 +796,13 @@ void UITask::showPairingPin() {
   setCurrScreen(home);
   if (_display != NULL) {
     _display->servicePower(_board->isExternalPowered() || _board->isUsbHostConnected(), hasConnection(), true);
-    _next_refresh = 0;
+    _next_refresh = millis();
   }
 }
 
 void UITask::finishPairingScreen(bool timed_out) {
   _pairing_screen_until = 0;
-  _next_refresh = 0;
+  _next_refresh = millis();
 #if UI_SMALL_MESSAGE_FONT == 1
   if (_deferred_msg_preview) {
     _deferred_msg_preview = false;
@@ -819,7 +830,7 @@ void UITask::servicePairingState() {
   }
   if (_display != NULL && _display->servicePower(
       _board->isExternalPowered() || _board->isUsbHostConnected(),
-      hasConnection(), isPairingScreenActive())) _next_refresh = 0;
+      hasConnection(), isPairingScreenActive())) _next_refresh = millis();
 }
 
 /*
@@ -857,8 +868,45 @@ bool UITask::isButtonPressed() const {
 #endif
 }
 
+void UITask::syncAlertPreferences() {
+  if (!_node_prefs) return;
+#ifdef PIN_BUZZER
+  if (buzzer.isQuiet() != bool(_node_prefs->buzzer_quiet))
+    buzzer.quiet(_node_prefs->buzzer_quiet);
+#endif
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
+  if (vibration.isQuiet() != bool(_node_prefs->vibe_quiet))
+    vibration.quiet(_node_prefs->vibe_quiet);
+#endif
+}
+
 void UITask::loop() {
+  syncAlertPreferences();
+  // Observe startup expiry even while display/Morse/input defers rendering.
+  if (!_startup_complete && static_cast<uint32_t>(millis() - ui_started_at) >= 8000u) {
+    _startup_complete = true;
+  }
+  const bool morse_timing = mesh::morseTimingActive(&radio_driver);
   servicePairingState();
+
+  // Keep already-due work due across long display-off/Morse intervals,
+  // without moving a future refresh or triggering any display/ADC work.
+  const uint32_t refresh_now = millis();
+  if (static_cast<int32_t>(refresh_now - _next_refresh) >= 0) {
+    _next_refresh = refresh_now;
+  }
+#ifndef AUTO_SHUTDOWN_MILLIVOLTS
+  if (static_cast<int32_t>(refresh_now - next_batt_chck) >= 0) {
+    next_batt_chck = refresh_now;
+  }
+#endif
+
+  // Retire the popup even while sleep, Morse or input prevents drawing.
+  // Its deadline may be zero after wrapping; empty text means inactive.
+  if (_alert[0] && static_cast<int32_t>(millis() - _alert_expiry) >= 0) {
+    _alert[0] = 0;
+    _next_refresh = millis();
+  }
 
   char c = 0;
 #if UI_HAS_JOYSTICK
@@ -912,13 +960,17 @@ void UITask::loop() {
   }
 #endif
 #if defined(BACKLIGHT_BTN)
-  if (millis() > next_backlight_btn_check) {
-    static bool was_pressed = false;
+  // First-poll state must not collide with a completed poll at timestamp zero.
+  enum class BacklightButtonState : uint8_t { Unseen, Released, Pressed };
+  static BacklightButtonState button_state = BacklightButtonState::Unseen;
+  const uint32_t backlight_now = millis();
+  if (button_state == BacklightButtonState::Unseen ? backlight_now > 0
+      : static_cast<uint32_t>(backlight_now - last_backlight_btn_check) > 300) {
     const bool pressed = digitalRead(PIN_BUTTON2) == LOW;
-    if (pressed && !was_pressed && _display != NULL)
+    if (pressed && button_state != BacklightButtonState::Pressed && _display != NULL)
       _display->wake(mesh::ui::DisplayWake::Button);
-    was_pressed = pressed;
-    next_backlight_btn_check = millis() + 300;
+    button_state = pressed ? BacklightButtonState::Pressed : BacklightButtonState::Released;
+    last_backlight_btn_check = millis();
   }
 #endif
 #if defined(HAS_TORCH)
@@ -940,7 +992,7 @@ void UITask::loop() {
   if (c != 0 && curr) {
     _display->wake(mesh::ui::DisplayWake::Button);
     curr->handleInput(c);
-    _next_refresh = 100;  // trigger refresh
+    _next_refresh = millis();  // trigger refresh
   }
 
   userLedHandler();
@@ -949,9 +1001,9 @@ void UITask::loop() {
   if (buzzer.isPlaying())  buzzer.loop();
 #endif
 
-  if (curr) curr->poll();
+  if (!morse_timing && curr) curr->poll();
 
-  if (_display != NULL && _display->isOn()) {
+  if (!morse_timing && _display != NULL && _display->isOn()) {
         _statusBar.update(*_display,
         _node_prefs->node_name,
         _cached_batt_mv,
@@ -960,7 +1012,7 @@ void UITask::loop() {
         isBluetoothEnabled());
 
     bool status_dirty = _statusBar.needsRedraw();
-    bool content_dirty = (millis() >= _next_refresh && curr);
+    bool content_dirty = (static_cast<int32_t>(millis() - _next_refresh) >= 0 && curr);
 
     if (status_dirty || content_dirty) {
       _display->startFrame();
@@ -973,7 +1025,7 @@ void UITask::loop() {
         }
       }
 
-      if (!isPairingScreenActive() && millis() < _alert_expiry) {  // render alert popup
+      if (!isPairingScreenActive() && _alert[0] && static_cast<int32_t>(millis() - _alert_expiry) < 0) {  // render alert popup
         _display->setTextSize(1);
         int y = _display->height() / 3;
         int p = _display->height() / 32;
@@ -999,7 +1051,7 @@ void UITask::loop() {
 #endif
 
 #ifdef AUTO_SHUTDOWN_MILLIVOLTS
-  if (millis() > next_batt_chck) {
+  if (static_cast<int32_t>(millis() - next_batt_chck) >= 0) {
     _cached_batt_mv = getBattMilliVolts();
     if (_cached_batt_mv > 0 && _cached_batt_mv < AUTO_SHUTDOWN_MILLIVOLTS) {
       if(!board.isExternalPowered()) {
@@ -1018,7 +1070,7 @@ void UITask::loop() {
     next_batt_chck = millis() + 8000;
   }
 #else
-  if (_display != NULL && _display->isOn() && millis() >= next_batt_chck) {
+  if (!morse_timing && _display != NULL && _display->isOn() && static_cast<int32_t>(millis() - next_batt_chck) >= 0) {
     _cached_batt_mv = getBattMilliVolts();
     next_batt_chck = millis() + 8000;
   }
@@ -1033,13 +1085,13 @@ char UITask::checkDisplayOn(char c) {
     if (!was_on) {
       c = 0;
     }
-    _next_refresh = 0;  // trigger refresh
+    _next_refresh = millis();  // trigger refresh
   }
   return c;
 }
 
 char UITask::handleLongPress(char c) {
-  if (millis() - ui_started_at < 8000) {   // long press in first 8 seconds since startup -> CLI/rescue
+  if (!_startup_complete && static_cast<uint32_t>(millis() - ui_started_at) < 8000u) { // early-boot CLI/rescue only
     the_mesh.enterCLIRescue();
     c = 0;   // consume event
   }
@@ -1089,7 +1141,7 @@ void UITask::toggleGPS() {
         }
         the_mesh.savePrefs();
         showAlert(_node_prefs->gps_enabled ? "GPS: Enabled" : "GPS: Disabled", 800);
-        _next_refresh = 0;
+        _next_refresh = millis();
         break;
       }
     }
@@ -1109,7 +1161,7 @@ void UITask::toggleBuzzer() {
     the_mesh.setNotificationOutputMute(mesh::notify::Sound, _node_prefs->buzzer_quiet);
     the_mesh.savePrefs();
     showAlert(buzzer.isQuiet() ? "Buzzer: OFF" : "Buzzer: ON", 800);
-    _next_refresh = 0;  // trigger refresh
+    _next_refresh = millis();  // trigger refresh
   #endif
 }
 
@@ -1129,19 +1181,16 @@ uint8_t UITask::notificationCapabilities() const {
 }
 void UITask::notificationMelody(const char* text) {
 #ifdef PIN_BUZZER
-  if (text) buzzer.playNotification(text); else buzzer.stop();
+  if (text) buzzer.playNotification(text); else buzzer.stopNotification();
 #endif
 }
 void UITask::notificationScreen(int8_t mode) {
   if (!_display) return;
   _display->notificationPower(mode);
-  _next_refresh = 0;
+  _next_refresh = millis();
 }
 void UITask::notificationVibration(bool on) {
-#ifdef HAS_DRV2605
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   vibration.pulse(on);
-#elif defined(PIN_VIBRATION)
-  vibration.stop();
-  digitalWrite(PIN_VIBRATION, on ? HIGH : LOW);
 #endif
 }

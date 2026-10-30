@@ -17,6 +17,10 @@ Packet::Packet() {
   radio_bound = false; radio_local = true;
   tx_radio = RADIO_TX_AUTO;
   radio_reply = radio_reply_force = false;
+  forwarded = false;
+#if defined(WITH_UDP_BRIDGE)
+  udp_bridge_ingress = false;
+#endif
 }
 
 bool Packet::isValidPathLen(uint8_t path_len) {
@@ -85,6 +89,10 @@ bool Packet::readFrom(const uint8_t src[], uint8_t len) {
   header = src[i++];
   tx_radio = RADIO_TX_AUTO;
   radio_reply = radio_reply_force = false;
+  forwarded = false;
+#if defined(WITH_UDP_BRIDGE)
+  udp_bridge_ingress = false;
+#endif
   if (getPayloadVer() > PAYLOAD_VER_1) return false;
 
   if (hasTransportCodes()) {

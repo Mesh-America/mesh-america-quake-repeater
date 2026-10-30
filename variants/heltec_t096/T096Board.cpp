@@ -33,7 +33,9 @@ void T096Board::initiateShutdown(uint8_t reason) {
 #endif // NRF52_POWER_MANAGEMENT
 
 void T096Board::begin() {
-  NRF52Board::begin();
+  // T096 populates the nRF52840 DC/DC network. Do not bypass the regulator
+  // initializer and leave application efficiency dependent on bootloader state.
+  NRF52BoardDCDC::begin();
 
 #ifdef NRF52_POWER_MANAGEMENT
   // Boot voltage protection check (may not return if voltage too low)
@@ -54,8 +56,13 @@ void T096Board::begin() {
   delay(1);
 }
 
+void T096Board::applyLedPolicy() {
+  NRF52Board::applyLedPolicy();
+  if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);
+}
+
 void T096Board::onBeforeTransmit() {
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
     loRaFEMControl.setTxModeEnable();
 }
 

@@ -139,14 +139,30 @@ public:
     return charge_target_restore_failed;
   }
 
+  void applyLedPolicy() override {
+#ifndef TBEAM_SUPREME_SX1262
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);
+#else
+    ESP32Board::applyLedPolicy();
+#endif
+#if !defined(PORTABLE_MQTT_OBSERVER) || defined(TBEAM_SUPREME_SX1262)
+    if (charge_pmu_ready && PMU) {
+      PMU->setChargingLedMode(mesh::leds::enabled()
+          ? XPOWERS_CHG_LED_CTRL_CHG : XPOWERS_CHG_LED_OFF);
+    }
+#endif
+  }
+
   #ifndef TBEAM_SUPREME_SX1262
   void onBeforeTransmit() override{
-    digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED on - invert pin for SX1276
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED on - invert pin for SX1276
   }
   void onAfterTransmit() override{
     digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED off - invert pin for SX1276
   }
   #endif
+
+  bool supportsBatteryCalibration() const override { return false; }
 
   uint16_t getBattMilliVolts(){
     if (!charge_pmu_ready) return 0;

@@ -24,7 +24,7 @@ struct RadioProfileSystemStatus {
   bool dual_radio_enabled = false;
   bool secondary_temporary = false;
   RadioProfileMode secondary_mode = RadioProfileMode::Rx;
-  RadioCrossMode cross = RadioCrossMode::Auto;
+  RadioCrossMode cross = RadioCrossMode::Off;
   float noise_floor_1 = 0.0f;
   float noise_floor_2 = 0.0f;
   float noise_floor_1_seconds = 0.0f;

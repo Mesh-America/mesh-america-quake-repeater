@@ -313,7 +313,7 @@ BUZZER_SEQUENCE = r'''
 #include <helpers/ui/buzzer.cpp>
 uint32_t now_ms=0;
 int main(){
- genericBuzzer buzzer;buzzer.begin();
+ genericBuzzer buzzer;buzzer.begin();buzzer.quiet(false);
  char status[180];
  auto check=[&](const char* expected){buzzer.voiceStatus(status,sizeof(status));assert(strstr(status,expected));};
  auto finish_tone=[&]{
@@ -363,7 +363,7 @@ BUZZER_TONES = r'''
 #include <helpers/ui/buzzer.cpp>
 uint32_t now_ms=0;
 int main(){
- genericBuzzer buzzer;buzzer.begin();
+ genericBuzzer buzzer;buzzer.begin();buzzer.quiet(false);
  assert(buzzer.speakGps(true));assert(buzzer.isPlaying());
  assert(rtttl::melody=="Startup:d=4,o=5,b=160:16c6,16e6,8g6");
  rtttl::finish();buzzer.loop();assert(!buzzer.isPlaying());

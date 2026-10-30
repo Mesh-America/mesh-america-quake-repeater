@@ -190,7 +190,9 @@ class TlsDownloadClockGateTest(unittest.TestCase):
         )
 
         self.assertIn("SntpOperationCoordinator.h", implementation)
-        self.assertEqual(len(re.findall(r"(?m)^\s*configTime\(", implementation)), 2)
+        # Background refresh has one ESP32 three-server branch and one portable
+        # single-server branch; the explicit administrator sync is separate.
+        self.assertEqual(len(re.findall(r"(?m)^\s*configTime\(", implementation)), 3)
         self.assertEqual(
             len(re.findall(r"(?m)^\s*sntp_set_sync_status\(", implementation)),
             2,
@@ -321,10 +323,15 @@ class TlsDownloadClockGateTest(unittest.TestCase):
             header,
         )
         self.assertIn("MQTT_NTP_REFRESH_TIMEOUT_MS = 15000UL", implementation)
-        self.assertEqual(implementation.count("pollNtpRefresh("), 3)
-        self.assertGreaterEqual(
-            implementation.count("&& !_ntp_refresh_pending"), 2
+        self.assertEqual(implementation.count("pollNtpRefresh("), 4)
+        background = section(
+            implementation,
+            "void MQTTBridge::serviceBackgroundNtp(",
+            "void MQTTBridge::mqttTaskLoop()",
         )
+        self.assertIn("if (_ntp_refresh_pending) return;", background)
+        self.assertLess(background.index("if (_ntp_refresh_pending) return;"),
+                        background.index("refreshNTP();"))
 
         reset = refresh.index("sntp_set_sync_status(SNTP_SYNC_STATUS_RESET)")
         configure = refresh.index(
@@ -351,7 +358,7 @@ class TlsDownloadClockGateTest(unittest.TestCase):
         self.assertIn("_ntp_refresh_operation.owns()", poll)
 
         timeout = poll.index("elapsed >= MQTT_NTP_REFRESH_TIMEOUT_MS")
-        retry = poll.index("mqttNtpRetryAt(now)", timeout)
+        retry = poll.index("mqttNtpFailureRetryAt(now)", timeout)
         self.assertLess(timeout, retry)
         self.assertNotIn("_last_ntp_sync =", poll[timeout:])
 

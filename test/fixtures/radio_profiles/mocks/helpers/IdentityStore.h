@@ -18,6 +18,11 @@ class File {
   bool open(const char* path, uint8_t mode);
   operator bool() const { return fs_ != nullptr; }
   size_t size() const;
+  bool seek(size_t position) {
+    if (!fs_ || position > size()) return false;
+    cursor_ = position;
+    return true;
+  }
   size_t available() const { return size() - cursor_; }
   bool isDirectory() const { return false; }
   int read(uint8_t* data, size_t size);

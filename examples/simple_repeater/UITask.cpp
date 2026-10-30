@@ -2,6 +2,7 @@
 #include "target.h"
 #include <Arduino.h>
 #include <helpers/UsbLogging.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <helpers/CommonCLI.h>
 #include <helpers/ui/WiFiSetupQrDisplay.h>
 #include <helpers/ui/CompanionHomeLayout.h>
@@ -287,6 +288,24 @@ static inline bool millisReached(unsigned long now, unsigned long deadline) {
   return (int32_t)((uint32_t)now - (uint32_t)deadline) >= 0;
 }
 
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) && HELTEC_TFT_RUNTIME_ROTATION == 1
+#include <helpers/ui/DisplayRotationSettings.h>
+
+void UITask::applyDisplayRotation() {
+  if (_display == nullptr || !_display->supportsRotation()) return;
+  const uint16_t degrees = mesh::ui::displayRotationDegrees();
+  if (degrees == _rotation_seen || !_display->setRotationDegrees(degrees)) return;
+  _rotation_seen = degrees;
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+  _frame_valid = false;
+#endif
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+  _rows_valid = false;
+#endif
+  _next_refresh = millis();
+}
+#endif
+
 // Applies `display.flip` when it changes, forcing a complete repaint because
 // the panel's existing contents are now the wrong way up.
 void UITask::applyDisplayFlip() {
@@ -331,10 +350,14 @@ static const uint8_t meshcore_logo [] PROGMEM = {
 void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* firmware_version) {
   _prevBtnState = HIGH;
   _started_at = millis();
+  _startup_complete = false;
   _node_prefs = node_prefs;
   resetRadioProfileDisplayPage();
 #ifdef DISPLAY_ACTIVITY_DASHBOARD
   ObserverDashboard::applyDarkPalette();   // retunes UIColor for this target only
+#endif
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) && HELTEC_TFT_RUNTIME_ROTATION == 1
+  applyDisplayRotation();
 #endif
   _display->servicePower(board.isExternalPowered() || board.isUsbHostConnected());
   applyDisplayFlip();
@@ -349,17 +372,17 @@ void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* fi
   user_btn.begin();
 #endif
 
-  // strip off dash and commit hash by changing dash to null terminator
+  // strip off dash and commit hash without allocating a mutable version copy
   // e.g: v1.2.3-abcdef -> v1.2.3
-  char *version = strdup(firmware_version);
-  char *dash = strchr(version, '-');
-  if(dash){
-    *dash = 0;
+  size_t version_len = 0;
+  while (version_len < sizeof(_version_info) - 1
+      && firmware_version[version_len] && firmware_version[version_len] != '-') {
+    ++version_len;
   }
 
   // v1.2.3 (1 Jan 2025)
-  snprintf(_version_info, sizeof(_version_info), "%s (%s)", version, build_date);
-  free(version);
+  snprintf(_version_info, sizeof(_version_info), "%.*s (%s)",
+           static_cast<int>(version_len), firmware_version, build_date);
 }
 
 void UITask::resetRadioProfileDisplayPage() {
@@ -417,7 +440,7 @@ void UITask::renderCurrScreen() {
 #ifdef DISPLAY_ACTIVITY_DASHBOARD
   _rows_valid = false;
 #endif
-  if ((uint32_t)(millis() - _started_at) < BOOT_SCREEN_MILLIS) { // boot screen
+  if (!_startup_complete && (uint32_t)(millis() - _started_at) < BOOT_SCREEN_MILLIS) { // boot screen
     // meshcore logo
     _display->setColor(UIColor::corp_blue);
     int logoWidth = 128;
@@ -634,7 +657,7 @@ uint32_t UITask::getFrameSignature() {
   uint32_t signature = DisplayFrameSignature::INITIAL;
   char tmp[80];
 
-  if ((uint32_t)(millis() - _started_at) < BOOT_SCREEN_MILLIS) {
+  if (!_startup_complete && (uint32_t)(millis() - _started_at) < BOOT_SCREEN_MILLIS) {
     signature = DisplayFrameSignature::append(signature, "boot");
     return DisplayFrameSignature::append(signature, _version_info);
   }
@@ -802,7 +825,7 @@ void UITask::renderDashboard() {
     memset(&snap, 0, sizeof(snap));
   }
 
-  const ObserverDashboard::Layout& layout = ObserverDashboard::activeLayout();
+  const ObserverDashboard::Layout& layout = ObserverDashboard::activeLayout(*_display);
   ObserverDashboard::drawFull(*_display, layout, ctx, snap);
   ObserverDashboard::allRowSignatures(layout, ctx, snap, _row_signatures);
   _rows_valid = true;
@@ -819,7 +842,7 @@ void UITask::updateActivityRows() {
 
   RadioActivitySnapshot snap;
   _activity->snapshot(millis(), &snap);
-  ObserverDashboard::drawChangedRows(*_display, ObserverDashboard::activeLayout(), ctx, snap,
+  ObserverDashboard::drawChangedRows(*_display, ObserverDashboard::activeLayout(*_display), ctx, snap,
                                      _row_signatures);
 }
 #endif
@@ -844,6 +867,14 @@ void UITask::toggleDisplay(const char* source) {
 #endif
 
 void UITask::loop() {
+#if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) && HELTEC_TFT_RUNTIME_ROTATION == 1
+  applyDisplayRotation();
+#endif
+  // Observe expiry outside display/Morse/input gates; startup is one-shot.
+  if (!_startup_complete && (uint32_t)(millis() - _started_at) >= BOOT_SCREEN_MILLIS) {
+    _startup_complete = true;
+  }
+  const bool morse_timing = mesh::morseTimingActive(the_mesh.getProfileRadio());
   if (_display->servicePower(board.isExternalPowered() || board.isUsbHostConnected())) {
     if (_display->isOn()) resetRadioProfileDisplayPage();
     _next_refresh = 0;
@@ -909,7 +940,7 @@ void UITask::loop() {
   }
 #endif
 
-  if (_display->isOn()) {
+  if (!morse_timing && _display->isOn()) {
     // Apply a live orientation change before drawing, including the first frame
     // after a preference was changed while the panel was blanked.
     applyDisplayFlip();
@@ -950,7 +981,7 @@ void UITask::loop() {
 
   if (_powering_off_at > 0) { // power off timer armed
 #if defined(LED_PIN) && defined(LED_STATE_ON)
-    digitalWrite(LED_PIN, LED_STATE_ON); // switch on the led until poweroff
+    if (mesh::leds::enabled()) digitalWrite(LED_PIN, LED_STATE_ON);
     delay(1000);
     digitalWrite(LED_PIN, !LED_STATE_ON); // off LED
 #endif

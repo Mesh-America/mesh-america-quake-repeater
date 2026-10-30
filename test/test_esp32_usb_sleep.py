@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 
+from test_morse_loop_policy import RADIO as MORSE_RADIO
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,12 +20,17 @@ HARNESS = r'''
 #include <iostream>
 #include <array>
 #include <helpers/UsbHostSleepPolicy.h>
+#include <helpers/PowerSavingDiagnostics.h>
+#include <helpers/esp32/PowerTestControls.h>
 
 #ifndef MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS
 #define MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS 120000UL
 #endif
 static uint32_t mock_millis = 1000;
 static uint32_t millis() { return mock_millis; }
+static uint32_t micros() { return mock_millis * 1000U; }
+using esp_err_t = int;
+constexpr int ESP_OK = 0;
 
 static void require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
@@ -53,6 +59,10 @@ static void attachHost(bool attached) {
 namespace mesh {
 static bool logging_enabled = false;
 bool isUsbLoggingEnabled() { return logging_enabled; }
+namespace esp32 {
+static powerdiag::Reason wireless_blocker = powerdiag::Reason::Count;
+powerdiag::Reason manualLightSleepBlocker() { return wireless_blocker; }
+}
 }
 
 using gpio_num_t = int;
@@ -65,6 +75,10 @@ constexpr int GPIO_INTR_POSEDGE = 1;
 constexpr int GPIO_INTR_DISABLE = 0;
 static unsigned sleep_calls = 0;
 static uint64_t timer_us = 0;
+static int timer_error = ESP_OK;
+static int radio_wake_error = ESP_OK, button_wake_error = ESP_OK, gpio_wake_error = ESP_OK;
+static unsigned gpio_setup_us = 0;
+static bool irq_during_setup = false;
 static bool radio_irq_high = false;
 static int critical_depth = 0;
 static int wake_pin = -1;
@@ -75,8 +89,12 @@ static bool button_pressed = false;
 static bool press_during_sleep = false;
 static unsigned yield_ms = 0;
 static void delay(unsigned ms) { yield_ms += ms; }
-static void esp_sleep_enable_timer_wakeup(uint64_t us) { timer_us = us; }
-static void esp_light_sleep_start() {
+static int esp_sleep_enable_timer_wakeup(uint64_t us) {
+  if (timer_error != ESP_OK) return timer_error;
+  timer_us = us;
+  return ESP_OK;
+}
+static int esp_light_sleep_start() {
   ++sleep_calls;
   if (press_during_sleep) {
     require(wake_levels[38] == GPIO_INTR_LOW_LEVEL,
@@ -86,14 +104,22 @@ static void esp_light_sleep_start() {
     button_pressed = true;
     press_during_sleep = false;
   }
+  return ESP_OK;
 }
-static void esp_sleep_enable_gpio_wakeup() {}
+static int esp_sleep_enable_gpio_wakeup() {
+  mock_millis += gpio_setup_us / 1000U;
+  if (irq_during_setup) radio_irq_high = true;
+  return gpio_wake_error;
+}
 static int gpio_get_level(gpio_num_t pin) {
   return pin == 38 ? (button_pressed ? LOW : HIGH) : (radio_irq_high ? HIGH : LOW);
 }
-static void gpio_wakeup_enable(gpio_num_t pin, int level) {
+static int gpio_wakeup_enable(gpio_num_t pin, int level) {
+  if (pin == 48 && radio_wake_error != ESP_OK) return radio_wake_error;
+  if (pin == 38 && button_wake_error != ESP_OK) return button_wake_error;
   wake_pin = pin;
   wake_levels.at(pin) = level;
+  return ESP_OK;
 }
 static void gpio_wakeup_disable(gpio_num_t pin) {
   restored_pin = pin;
@@ -109,11 +135,15 @@ struct MainBoard {
   bool radio_test_active = false;
   bool isRadioTestActive() const { return radio_test_active; }
   virtual void sleep(uint32_t) = 0;
+  virtual void sleepMilliseconds(uint32_t) = 0;
   virtual bool isUsbDataConnected() = 0;
   virtual bool isUsbHostConnected() = 0;
 };
 struct ESP32Board : MainBoard {
   bool inhibit_sleep = false;
+  bool button_wake_hold_active = false;
+  uint32_t button_wake_at = 0;
+  uint32_t uart_quiet_restore_at = 0;
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
   mesh::UsbHostSleepPolicy usb_host_sleep_policy;
 #endif
@@ -205,6 +235,12 @@ int main() {
             "held button was stranded before the UI could poll it");
     button_pressed = false;
     board.sleep(30);
+    require(sleep_calls == 2, "released button lost its awake grace");
+    mock_millis += 29999U;
+    board.sleep(30);
+    require(sleep_calls == 2, "button awake grace expired early");
+    ++mock_millis;
+    board.sleep(30);
     require(sleep_calls == 3, "released button permanently disabled sleep");
 #else
     board.irq = static_cast<uint32_t>(-1);
@@ -248,6 +284,15 @@ def board_method(signature: str) -> str:
         depth += (source[end] == "{") - (source[end] == "}")
         end += 1
     return source[start:end]
+
+
+def board_sleep_methods() -> str:
+    return "\n".join(board_method(signature) for signature in (
+        "void sleep(uint32_t secs) override",
+        "void sleepMilliseconds(uint32_t millisecs) override",
+        "void sleepMicroseconds(uint64_t wake_us, bool require_timer = false)",
+        "void sleepUntilMicroseconds(uint32_t deadline_us)",
+        "void sleepMicrosecondsImpl(uint64_t wake_us, bool require_timer,"))
 
 
 def v4_profile_config():
@@ -306,11 +351,17 @@ def conditional_block(source, start):
 V4_BUTTON_HARNESS = r'''
 #include <Arduino.h>
 #include <helpers/UsbHostSleepPolicy.h>
+#include <helpers/PowerSavingDiagnostics.h>
+#include <helpers/esp32/PowerTestControls.h>
 #include <helpers/ui/MomentaryButton.h>
 #include <helpers/ui/DisplayPowerPolicy.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <array>
 #include <stdexcept>
 #include <iostream>
+using esp_err_t = int;
+constexpr int ESP_OK = 0;
+static uint32_t micros() { return millis() * 1000U; }
 static void require(bool ok, const char* why) {
   if (!ok) throw std::runtime_error(why);
 }
@@ -320,6 +371,9 @@ struct SerialPort {
 } Serial;
 namespace mesh {
 bool isUsbLoggingEnabled() { return false; }
+namespace esp32 {
+powerdiag::Reason manualLightSleepBlocker() { return powerdiag::Reason::Count; }
+}
 struct Console { void printf(const char*) {} };
 static Console console;
 Console& usbConsolePort() { return console; }
@@ -334,15 +388,15 @@ static std::array<int, 64> wake_levels{}, restored_interrupts{};
 static unsigned sleep_calls = 0;
 static int critical_depth = 0;
 static bool press_during_sleep = false, radio_irq_high = false;
-static void esp_sleep_enable_timer_wakeup(uint64_t) {}
-static void esp_sleep_enable_gpio_wakeup() {}
+static int esp_sleep_enable_timer_wakeup(uint64_t) { return ESP_OK; }
+static int esp_sleep_enable_gpio_wakeup() { return ESP_OK; }
 static int gpio_get_level(gpio_num_t pin) {
   return pin == PIN_USER_BTN ? digitalRead(pin) : (radio_irq_high ? HIGH : LOW);
 }
-static void gpio_wakeup_enable(gpio_num_t pin, int level) { wake_levels.at(pin) = level; }
+static int gpio_wakeup_enable(gpio_num_t pin, int level) { wake_levels.at(pin) = level; return ESP_OK; }
 static void gpio_wakeup_disable(gpio_num_t pin) { wake_levels.at(pin) = 0; }
 static void gpio_set_intr_type(gpio_num_t pin, int type) { restored_interrupts.at(pin) = type; }
-static void esp_light_sleep_start() {
+static int esp_light_sleep_start() {
   ++sleep_calls;
   if (press_during_sleep) {
     require(wake_levels[PIN_USER_BTN] == GPIO_INTR_LOW_LEVEL,
@@ -352,21 +406,33 @@ static void esp_light_sleep_start() {
     g_mock_pin_levels[PIN_USER_BTN] = LOW;
     press_during_sleep = false;
   }
+  return ESP_OK;
 }
 #define portENTER_CRITICAL(mux) (++critical_depth)
 #define portEXIT_CRITICAL(mux) (--critical_depth)
 struct MainBoard {
   virtual void sleep(uint32_t) = 0;
+  virtual void sleepMilliseconds(uint32_t) = 0;
   virtual bool isUsbDataConnected() = 0;
   virtual bool isUsbHostConnected() = 0;
   bool isRadioTestActive() const { return false; }
 };
 struct ESP32Board : MainBoard {
   bool inhibit_sleep = false;
+  bool button_wake_hold_active = false;
+  uint32_t button_wake_at = 0;
+  uint32_t uart_quiet_restore_at = 0;
   uint32_t getIRQGpio() { return P_LORA_DIO_1; }
   bool isExternalPowered() const { return false; }
 @METHODS@
 } board;
+struct TestRadio : mesh::Radio {
+  bool tx = false, rx = false;
+  bool isMorseTxActive() const override { return tx; }
+  bool isMorseRxActive() const override { return rx; }
+} timing_radio;
+struct TestMesh { mesh::Radio* getProfileRadio() { return &timing_radio; } } the_mesh;
+TestMesh& activeSensorMesh() { return the_mesh; }
 @BUTTON_CONSTRUCTOR@
 struct TestDisplay {
   mesh::ui::DisplayPowerPrefs prefs;
@@ -379,9 +445,13 @@ struct TestDisplay {
   bool isOn() const { return policy.on(); }
   void wake(mesh::ui::DisplayWake reason) { policy.wake(reason, millis()); }
 } display;
+static constexpr uint32_t BOOT_SCREEN_MILLIS = 4000;
 struct UITask {
   TestDisplay* _display = &display;
+  bool _startup_complete = false;
+  uint32_t _started_at = 0;
   uint32_t _next_refresh = 0, _powering_off_at = 0, _next_read = 0;
+  uint32_t _last_refresh = 0, _last_read = 0; // Sensor uses elapsed-time anchors.
   int _prevBtnState = HIGH;
   void resetRadioProfileDisplayPage() {}
   void advanceRadioProfileDisplayPage() {}
@@ -390,6 +460,7 @@ struct UITask {
   }
 } ui;
 static bool roleCanPowerSave() {
+  const auto sleep_guard = [](bool allowed, mesh::powerdiag::Reason) { return allowed; };
   bool can_power_save = true;
 @ROLE_SLEEP_GUARD@
   return can_power_save;
@@ -402,6 +473,9 @@ int main() {
     g_mock_millis = 1000;
     g_mock_pin_levels[PIN_USER_BTN] = HIGH;
     user_btn.begin();
+    require(!mesh::morseTimingActive(the_mesh.getProfileRadio()), "idle radio acquired Morse ownership");
+    timing_radio.tx = true;
+    require(mesh::morseTimingActive(the_mesh.getProfileRadio()), "TX ownership was not visible to UI");
     ui.loop();
     require(!display.isOn(), "button-mode screen did not start blank");
     require(roleCanPowerSave(), "idle button blocked initial power saving");
@@ -439,13 +513,22 @@ int main() {
     g_mock_millis += MOMENTARY_BUTTON_MULTI_CLICK_MS;
     ui.loop();
     require(display.isOn(), "real UITask click did not wake the screen");
+@SENSOR_REFRESH_CHECK@
     require(!user_btn.needsPolling() && roleCanPowerSave(),
             "completed gesture permanently disabled power saving");
+    timing_radio.tx = false;
+    timing_radio.rx = true;
+    require(mesh::morseTimingActive(activeSensorMesh().getProfileRadio()), "RX ownership was not visible to UI");
     board.sleep(30);
-    require(sleep_calls == 2, "released button failed to allow sleep again");
+    require(sleep_calls == 1, "released button lost its awake grace");
     g_mock_millis += 15000;
     ui.loop();
     require(!display.isOn(), "button screen failed to expire normally");
+    g_mock_millis += 15000;
+    board.sleep(30);
+    require(sleep_calls == 2, "expired button awake grace failed to allow sleep again");
+    timing_radio.rx = false;
+    require(!mesh::morseTimingActive(the_mesh.getProfileRadio()), "Morse ownership failed to release");
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n'; return 1;
   }
@@ -454,6 +537,101 @@ int main() {
 
 
 class Esp32UsbSleepTest(unittest.TestCase):
+    def test_physical_wireless_vetoes_and_deadline_gpio_failures(self):
+        methods = board_sleep_methods() + "\n" + "\n".join(board_method(signature) for signature in (
+            "bool isUsbDataConnected() override", "bool isUsbHostConnected() override",
+            "bool isUsbSleepHeld()"))
+        harness = HARNESS.split("int main()", 1)[0] + r'''
+int main() {
+  try {
+    ESP32Board board;
+    attachHost(false);
+    Serial.end();
+    for (auto reason : {mesh::powerdiag::Reason::Network,
+                        mesh::powerdiag::Reason::Wireless}) {
+      mesh::esp32::wireless_blocker = reason;
+      mesh::powerdiag::setEnabled(true, millis());
+      board.sleepMilliseconds(10);
+      require(sleep_calls == 0 && timer_us == 0 && critical_depth == 0,
+              "physical wireless veto configured wake or slept");
+      require(mesh::powerdiag::snapshot(millis()).current & mesh::powerdiag::mask(reason),
+              "physical wireless veto lost its actual diagnostic reason");
+      const unsigned before_yield = yield_ms;
+      board.sleepUntilMicroseconds(micros() + 10000U);
+      require(yield_ms == before_yield && sleep_calls == 0,
+              "blocked profile sleep yielded beyond the scanner's safe visit");
+      mesh::powerdiag::setEnabled(false, millis());
+    }
+    mesh::esp32::wireless_blocker = mesh::powerdiag::Reason::Count;
+    for (bool diagnostics : {false, true}) {
+      mesh::powerdiag::setEnabled(diagnostics, millis());
+      for (int source : {0, 1, 2, 3}) {
+        radio_wake_error = source == 0 ? 31 : ESP_OK;
+        button_wake_error = source == 1 ? 32 : ESP_OK;
+        gpio_wake_error = source == 2 ? 33 : ESP_OK;
+        timer_error = source == 3 ? 34 : ESP_OK;
+        const unsigned before = sleep_calls;
+        const uint64_t before_timer = timer_us;
+        board.sleepUntilMicroseconds(micros() + 10000U);
+        require(sleep_calls == before && timer_us == before_timer && critical_depth == 0,
+                "failed timed wake setup slept or reused an old timer");
+        require(wake_levels[48] == 0 && wake_levels[38] == 0
+                && restored_interrupts[48] == GPIO_INTR_POSEDGE
+                && restored_interrupts[38] == GPIO_INTR_DISABLE,
+                "failed timed wake setup left level IRQ or wake pin armed");
+      }
+      radio_wake_error = button_wake_error = gpio_wake_error = timer_error = ESP_OK;
+      gpio_setup_us = 3000;
+      const unsigned before = sleep_calls;
+      board.sleepUntilMicroseconds(micros() + 10000U);
+      require(sleep_calls == before + 1 && timer_us == 7000U,
+              "absolute timer restarted the full visit after wake setup work");
+      gpio_setup_us = 0;
+      const uint64_t last_timer = timer_us;
+      for (uint32_t delta : {0U, 1U, 1999U, UINT32_MAX}) {
+        board.sleepUntilMicroseconds(micros() + delta);
+        require(sleep_calls == before + 1 && timer_us == last_timer && critical_depth == 0,
+                "expired or subminimum deadline slept or inherited an old timer");
+      }
+      board.sleepUntilMicroseconds(micros() + 2000U);
+      require(sleep_calls == before + 2 && timer_us == 2000U,
+              "minimum useful absolute deadline did not sleep");
+      mock_millis = 4294967U;
+      board.sleepUntilMicroseconds(micros() + 5000U);
+      require(sleep_calls == before + 3 && timer_us == 5000U,
+              "microsecond clock wrap corrupted a valid absolute deadline");
+      board.irq = UINT32_MAX;
+      board.sleepUntilMicroseconds(micros() + 10000U);
+      require(sleep_calls == before + 3 && timer_us == 5000U,
+              "profile deadline accepted a timer without a radio IRQ wake");
+      board.irq = 48;
+      irq_during_setup = true;
+      board.sleepUntilMicroseconds(micros() + 10000U);
+      require(sleep_calls == before + 3 && timer_us == 5000U && critical_depth == 0,
+              "profile wait slept over an IRQ arriving during wake setup");
+      irq_during_setup = radio_irq_high = false;
+      mesh::powerdiag::setEnabled(false, millis());
+    }
+  } catch (const std::exception& error) {
+    std::cerr << error.what() << '\n'; return 1;
+  }
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="meshcore-esp32-profile-deadline-") as directory:
+            cpp = Path(directory) / "sleep.cpp"
+            exe = Path(directory) / "sleep"
+            cpp.write_text(harness.replace("@METHODS@", methods), encoding="ascii")
+            result = subprocess.run([
+                os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
+                "-DARDUINO_USB_MODE=1", "-DARDUINO_USB_CDC_ON_BOOT=1",
+                "-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=0", "-DMESH_USB_LOGGING_AVAILABLE=0",
+                "-DMOMENTARY_BUTTON_WAKE_FROM_SLEEP=1", "-DPIN_USER_BTN=38",
+                "-I", str(ROOT / "src"), str(cpp), "-o", str(exe)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_v4_profiles_inherit_button_wake_with_the_actual_gpio_pins(self):
         config = v4_profile_config()
         # These standalone partition-migration utilities deliberately bypass
@@ -475,13 +653,13 @@ class Esp32UsbSleepTest(unittest.TestCase):
 
     def test_v4_sleep_button_poller_and_real_ui_wake_the_screen(self):
         config = v4_profile_config()
-        methods = "\n".join(board_method(signature) for signature in (
-            "void sleep(uint32_t secs) override",
+        methods = board_sleep_methods() + "\n" + "\n".join(board_method(signature) for signature in (
             "bool isUsbDataConnected() override",
             "bool isUsbHostConnected() override", "bool isUsbSleepHeld()"))
         compiler = os.environ.get("CXX", "c++")
         self.assertIsNotNone(shutil.which(compiler), "a C++17 compiler is required")
         with tempfile.TemporaryDirectory(prefix="meshcore-v4-button-wake-") as directory:
+            (Path(directory) / "Dispatcher.h").write_text(MORSE_RADIO, encoding="ascii")
             for family in ("heltec_v4", "heltec_v4_r8"):
                 target = (ROOT / f"variants/{family}/target.cpp").read_text()
                 constructor = re.search(
@@ -504,6 +682,10 @@ class Esp32UsbSleepTest(unittest.TestCase):
                     harness = harness.replace("@BUTTON_CONSTRUCTOR@", constructor)
                     harness = harness.replace("@UI_BUTTON@", ui)
                     harness = harness.replace("@ROLE_SLEEP_GUARD@", guard)
+                    harness = harness.replace("@SENSOR_REFRESH_CHECK@",
+                        '    require(ui._last_refresh == millis() - 1000u, '
+                        '"sensor button wake did not rearm refresh");'
+                        if role == "simple_sensor" else "")
                     cases = [("profile", harness, defines, None)]
                     if family == "heltec_v4" and role == "simple_repeater":
                         # Removing the actual inherited flag reproduces the
@@ -512,12 +694,16 @@ class Esp32UsbSleepTest(unittest.TestCase):
                         cases.append(("missing-flag", harness, missing,
                                       "V4 slept over an already pressed button"))
                         cases.append(("missing-poller", harness.replace(
-                            "can_power_save = can_power_save && !user_btn.needsPolling();",
+                            "can_power_save = can_power_save && sleep_guard(!user_btn.needsPolling(), mesh::powerdiag::Reason::Button);",
                             ""), defines, "role slept before button debounce completed"))
                         cases.append(("missing-display-wake", harness.replace(
                             "_display->wake(mesh::ui::DisplayWake::Button);",
                             "(void)0;"), defines,
                             "real UITask click did not wake the screen"))
+                    if role == "simple_sensor":
+                        cases.append(("missing-sensor-refresh", harness.replace(
+                            "_last_refresh = millis() - 1000u;", "(void)0;"), defines,
+                            "sensor button wake did not rearm refresh"))
                     for name, text, selected, expected_error in cases:
                         with self.subTest(profile=section, control=name):
                             stem = Path(directory) / f"{family}-{suffix}-{name}"
@@ -536,7 +722,7 @@ class Esp32UsbSleepTest(unittest.TestCase):
                                 "-DUSER_BTN_MULTICLICK=" +
                                 selected.get("USER_BTN_MULTICLICK", "1"),
                                 "-DPOWEROFF_DELAY=2000",
-                                *flags, "-I", str(ROOT / "test/mocks"),
+                                *flags, "-I", str(Path(directory)), "-I", str(ROOT / "test/mocks"),
                                 "-I", str(ROOT / "src"), str(cpp),
                                 str(ROOT / "src/helpers/ui/MomentaryButton.cpp"),
                                 "-o", str(stem)], capture_output=True, text=True, timeout=60)
@@ -550,8 +736,8 @@ class Esp32UsbSleepTest(unittest.TestCase):
                                 self.assertIn(expected_error, result.stderr)
 
     def test_raw_uart_driver_preserves_fresh_console_indefinitely_until_end(self):
-        methods = "\n".join(board_method(signature) for signature in (
-            "void sleep(uint32_t secs) override", "bool isUsbDataConnected() override",
+        methods = board_sleep_methods() + "\n" + "\n".join(board_method(signature) for signature in (
+            "bool isUsbDataConnected() override",
             "bool isUsbHostConnected() override", "bool isUsbSleepHeld()"))
         harness = HARNESS.split("int main()", 1)[0] + r'''
 int main() {
@@ -596,8 +782,7 @@ int main() {
     def test_native_host_survives_terminal_close_and_reconnect(self):
         compiler = os.environ.get("CXX", "c++")
         self.assertIsNotNone(shutil.which(compiler), "a C++17 compiler is required")
-        methods = "\n".join(board_method(signature) for signature in (
-            "void sleep(uint32_t secs) override",
+        methods = board_sleep_methods() + "\n" + "\n".join(board_method(signature) for signature in (
             "bool isUsbDataConnected() override",
             "bool isUsbHostConnected() override",
             "bool isUsbSleepHeld()",
@@ -626,8 +811,7 @@ int main() {
                     self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_native_host_reboot_grace_without_logging(self):
-        methods = "\n".join(board_method(signature) for signature in (
-            "void sleep(uint32_t secs) override",
+        methods = board_sleep_methods() + "\n" + "\n".join(board_method(signature) for signature in (
             "bool isUsbDataConnected() override",
             "bool isUsbHostConnected() override",
             "bool isUsbSleepHeld()",
@@ -735,6 +919,166 @@ int main() {
                     result = subprocess.run([str(binary)], capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_millisecond_sleep_preserves_precision_and_all_common_guards(self):
+        methods = board_sleep_methods() + "\n" + "\n".join(board_method(signature) for signature in (
+            "bool isUsbDataConnected() override",
+            "bool isUsbHostConnected() override", "bool isUsbSleepHeld()"))
+        harness = HARNESS.split("int main()", 1)[0] + r'''
+int main() {
+  try {
+    ESP32Board board;
+    MainBoard& polymorphic = board;
+    attachHost(true);
+    const unsigned before_zero = yield_ms;
+    polymorphic.sleepMilliseconds(0);
+    require(sleep_calls == 0 && timer_us == 0 && wake_pin == -1
+            && critical_depth == 0 && yield_ms == before_zero,
+            "zero milliseconds entered sleep or touched peripherals");
+    polymorphic.sleepMilliseconds(125);
+    require(sleep_calls == 0 && timer_us == 0 && critical_depth == 0,
+            "millisecond path bypassed the USB/UART console guard");
+    attachHost(false);
+    Serial.end();
+    mock_millis += MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS;
+    polymorphic.sleepMilliseconds(1);
+    require(sleep_calls == 1 && timer_us == 1000ULL,
+            "one millisecond did not arm an exact subsecond wake timer");
+    polymorphic.sleepMilliseconds(999);
+    require(sleep_calls == 2 && timer_us == 999000ULL,
+            "millisecond timer was rounded to seconds");
+    polymorphic.sleepMilliseconds(UINT32_MAX);
+    require(sleep_calls == 3 && timer_us == 4294967295000ULL,
+            "millisecond conversion overflowed before widening");
+    board.sleep(UINT32_MAX);
+    require(sleep_calls == 4 && timer_us == 4294967295000000ULL,
+            "existing seconds API lost precision or overflowed");
+    timer_error = 17;
+    polymorphic.sleepMilliseconds(125);
+    require(sleep_calls == 4 && timer_us == 4294967295000000ULL
+            && critical_depth == 0,
+            "failed millisecond timer setup reused an older long timer");
+    timer_error = ESP_OK;
+    const unsigned before_guards = sleep_calls;
+    board.inhibit_sleep = true;
+    polymorphic.sleepMilliseconds(125);
+    require(sleep_calls == before_guards && critical_depth == 0,
+            "millisecond path bypassed explicit sleep inhibition");
+    board.inhibit_sleep = false;
+    board.radio_test_active = true;
+    polymorphic.sleepMilliseconds(125);
+    require(sleep_calls == before_guards && critical_depth == 0,
+            "millisecond path bypassed radio test ownership");
+    board.radio_test_active = false;
+    radio_irq_high = true;
+    polymorphic.sleepMilliseconds(125);
+    require(sleep_calls == before_guards && critical_depth == 0,
+            "millisecond path slept over a pending radio IRQ");
+    radio_irq_high = false;
+#if MOMENTARY_BUTTON_WAKE_FROM_SLEEP
+    button_pressed = true;
+    polymorphic.sleepMilliseconds(125);
+    require(sleep_calls == before_guards && critical_depth == 0,
+            "millisecond path slept over a pending button press");
+    button_pressed = false;
+#endif
+    mesh::logging_enabled = true;
+    polymorphic.sleepMilliseconds(125);
+#if MESH_USB_LOGGING_AVAILABLE
+    require(sleep_calls == before_guards,
+            "millisecond path bypassed the USB logging veto");
+#else
+    require(sleep_calls == before_guards + 1,
+            "compiled-out logging blocked millisecond sleep");
+#endif
+    mesh::logging_enabled = false;
+    board.irq = static_cast<uint32_t>(-1);
+    const unsigned before_timer = sleep_calls;
+    polymorphic.sleepMilliseconds(125);
+    require(sleep_calls == before_timer + 1 && timer_us == 125000ULL
+            && critical_depth == 0,
+            "millisecond timer-only wake failed or left interrupts masked");
+    const unsigned after_timer = sleep_calls;
+    const uint64_t last_timer = timer_us;
+    polymorphic.sleepMilliseconds(0);
+    require(sleep_calls == after_timer && timer_us == last_timer,
+            "zero milliseconds reused a previously configured wake source");
+  } catch (const std::exception& error) {
+    std::cerr << error.what() << '\n'; return 1;
+  }
+}
+'''
+        compiler = os.environ.get("CXX", "c++")
+        self.assertIsNotNone(shutil.which(compiler), "a C++17 compiler is required")
+        with tempfile.TemporaryDirectory(prefix="meshcore-ms-sleep-") as directory:
+            cpp = Path(directory) / "sleep.cpp"
+            cpp.write_text(harness.replace("@METHODS@", methods), encoding="ascii")
+            for mode, cdc, button, logging in ((0, 1, 1, 1), (1, 1, 0, 1),
+                                                (0, 0, 0, 1), (0, 1, 0, 0)):
+                with self.subTest(usb_mode=mode, cdc=cdc, button=button, logging=logging):
+                    binary = Path(directory) / f"sleep-{mode}-{cdc}-{button}-{logging}"
+                    result = subprocess.run([
+                        compiler, "-std=c++17", "-Wall", "-Wextra",
+                        f"-DARDUINO_USB_MODE={mode}",
+                        f"-DARDUINO_USB_CDC_ON_BOOT={cdc}",
+                        f"-DMESH_ESP32_USB_CONSOLE_COOPERATIVE={int(bool(cdc))}",
+                        f"-DMOMENTARY_BUTTON_WAKE_FROM_SLEEP={button}",
+                        f"-DMESH_USB_LOGGING_AVAILABLE={logging}", "-DPIN_USER_BTN=38",
+                        "-DCONFIG_TINYUSB_ENABLED=1", "-I", str(ROOT / "src"),
+                        str(cpp), "-o", str(binary)], capture_output=True, text=True,
+                        timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    result = subprocess.run([str(binary)], capture_output=True, text=True,
+                                            timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_button_wake_grace_expires_across_millis_rollover(self):
+        methods = board_sleep_methods() + "\n" + "\n".join(board_method(signature) for signature in (
+            "bool isUsbDataConnected() override",
+            "bool isUsbHostConnected() override", "bool isUsbSleepHeld()"))
+        harness = HARNESS.split("int main()", 1)[0] + r'''
+int main() {
+  try {
+    attachHost(false);
+    Serial.end();
+    for (uint32_t start : {0U, UINT32_MAX - 15000U}) {
+      ESP32Board board;
+      mock_millis = start;
+      const unsigned before = sleep_calls;
+      board.sleep(30);
+      require(sleep_calls == before + 1, "fresh board gained an awake hold");
+      press_during_sleep = true;
+      board.sleep(30);
+      require(sleep_calls == before + 2 && button_pressed, "button failed to wake CPU");
+      button_pressed = false;
+      mock_millis = start + 29999U;
+      board.sleep(30);
+      require(sleep_calls == before + 2, "button grace ended early across rollover");
+      ++mock_millis;
+      board.sleep(30);
+      require(sleep_calls == before + 3, "button grace never expired");
+      mock_millis = start + 1U;
+      board.sleep(30);
+      require(sleep_calls == before + 4, "expired button hold revived across rollover");
+    }
+  } catch (const std::exception& error) {
+    std::cerr << error.what() << '\n'; return 1;
+  }
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="meshcore-button-grace-") as directory:
+            cpp = Path(directory) / "grace.cpp"
+            binary = Path(directory) / "grace"
+            cpp.write_text(harness.replace("@METHODS@", methods), encoding="ascii")
+            result = subprocess.run([
+                os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
+                "-DARDUINO_USB_CDC_ON_BOOT=1", "-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=0",
+                "-DMOMENTARY_BUTTON_WAKE_FROM_SLEEP=1", "-DPIN_USER_BTN=38",
+                "-DMESH_USB_LOGGING_AVAILABLE=0", "-I", str(ROOT / "src"),
+                str(cpp), "-o", str(binary)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_g3_enables_gesture_polling_after_gpio_wake(self):
         profile = (ROOT / "variants/station_g3_esp32/platformio.ini").read_text()
         def section(name):
@@ -753,7 +1097,12 @@ int main() {
             main = (ROOT / f"examples/{role}/main.cpp").read_text()
             guard = main.split("#if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP)", 1)[1]
             guard = guard.split("#endif", 1)[0]
-            self.assertIn("!user_btn.needsPolling()", guard)
+            if role == "companion_radio":
+                self.assertIn("if (!sleep_reason && user_btn.needsPolling())", guard)
+                self.assertIn("sleep_reason = mask(Reason::Button);", guard)
+                self.assertIn("const bool can_sleep = sleep_reason == 0;", main)
+            else:
+                self.assertIn("sleep_guard(!user_btn.needsPolling(), mesh::powerdiag::Reason::Button)", guard)
 
     def test_button_holds_awake_for_two_minutes_and_renews_across_rollover(self):
         harness = r'''

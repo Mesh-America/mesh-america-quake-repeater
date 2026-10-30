@@ -32,14 +32,14 @@ int main(){
  assert(mesh.savePrefs());
  const auto on_disk=mesh.store.fs.files["/new_prefs"];
 #if defined(TBEAM_1W)
- assert(on_disk.size()==242);
+ assert(on_disk.size()==251);
 #elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
- assert(on_disk.size()==332);
+ assert(on_disk.size()==341);
 #else
- assert(on_disk.size()==235);
+ assert(on_disk.size()==244);
 #endif
- const size_t bluetooth_offset=on_disk.size()-4;
- assert(on_disk[bluetooth_offset]==1&&on_disk.back()==0);
+ const size_t bluetooth_offset=on_disk.size()-mesh::companion::traffic::FooterSize-5;
+ assert(on_disk[bluetooth_offset]==1&&on_disk[bluetooth_offset+4]==0);
  // Both choices survive a fresh instance reading the actual on-device image.
  for(bool enabled : {false,true,false}){
    assert(mesh.setBluetoothEnabledPreference(enabled));
@@ -51,7 +51,7 @@ int main(){
    assert(prefs.bluetooth_stealth_mode==2&&prefs.one_key_dm_enabled==1);
    assert(prefs.wifi_enabled==0&&prefs.usb_logging_enabled==1);
    const auto& saved=reboot.fs.files["/new_prefs"];
-   assert(saved[bluetooth_offset]==enabled&&saved.back()==0);
+   assert(saved[bluetooth_offset]==enabled&&saved[bluetooth_offset+4]==0);
  }
  const auto off_disk=mesh.store.fs.files["/new_prefs"];
  // The public setter must roll live state back when the atomic save fails.
@@ -194,6 +194,7 @@ class BluetoothPersistenceTests(unittest.TestCase):
         main = (ROOT/'examples/companion_radio/main.cpp').read_text()
         methods = '\n'.join(method(main, signature) for signature in (
             'static void scheduleCompanionBluetoothRetry(',
+            'static void serviceCompanionUsbBluetoothPriority(',
             'static void startCompanionBluetooth(',
             'static void serviceDeferredCompanionBluetooth('))
         with tempfile.TemporaryDirectory() as directory:
@@ -264,7 +265,8 @@ inline char* utoa(unsigned int value,char* output,int base){
                         '-I',str(ROOT/'test/mocks'),'-I',str(ROOT/'src'),
                         '-I',str(ROOT/'src/helpers'),'-I',str(ROOT), str(source),
                         *[str(ROOT/'src/helpers'/name) for name in ('ConfigSerializer.cpp',
-                            'DynamicConfigSerializer.cpp','CommonRadioPrefs.cpp','TxtDataHelpers.cpp')],
+                            'DynamicConfigSerializer.cpp','CommonRadioPrefs.cpp',
+                            'radiolib/RXPowerSaving.cpp','radiolib/RXPowerSavingCLI.cpp','TxtDataHelpers.cpp')],
                         '-o',str(binary)],capture_output=True,text=True)
                     self.assertEqual(built.returncode,0,built.stdout+built.stderr)
                     ran = subprocess.run([str(binary)],capture_output=True,text=True)

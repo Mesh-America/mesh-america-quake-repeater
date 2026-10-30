@@ -12,6 +12,14 @@ public:
   MeshTrackerX1Board() : NRF52Board("X1_OTA") {}
   void begin();
 
+  bool supportsBatteryCalibration() const override {
+#ifdef BATTERY_PIN
+    return true;
+#else
+    return false;
+#endif
+  }
+
   uint16_t getBattMilliVolts() override {
   #ifdef BATTERY_PIN
    #ifdef PIN_BAT_ADC_EN
@@ -20,12 +28,19 @@ public:
     analogReference(AR_INTERNAL_3_0);
     analogReadResolution(12);
     delay(10);
-    float volts = (analogRead(BATTERY_PIN) * ADC_MULTIPLIER * AREF_VOLTAGE) / 4096;
+    const int raw = analogRead(BATTERY_PIN);
+   #ifdef PIN_BAT_ADC_EN
+    // The divider is only needed while sampling; do not leave it powered
+    // between battery checks, including after an invalid ADC result.
+    digitalWrite(PIN_BAT_ADC_EN, LOW);
+   #endif
 
     analogReference(AR_DEFAULT);  // put back to default
     analogReadResolution(10);
 
-    return volts * 1000;
+    if (raw < 0 || raw > 4095) return 0;
+    float volts = (raw * ADC_MULTIPLIER * AREF_VOLTAGE) / 4096;
+    return calibrateBatteryMillivolts(volts * 1000);
   #else
     return 0;
   #endif
@@ -71,7 +86,7 @@ public:
 
     // set led on and wait for button release before poweroff
     #ifdef LED_PIN
-    digitalWrite(LED_PIN, HIGH);
+    if (mesh::leds::enabled()) digitalWrite(LED_PIN, HIGH);
     #endif
     #ifdef BUTTON_PIN
     while(digitalRead(BUTTON_PIN));

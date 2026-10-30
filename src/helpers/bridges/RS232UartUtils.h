@@ -5,7 +5,10 @@ namespace bridge {
 
 template <typename UartType, typename PinType>
 inline void prepareNrfUart(UartType& uart, PinType rx, PinType tx) {
-  uart.end();
+  // Adafruit Uart::end() requires a begun peripheral and a live TX semaphore.
+  // Its public bool reports that state; a fresh or already stopped UART must
+  // not wait for stop events or delete an unallocated semaphore.
+  if (uart) uart.end();
   uart.setPins(rx, tx);
 }
 

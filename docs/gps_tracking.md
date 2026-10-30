@@ -50,16 +50,50 @@ GPS on, and manual GPS-on still keeps the cache updated.
 
 Repeaters use a shorter on-demand policy when GPS is manually off. An authorized
 location-telemetry request wakes the receiver only when its cached position is
-stale. The first valid fix is cached and the receiver immediately powers down;
+stale. The first valid fix is cached and GPS processing immediately stops;
 the next request can return that fix without another wake. `gps off` also
 cancels an acquisition already in progress. An acquisition that never obtains a
-fix retains the normal 15-minute safety timeout.
+fix retains the normal 15-minute safety timeout. Physical supply switching
+depends on the board and its shared peripheral policy.
 
 When GPS and device power saving are both enabled, a repeater wakes GPS for up
 to 10 minutes to obtain a valid time and then sleeps it for seven days. A valid
 GPS time may correct the RTC either forward or backward. With device power
 saving off, an enabled GPS remains active and refreshes the RTC every 30
 minutes.
+
+## RAK WisBlock Power Supply
+
+RAK4631 defaults to saved peripheral mode `gps-only`. With no protected power
+owner, stopping or sleeping GPS can turn off the shared `3V3_S` rail. If other
+attached modules need that rail, explicitly select shared mode:
+
+```text
+get peripherals.mode
+set peripherals.mode shared
+reboot
+```
+
+Use `set peripherals.mode gps-only` and reboot to return to the default.
+Changes are saved for the next boot, not applied live; the query reports the
+saved choice. Other peripheral requirements are not guessed from an I2C scan.
+Boot and discovery keep the rail on until the power policy is established.
+
+This saved setting is available in Companion and Common CLI roles (repeater,
+room server, and sensor). Raw KISS and legacy Terminal Chat do not configure
+it and retain the powered rail. Shared mode controls the supply; it does not
+add Ethernet support to a non-Ethernet firmware target.
+
+Ethernet/PoE builds and detected external NOR storage automatically retain
+power regardless of this setting. RAK3401 always retains the rail for its radio
+frontend and does not offer this override.
+
+In shared mode, GPS-off does not mean the supply is off. In particular, the
+[RAK12501/L76K module](https://docs.rakwireless.com/product-categories/wisblock/rak12501/datasheet/)
+has no independent power switch: stopping MCU parsing leaves the receiver
+powered. Internal sleep support on other GNSS modules is receiver-dependent.
+This setting does not remove the UART1 bridge conflict or authorize another
+transmitter on the GPS wiring.
 
 ## Companion/Client Nodes
 

@@ -30,7 +30,7 @@
 #include "esp32/WiFiRadioPolicy.h"
 #endif
 #if defined(ESP32_PLATFORM) && defined(ENABLE_OTA) && \
-    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID))
+    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE))
 #include "esp32/WiFiOtaSeeder.h"
 #endif
 #ifdef WITH_MQTT_BRIDGE
@@ -52,7 +52,7 @@ static uint32_t _atoi(const char* sp) {
 
 #ifdef ESP_PLATFORM
 static bool observerBluetoothWiFiCoexistenceRequired() {
-#if defined(BLE_PIN_CODE) && defined(WIFI_SSID)
+#if defined(BLE_PIN_CODE) && (defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE))
   return true;
 #else
   return false;
@@ -329,6 +329,19 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
   } else if (memcmp(config, "mqtt.rx ", 8) == 0) {
     _mqtt_prefs.mqtt_rx_enabled = memcmp(&config[8], "on", 2) == 0 ? 1 : 0;
     saveObserverPrefs();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.advert.verify ", 19) == 0) {
+    if (strcmp(config + 19, "on") != 0 && strcmp(config + 19, "off") != 0) {
+      strcpy(reply, "Error: must be on or off");
+      return true;
+    }
+    const uint8_t previous = _mqtt_prefs.mqtt_advert_verify;
+    _mqtt_prefs.mqtt_advert_verify = strcmp(config + 19, "on") == 0;
+    if (!saveObserverPrefs()) {
+      _mqtt_prefs.mqtt_advert_verify = previous;
+      strcpy(reply, "Error: settings could not be saved");
+      return true;
+    }
     strcpy(reply, "OK");
   } else if (memcmp(config, "mqtt.interval ", 14) == 0) {
     uint32_t minutes = _atoi(&config[14]);
@@ -654,7 +667,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
         }
       }
     } else {
-      sprintf(reply, "unknown config: %s", config);
+      strcpy(reply, "unknown config");
     }
   } else if (memcmp(config, "mqtt.analyzer.us ", 17) == 0) {
     const int slot = 0;
@@ -956,6 +969,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     sprintf(reply, "> %s", tx_str);
   } else if (memcmp(config, "mqtt.rx", 7) == 0) {
     sprintf(reply, "> %s", _mqtt_prefs.mqtt_rx_enabled ? "on" : "off");
+  } else if (strcmp(config, "mqtt.advert.verify") == 0) {
+    sprintf(reply, "> %s", _mqtt_prefs.mqtt_advert_verify ? "on" : "off");
   } else if (memcmp(config, "mqtt.interval", 13) == 0) {
     uint32_t minutes = (_mqtt_prefs.mqtt_status_interval + 29999) / 60000;
     sprintf(reply, "> %u minutes (%lu ms)", minutes, (unsigned long)_mqtt_prefs.mqtt_status_interval);
@@ -1114,7 +1129,7 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 #endif
     }
 #if defined(ESP32_PLATFORM) && defined(ENABLE_OTA) && \
-    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID))
+    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE))
     mesh::ota::WiFiOtaSeeder::appendStatus(reply, 160);
 #endif
   } else if (memcmp(config, "wifi.powersave", 14) == 0) {
@@ -1311,7 +1326,7 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
         _prefs->ota_channel = ch;
         if (!saveCommonPrefs()) {
           _prefs->ota_channel = previous;
-          strcpy(reply, "ERR: OTA channel save failed; setting unchanged");
+          strcpy(reply, "ERR: save unconfirmed; reboot may differ");
         } else {
           snprintf(reply, 160, "channel set to %s, base %s; run ota update to switch",
                    ota_channel_name(ch), ota_resolve_base(ch));

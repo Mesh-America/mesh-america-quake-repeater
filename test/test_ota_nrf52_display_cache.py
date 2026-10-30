@@ -77,7 +77,7 @@ struct OtaManager {
   enum FetchError { FETCH_ERROR_NONE, FETCH_ERROR_MANIFEST, FETCH_ERROR_HASH_ALGO,
     FETCH_ERROR_VERSION, FETCH_ERROR_CODEC, FETCH_ERROR_GEOMETRY, FETCH_ERROR_TOO_LARGE,
     FETCH_ERROR_STORAGE, FETCH_ERROR_INTEGRITY, FETCH_ERROR_MANIFEST_TIMEOUT,
-    FETCH_ERROR_LEAVES_TIMEOUT };
+    FETCH_ERROR_LEAVES_TIMEOUT, FETCH_ERROR_RADIO_SESSION };
   enum { AUTOFETCH_ANY = 2, AUTOFETCH_SIGNED = 1 };
   struct ServeEntry { bool is_self; uint8_t mid[4]; uint32_t fw_version, have_count; };
   FetchState state = IDLE;
@@ -85,6 +85,8 @@ struct OtaManager {
   unsigned have = 0, total = 26;
   uint8_t mid[4] = {1, 2, 3, 4};
   FetchState fetchState() const { return state; }
+  bool directFetchActive() const { return false; }
+  bool directFetchConfirmed() const { return false; }
   FetchError fetchError() const { return error; }
   unsigned blocksHave() const { return have; }
   unsigned blocksTotal() const { return total; }
@@ -114,7 +116,9 @@ const char* ota_target_env_name(uint32_t) { return "test"; }
 uint8_t ota_bootloader_last_rc() { return 0xB8; }
 bool ota_nrf52_boot_update_result(uint8_t) { return false; }
 @CLI_HELPERS@
-void status(Context& c, char* reply) { @STATUS@ }
+using OtaContext = Context;
+@STATUS@
+void status(Context& c, char* reply) { assert(handle_status(reply, c)); }
 void stats(Context& c, char* reply) { @STATS@ }
 
 static SelfFwInfo image(uint32_t body, uint8_t tag) {
@@ -291,7 +295,7 @@ class OtaNrf52DisplayCacheTest(unittest.TestCase):
         geometry = method(layout, "inline bool mota_nrf52_stage_ceiling_valid(") + "\n" + method(
             layout, "inline bool mota_nrf52_layout_valid(uint32_t app_base, uint32_t stage_ceiling)")
         cli = (ROOT / "src/helpers/ota/OtaCli.cpp").read_text(encoding="utf-8")
-        status = method(cli, '} else if (*a == 0 || is_cmd(a, "status|st", &rest))')
+        status = method(cli, "static __attribute__((noinline)) bool handle_status(")
         stats = method(cli, '} else if (is_cmd(a, "stats", &rest))')
         helpers = "\n".join(method(cli, signature) for signature in (
             "static const char* state_word(", "static const char* state_short(",
@@ -302,7 +306,7 @@ class OtaNrf52DisplayCacheTest(unittest.TestCase):
             "FRESH": method(nrf_source, "bool ota_self_firmware(SelfFwInfo& out)"),
             "DISPLAY": method(self_source, "bool ota_self_firmware_for_display(SelfFwInfo& out)"),
             "CLI_HELPERS": helpers,
-            "STATUS": status[status.index("{") + 1:-1],
+            "STATUS": status,
             "STATS": stats[stats.index("{") + 1:-1],
         }.items():
             source = source.replace("@" + token + "@", value)

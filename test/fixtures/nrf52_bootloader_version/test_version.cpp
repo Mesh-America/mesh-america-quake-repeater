@@ -164,10 +164,19 @@ int main(int argc, char** argv) {
   put32(bytes, OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 20, OTA_XIAO_BOARD_ID_BASE);
   memset(bytes.data() + OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 24, 0, 16);
   memcpy(bytes.data() + OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 24, "SCAP_DFU", 8);
+  put16(bytes, OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 62, 0x123);
+  put32(bytes, OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 64, 0x27000);
+  refreshManifestCrc(bytes);
+  OtaBootloaderIdentity sensecap;
+  assert(ota_bootloader_identity_from_image(bytes.data(), bytes.size(), sensecap));
+  assert(sensecap.board_id == OTA_XIAO_BOARD_ID_BASE);
+  assert(strcmp(sensecap.device_name, "SCAP_DFU") == 0);
+  expect(bytes, "OTAFIX2.4.9"); // exact SenseCAP P1 shares the base USB board ID
+  put32(bytes, OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 20, OTA_XIAO_BOARD_ID_SENSE);
   refreshManifestCrc(bytes);
   OtaBootloaderIdentity unexpected_board;
   assert(!ota_bootloader_identity_from_image(bytes.data(), bytes.size(), unexpected_board));
-  expect(bytes, "v0.11.0-OTAFIX2.4.9"); // diagnostic fallback for an unexpected board name
+  expect(bytes, "v0.11.0-OTAFIX2.4.9"); // SCAP_DFU is not valid on the Sense board ID
   bytes = image(); standalone(bytes, 0x100, "v0.11.0-OTAFIX2.4.9");
   manifest(bytes, 0x020409ff);
   put16(bytes, OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 8, 0);

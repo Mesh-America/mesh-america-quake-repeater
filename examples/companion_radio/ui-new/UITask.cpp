@@ -1,5 +1,6 @@
 #include "UITask.h"
 #include <helpers/TxtDataHelpers.h>
+#include <helpers/MorseLoopPolicy.h>
 #if defined(NRF52_POWER_MANAGEMENT)
 #include <helpers/NRF52VoltagePolicy.h>
 #endif
@@ -22,6 +23,11 @@
 #include "../CompanionWiFi.h"
 #include "target.h"
 #include <time.h>
+#include <math.h>
+#if UI_POCKET_GUI
+  #include "PocketGui.h"
+  #include <helpers/ui/PocketWorldMap.h>
+#endif
 #if defined(ENABLE_WIFI_INTERFACE) || defined(WIFI_SSID)
   #include <WiFi.h>
 #endif
@@ -130,6 +136,9 @@ static mesh::ui::RadioProfileSystemStatus radioProfileSystemStatus(
 
 #if COMPANION_FEATURE_READER
 #include "ReaderScreen.h"
+#if UI_POCKET_GUI
+#include "PocketReaderDisplay.h"
+#endif
 #include <new>
 #endif
 
@@ -304,12 +313,8 @@ static void drawCompanionWiFiSetupPage(DisplayDriver& display) {
     display.drawTextCentered(display.width() / 2, 37, setup_ssid);
 
     char payload[256];
-    const char* setup_password = nullptr;
-#ifdef WEBCONFIG_AP_PASSWORD
-    setup_password = WEBCONFIG_AP_PASSWORD;
-#endif
-    if (mesh::ui::buildWiFiSetupQrPayload(
-            payload, sizeof(payload), setup_ssid, setup_password)) {
+    if (mesh::ui::buildCurrentWiFiSetupQrPayload(
+            payload, sizeof(payload), setup_ssid)) {
       static constexpr int qr_size = 105;
       const int qr_x = (display.width() - qr_size) / 2;
       if (display.drawQrCode(payload, qr_x, 55, qr_size)) {
@@ -418,6 +423,11 @@ public:
 class HomeScreen : public UIScreen {
   enum HomePage {
     FIRST,
+#if UI_POCKET_GUI
+    MAP,
+    STATUS,
+    SETTINGS,
+#endif
 #if UI_MESSAGES_HOME_PAGE == 1
     MESSAGES,
 #endif
@@ -428,7 +438,7 @@ class HomeScreen : public UIScreen {
     RADIO_STATUS,
 #ifdef COMPANION_EXCLUSIVE_WIFI_BLE
     TRANSPORT,
-#else
+#elif defined(BLE_PIN_CODE)
     BLUETOOTH,
 #endif
     ADVERT,
@@ -465,6 +475,17 @@ class HomeScreen : public UIScreen {
   uint32_t _radio_profile_page_started_at = 0;
   uint8_t _radio_status_page = 0;
   bool _dual_radio_enabled_seen = false;
+#if UI_POCKET_GUI
+  mesh::ui::pocket::PocketGui _pocket;
+  bool _pocket_editing = false;
+  bool _pocket_browsing = false;
+  bool _pocket_zooming = false;
+  bool _pocket_map_located = false;
+  bool _pocket_dirty = false;
+  uint8_t _pocket_setting = 0;
+  uint32_t _pocket_last_input = 0;
+  uint32_t _pocket_save_retry = 0;
+#endif
   AdvertPath recent[UI_RECENT_LIST_SIZE];
 #if !(defined(UI_NO_DISCOVER_SCREEN) && (UI_NO_DISCOVER_SCREEN + 0 != 0))
   DiscoveredNode discovered[UI_RECENT_LIST_SIZE];
@@ -575,7 +596,7 @@ class HomeScreen : public UIScreen {
   int sensors_nb = 0;
   bool sensors_scroll = false;
   int sensors_scroll_offset = 0;
-  int next_sensors_refresh = 0;
+  uint32_t last_sensors_refresh = 0;
 
   void refresh_sensors() {
     // CayenneLPP retains its requested capacity even if its allocation fails.
@@ -586,7 +607,15 @@ class HomeScreen : public UIScreen {
       sensors_scroll_offset = 0;
       return;
     }
-    if (millis() > next_sensors_refresh) {
+#if AUTO_OFF_MILLIS > 0
+    const uint32_t refresh_interval = 5000;
+#else
+    const uint32_t refresh_interval = 60000;
+#endif
+    // Empty data requests an initial/forced sample. Elapsed time also handles
+    // returning to this page after more than half a millis() cycle.
+    if (sensors_lpp.getSize() == 0
+        || static_cast<uint32_t>(millis() - last_sensors_refresh) >= refresh_interval) {
       sensors_lpp.reset();
       sensors_nb = 0;
       sensors_lpp.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
@@ -598,11 +627,7 @@ class HomeScreen : public UIScreen {
         sensors_nb ++;
       }
       sensors_scroll = sensors_nb > UI_RECENT_LIST_SIZE;
-#if AUTO_OFF_MILLIS > 0
-      next_sensors_refresh = millis() + 5000; // refresh sensor values every 5 sec
-#else
-      next_sensors_refresh = millis() + 60000; // refresh sensor values every 1 min
-#endif
+      last_sensors_refresh = millis();
     }
   }
 
@@ -618,6 +643,11 @@ class HomeScreen : public UIScreen {
   }
 
   void movePage(int direction) {
+#if UI_POCKET_GUI
+    flushPocketSettings();
+    _pocket_editing = _pocket_browsing = _pocket_zooming = false;
+    displayForceClean();
+#endif
     do {
       _page = (_page + HomePage::Count + direction) % HomePage::Count;
     } while (!isPageVisible(_page));
@@ -634,7 +664,277 @@ class HomeScreen : public UIScreen {
         : UI_RADIO_REFRESH_MILLIS;
   }
 
+#if UI_POCKET_GUI
+  void displayForceClean() { _task->cleanPocketDisplay(); }
+
+  void cyclePocketChannel(int direction) {
+    auto& settings = _task->pocketSettings();
+    const int previous = settings.channel;
+    int selected = previous;
+    for (int attempt = 0; attempt < MAX_GROUP_CHANNELS; ++attempt) {
+      selected = (selected + MAX_GROUP_CHANNELS + direction) % MAX_GROUP_CHANNELS;
+      ChannelDetails channel;
+      if (the_mesh.getChannel(selected, channel) && channel.name[0]) {
+        settings.channel = selected;
+        break;
+      }
+    }
+    _pocket_dirty |= previous != settings.channel;
+    _pocket.resetScroll();
+  }
+
+  static bool pocketLocation(double latitude, double longitude) {
+    return isfinite(latitude) && isfinite(longitude)
+        && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180
+        && (latitude != 0 || longitude != 0);
+  }
+
+  __attribute__((noinline)) void renderPocketMap() {
+    using namespace mesh::ui::pocket;
+    const auto& settings = _task->pocketSettings();
+    const double own_lat = sensors.node_lat, own_lon = sensors.node_lon;
+    const bool have_own = pocketLocation(own_lat, own_lon);
+    double latitude = own_lat, longitude = own_lon;
+    bool located = have_own;
+    ContactInfo contact;
+    if (!located) {
+      auto contacts = the_mesh.startContactsIterator();
+      while (contacts.hasNext(&the_mesh, contact)) {
+        latitude = contact.gps_lat * 1e-6;
+        longitude = contact.gps_lon * 1e-6;
+        if (pocketLocation(latitude, longitude)) { located = true; break; }
+      }
+    }
+    if (_pocket_map_located != located) displayForceClean();
+    _pocket_map_located = located;
+    if (!located && _pocket_zooming) {
+      _pocket_zooming = false;
+      if (_pocket_dirty) flushPocketSettings();
+    }
+    MapView view = {located ? latitude : 0, located ? longitude : 0,
+        mapHeightKm(settings, located), _pocket.width(),
+        _pocket.bodyBottom() - _pocket.bodyTop()};
+    if (!renderWorldMap(view, [](void* context, int x0, int y0, int x1, int y1) {
+          auto& gui = *static_cast<PocketGui*>(context);
+          gui.line(x0, y0 + gui.bodyTop(), x1, y1 + gui.bodyTop());
+        }, &_pocket)) {
+      _pocket.label(3, 40, "Map unavailable");
+    }
+    int x, y;
+    unsigned shown = 0, labels = 0;
+    auto contacts = the_mesh.startContactsIterator();
+    while (contacts.hasNext(&the_mesh, contact)) {
+      latitude = contact.gps_lat * 1e-6; longitude = contact.gps_lon * 1e-6;
+      if (!pocketLocation(latitude, longitude)
+          || !projectWorldPoint(view, latitude, longitude, x, y)) continue;
+      _pocket.marker(x, y + _pocket.bodyTop());
+      ++shown;
+      if (view.height_km <= 50 && labels < 4 && x < view.width - 52 && y >= 10) {
+        char name[12];
+        sanitizeText(name, sizeof(name), contact.name, strnlen(contact.name, sizeof(contact.name)));
+        truncateCharacters(name, 8);
+        _pocket.label(x + 4, y + _pocket.bodyTop() - 3, name);
+        ++labels;
+      }
+    }
+    if (have_own && projectWorldPoint(view, own_lat, own_lon, x, y))
+      _pocket.marker(x, y + _pocket.bodyTop(), true);
+    char summary[40];
+    if (located) snprintf(summary, sizeof(summary), "%u nodes%s", shown,
+        view.height_km < 100 ? " / coarse coast" : "");
+    else snprintf(summary, sizeof(summary), "%sno node locations",
+        view.height_km == 20000 ? "World / " : "");
+    _pocket.label(3, _pocket.bodyTop() + 9, summary);
+    _pocket.renderMapChrome((unsigned)view.height_km, located
+        ? (_pocket_zooming ? "1x zoom in  2x out  hold done" : "click next  2x back  hold zoom")
+        : "click next  2x back");
+  }
+
+  int renderPocket(DisplayDriver& display) {
+    using namespace mesh::ui::pocket;
+    const auto& settings = _task->pocketSettings();
+    Frame frame;
+    const uint32_t uptime_now = millis();
+    _uptime_millis += uint32_t(uptime_now - _uptime_last_millis);
+    _uptime_last_millis = uptime_now;
+    frame.now = _rtc->getCurrentTime(); frame.heard_millis = companionMessageNowMillis();
+    frame.tz_offset = _node_prefs->tz_offset;
+    frame.battery_percent = (int(_task->getBattMilliVolts()) - BATT_MIN_MILLIVOLTS)
+        * 100 / (BATT_MAX_MILLIVOLTS - BATT_MIN_MILLIVOLTS);
+#if defined(NRF52_POWER_MANAGEMENT)
+    frame.battery_percent = mesh::power::configuredBatteryPercent(_task->getBattMilliVolts());
+#endif
+    frame.connection = _task->connectedClientLabel();
+    frame.page_count = frame.page_index = 0;
+    for (unsigned page = 0; page < HomePage::Count; ++page) if (isPageVisible(page)) {
+      if (page < _page) ++frame.page_index;
+      ++frame.page_count;
+    }
+    frame.rotation = DISPLAY_ROTATION;
+    if (_pocket_browsing) frame.hint = "1x older  2x newer  hold exit";
+    else if (_pocket_zooming) frame.hint = "1x zoom in  2x out  hold done";
+    else if (_pocket_editing) frame.hint = "1x value  2x field  hold save";
+    else if (isRadioPage()) frame.hint = "click next  2x back";
+    else if (_page == HomePage::FIRST) frame.hint = "click next  2x back  hold browse";
+    else if (_page == HomePage::MAP) frame.hint = "click next  2x back  hold zoom";
+    else if (_page == HomePage::SETTINGS) frame.hint = "click next  2x back  hold edit";
+    else frame.hint = "click next  2x back  hold action";
+    static_cast<GxEPDDisplay&>(display).setMaxPartialRefresh(refreshCount(settings));
+    _pocket.begin(static_cast<GxEPDDisplay&>(display), settings, frame);
+    ChannelDetails channel;
+    char channel_name[32] = {};
+    if (the_mesh.getChannel(settings.channel, channel))
+      StrHelper::strncpy(channel_name, channel.name, sizeof(channel_name));
+    if (_page == HomePage::FIRST) _task->renderPocketBoard(_pocket);
+    else if (_page == HomePage::MAP) { renderPocketMap(); return 10000; }
+    else if (_page == HomePage::SETTINGS) _pocket.renderSettings(_pocket_setting, _pocket_editing, channel_name);
+    else {
+      char text[80];
+      int y = _pocket.bodyTop() + 10;
+      auto row = [&](const char* value) {
+        if (y <= _pocket.bodyBottom() - 2) _pocket.label(4, y, value);
+        y += 14;
+      };
+      if (_page == HomePage::STATUS) {
+        _pocket.header("Status", (_radio_status_page & 1) ? "2 / 2" : "1 / 2");
+        if ((_radio_status_page & 1) == 0) {
+          snprintf(text, sizeof(text), "Uptime %lu min  battery %u mV", (unsigned long)(_uptime_millis / 60000), _task->getBattMilliVolts()); row(text);
+          snprintf(text, sizeof(text), "RX %lu flood / %lu direct", (unsigned long)the_mesh.getNumRecvFlood(), (unsigned long)the_mesh.getNumRecvDirect()); row(text);
+          snprintf(text, sizeof(text), "TX %lu flood / %lu direct", (unsigned long)the_mesh.getNumSentFlood(), (unsigned long)the_mesh.getNumSentDirect()); row(text);
+          snprintf(text, sizeof(text), "Inbox %d / %d  errors %04X", _task->getMsgCount(), the_mesh.getOfflineQueueCapacity(), the_mesh.getErrFlags()); row(text);
+          mesh::Utils::toHex(text, the_mesh.self_id.pub_key, 6); row(text);
+        } else {
+          const auto status = radioProfileSystemStatus(*_node_prefs);
+          snprintf(text, sizeof(text), "Power saving %s / GPS %s", status.powersaving_enabled ? "on" : "off", status.gps_enabled ? "on" : "off"); row(text);
+          snprintf(text, sizeof(text), "FEM %s / RX boost %s", status.fem_enabled ? "on" : "off", status.rx_boosted_gain ? "on" : "off"); row(text);
+          snprintf(text, sizeof(text), "RX power saving %s / CAD %s", status.rx_powersaving_enabled ? "on" : "off", status.cad_enabled ? "on" : "off"); row(text);
+          mesh::ui::formatRadioProfileNoiseFloor(text, sizeof(text), "Radio 1 noise", status.noise_floor_1, status.noise_floor_1_seconds); row(text);
+        }
+      } else if (_page == HomePage::RECENT) {
+        _pocket.header("Recently heard");
+        const int count = the_mesh.getRecentlyHeard(recent, UI_RECENT_LIST_SIZE);
+        for (int i = 0; i < count && y <= _pocket.bodyBottom(); ++i) {
+          char name[40]; sanitizeText(name, sizeof(name), recent[i].name, strnlen(recent[i].name, sizeof(recent[i].name)));
+          snprintf(text, sizeof(text), "%.28s  %lum", name, (unsigned long)((frame.now - recent[i].recv_timestamp) / 60)); row(text);
+        }
+        if (!count) row("No adverts heard yet");
+      } else if (_page == HomePage::RADIO_STATUS) {
+        _pocket.header("Radio status", (_radio_status_page & 1) ? "2 / 2" : "1 / 2");
+        const auto status = radioProfileSystemStatus(*_node_prefs);
+        if ((_radio_status_page & 1) == 0) {
+          snprintf(text, sizeof(text), "Power saving %s / GPS %s", status.powersaving_enabled ? "on" : "off", status.gps_enabled ? "on" : "off"); row(text);
+          snprintf(text, sizeof(text), "FEM %s / RX boost %s", status.fem_enabled ? "on" : "off", status.rx_boosted_gain ? "on" : "off"); row(text);
+          snprintf(text, sizeof(text), "RX power saving %s / CAD %s", status.rx_powersaving_enabled ? "on" : "off", status.cad_enabled ? "on" : "off"); row(text);
+        } else {
+          mesh::ui::formatRadioProfileNoiseFloor(text, sizeof(text), "Radio 1 noise", status.noise_floor_1, status.noise_floor_1_seconds); row(text);
+          mesh::ui::formatRadioProfileNoiseFloor(text, sizeof(text), "Radio 2 noise", status.noise_floor_2, status.noise_floor_2_seconds); row(text);
+          snprintf(text, sizeof(text), "Radio2 %s%s / cross %s", status.secondary_mode == mesh::RadioProfileMode::RxTx ? "RX/TX" : "RX",
+              status.secondary_temporary ? " temporary" : "", status.cross == mesh::RadioCrossMode::Off ? "off" : status.cross == mesh::RadioCrossMode::On ? "on" : "auto"); row(text);
+        }
+        row("Hold for more status");
+      } else if (_page == HomePage::RADIO || _page == HomePage::RADIO2) {
+        const auto* radio = the_mesh.getProfileRadio();
+        const auto* profiles = radio ? radio->profiles() : nullptr;
+        const bool secondary = _page == HomePage::RADIO2 && profiles && profiles->enabled();
+        _pocket.header(secondary ? "Radio 2" : "Network");
+        mesh::RadioProfileParams params;
+        if (profiles && profiles->enabled()) params = profiles->params(secondary ? 1 : 0);
+        else { params.freq = _node_prefs->freq; params.bw = _node_prefs->bw; params.sf = _node_prefs->sf; params.cr = _node_prefs->cr; }
+        snprintf(text, sizeof(text), "%.3f MHz / %.2f kHz", params.freq, params.bw); row(text);
+        snprintf(text, sizeof(text), "SF%u CR%u / %d dBm", params.sf, params.cr, _node_prefs->tx_power_dbm); row(text);
+        snprintf(text, sizeof(text), "Noise %.1f dBm / RX boost %s", radio_driver.getNoiseFloorDbm(secondary ? 1 : 0), _node_prefs->rx_boosted_gain ? "on" : "off"); row(text);
+        if (profiles && profiles->enabled()) {
+          snprintf(text, sizeof(text), "Radio2 %s%s / cross %s", profiles->secondary.mode == mesh::RadioProfileMode::RxTx ? "RX/TX" : "RX",
+              profiles->secondary_temporary ? " temporary" : "", profiles->cross == mesh::RadioCrossMode::Off ? "off" : profiles->cross == mesh::RadioCrossMode::On ? "on" : "auto"); row(text);
+          snprintf(text, sizeof(text), "Switches %lu / failures %lu", (unsigned long)profiles->switches, (unsigned long)profiles->switch_failures); row(text);
+        } else row("Radio2 off");
+#if UI_MESSAGES_HOME_PAGE == 1
+      } else if (_page == HomePage::MESSAGES) {
+        _pocket.header(_task->inboxTitle()); _task->renderPocketInbox(_pocket);
+#endif
+#if defined(BLE_PIN_CODE)
+      } else if (_page == HomePage::BLUETOOTH) {
+        _pocket.header("Bluetooth"); row(_task->isBluetoothEnabled() ? "Bluetooth enabled" : "Bluetooth disabled");
+        row(_task->hasBluetoothConnection() ? "App connected" : "Waiting for an app"); row("Hold to toggle Bluetooth");
+#endif
+      } else if (_page == HomePage::ADVERT) {
+        _pocket.header("Advert"); row("Hold to send a local advert");
+        snprintf(text, sizeof(text), "Node: %.31s", _node_prefs->node_name); row(text);
+#if ENV_INCLUDE_GPS == 1
+      } else if (_page == HomePage::GPS) {
+        _pocket.header("Location");
+        snprintf(text, sizeof(text), "Latitude %.6f", sensors.node_lat); row(text);
+        snprintf(text, sizeof(text), "Longitude %.6f", sensors.node_lon); row(text);
+        row(_task->getGPSState() ? "GPS enabled" : "GPS disabled"); row("Hold to toggle GPS");
+#endif
+#if UI_SENSORS_PAGE == 1
+      } else if (_page == HomePage::SENSORS) {
+        _pocket.header("Sensors"); refresh_sensors();
+        LPPReader readings(sensors_lpp.getBuffer(), sensors_lpp.getSize());
+        uint8_t channel_id, type;
+        for (int i = 0; i < sensors_scroll_offset && readings.readHeader(channel_id, type); ++i)
+          readings.skipData(type);
+        while (y <= _pocket.bodyBottom() - 2 && readings.readHeader(channel_id, type)) {
+          float value;
+          switch (type) {
+            case LPP_GPS: {
+              float lat, lon, alt; readings.readGPS(lat, lon, alt);
+              snprintf(text, sizeof(text), "GPS %.4f / %.4f", lat, lon); break;
+            }
+            case LPP_VOLTAGE: readings.readVoltage(value); snprintf(text, sizeof(text), "Voltage %.2f V", value); break;
+            case LPP_CURRENT: readings.readCurrent(value); snprintf(text, sizeof(text), "Current %.3f A", value); break;
+            case LPP_TEMPERATURE: readings.readTemperature(value); snprintf(text, sizeof(text), "Temperature %.2f C", value); break;
+            case LPP_RELATIVE_HUMIDITY: readings.readRelativeHumidity(value); snprintf(text, sizeof(text), "Humidity %.2f %%", value); break;
+            case LPP_BAROMETRIC_PRESSURE: readings.readPressure(value); snprintf(text, sizeof(text), "Pressure %.2f hPa", value); break;
+            case LPP_ALTITUDE: readings.readAltitude(value); snprintf(text, sizeof(text), "Altitude %.0f m", value); break;
+            case LPP_POWER: readings.readPower(value); snprintf(text, sizeof(text), "Power %.2f W", value); break;
+            default: readings.skipData(type); continue;
+          }
+          row(text);
+        }
+        if (y == _pocket.bodyTop() + 10) row("No sensor readings");
+        if (sensors_scroll) sensors_scroll_offset = (sensors_scroll_offset + 1) % sensors_nb;
+#endif
+#if !(defined(UI_NO_DISCOVER_SCREEN) && (UI_NO_DISCOVER_SCREEN + 0 != 0))
+      } else if (_page == HomePage::DISCOVERY) {
+        _pocket.header("Repeaters nearby");
+        const int count = the_mesh.getDiscoveredNodes(discovered, UI_RECENT_LIST_SIZE);
+        for (int i = 0; i < count && y <= _pocket.bodyBottom(); ++i) {
+          char name[33]; StrHelper::strncpy(name, discovered[i].name, sizeof(name));
+          if (!name[0] || !discovery_disp_names) mesh::Utils::toHex(name, discovered[i].pubkey_prefix, 4);
+          snprintf(text, sizeof(text), "%.28s  %.1f dB", name, discovered[i].snr_in); row(text);
+        }
+        if (!count) row("Hold to discover nearby repeaters");
+#endif
+#ifndef UI_NO_HIBERNATE
+      } else if (_page == HomePage::SHUTDOWN) {
+        _pocket.header("Power"); row("Hold to shut down");
+#endif
+      } else _pocket.header(_node_prefs->node_name);
+      _pocket.footer();
+    }
+    return 5000;
+  }
+#endif
+
 public:
+#if UI_POCKET_GUI
+  bool isPocketBoard() const { return _page == HomePage::FIRST; }
+  void pocketMessageAdded(int channel) {
+    if (channel == _task->pocketSettings().channel) _pocket.messageAdded();
+  }
+  bool flushPocketSettings() {
+    if (!_pocket_dirty) return true;
+    if (!the_mesh.savePocketGuiSettings(_task->pocketSettings())) {
+      _pocket_save_retry = millis() + 30000;
+      _task->showAlert("Settings save failed", 1500);
+      return false;
+    }
+    _pocket_dirty = false;
+    _pocket_save_retry = 0;
+    return true;
+  }
+#endif
   HomeScreen(UITask* task, mesh::RTCClock* rtc, SensorManager* sensors, CompanionNodePrefs* node_prefs)
      : _task(task), _rtc(rtc), _sensors(sensors), _node_prefs(node_prefs), _page(0),
        _shutdown_init(false),
@@ -650,7 +950,16 @@ public:
 #endif
   }
 
-  void showFirstPage() { _page = HomePage::FIRST; }
+  void showFirstPage() {
+#if UI_POCKET_GUI
+    flushPocketSettings();
+    if (_page != HomePage::FIRST) displayForceClean();
+    _pocket_editing = _pocket_browsing = _pocket_zooming = false;
+    _pocket.resetScroll();
+    _pocket_last_input = millis();
+#endif
+    _page = HomePage::FIRST;
+  }
 #if COMPANION_FEATURE_READER
   bool isRadioPage() const {
     return _page == HomePage::RADIO || _page == HomePage::RADIO2;
@@ -670,11 +979,25 @@ public:
 #endif
 
   void poll() override {
+#if UI_POCKET_GUI
+    const uint32_t pocket_now = millis();
+    if (_pocket_dirty && _pocket_save_retry && int32_t(pocket_now - _pocket_save_retry) >= 0)
+      flushPocketSettings();
+    const uint32_t idle = mesh::ui::pocket::idleMillis(_task->pocketSettings());
+    if (idle && uint32_t(pocket_now - _pocket_last_input) >= idle
+        && (_page != HomePage::FIRST || _pocket_browsing)) {
+      showFirstPage();
+      _task->gotoHomeScreen();
+    }
+#endif
     if (_dual_radio_enabled_seen != the_mesh.isDualRadioActive()) {
       resetRadioProfileDisplayPage();
     }
     if (!isPageVisible(_page)) {
       _page = HomePage::RADIO;
+#if UI_POCKET_GUI
+      displayForceClean();
+#endif
       resetRadioProfileDisplayPage();
     }
 #if UI_WIFI_SETUP_HOME_PAGE == 1
@@ -702,6 +1025,9 @@ public:
   }
 
   int render(DisplayDriver& display) override {
+#if UI_POCKET_GUI
+    return renderPocket(display);
+#endif
     display.setTextSize(1);
     const int normal_line = !display.useSmallMessageFont()
         && display.renderWidth() == display.width() ? display.textLineHeight() : 11;
@@ -734,9 +1060,7 @@ public:
       display.setColor(UIColor::corp_blue);
     }
     int y = header_height + 2;
-    const int visible_pages = HomePage::Count
-        - (the_mesh.isDualRadioActive() ? 0 : 2);
-    int x = display.width() / 2 - 5 * (visible_pages - 1);
+    int x = 5;
     for (uint8_t i = 0; i < HomePage::Count; i++) {
       if (!isPageVisible(i)) continue;
       if (i == _page) {
@@ -924,8 +1248,11 @@ public:
         #ifdef UI_SHOW_CLOCK
         display.setTextSize(3);
         uint32_t now = _rtc->getCurrentTime();
-        int8_t tz = _node_prefs->tz_offset;
-        now += (int32_t)tz * 3600;
+        const float tz = _node_prefs->tz_offset;
+        // Keep fractional hours and reject corrupt values before conversion.
+        if (isfinite(tz) && tz >= -12.0f && tz <= 14.0f) {
+          now += static_cast<int32_t>(tz * 3600.0f);
+        }
         DateTime dt (now);
         sprintf(tmp, "%02d:%02d", dt.hour(), dt.minute());
         rows.draw(tmp);
@@ -1105,7 +1432,7 @@ public:
           display.width() / 2, layout.prompt_y, PRESS_LABEL);
 #endif
       display.setCompactText(false);
-#else
+#elif defined(BLE_PIN_CODE)
     } else if (_page == HomePage::BLUETOOTH) {
       display.setColor(UIColor::corp_blue);
       display.drawXbm((display.width() - 32) / 2, body_top - 2,
@@ -1317,6 +1644,61 @@ public:
   bool handleInput(char c) override {
     // Navigation codes exceed 0x7f; keep them valid with signed char too.
     const uint8_t key = static_cast<uint8_t>(c);
+#if UI_POCKET_GUI
+    _pocket_last_input = millis();
+    auto& settings = _task->pocketSettings();
+    if (_page == HomePage::SETTINGS && key == KEY_ENTER) {
+      _pocket_editing = !_pocket_editing;
+      if (!_pocket_editing) flushPocketSettings();
+      return true;
+    }
+    if (_page == HomePage::SETTINGS && _pocket_editing) {
+      if (key == KEY_PREV || key == KEY_LEFT) {
+        _pocket_setting = (_pocket_setting + 1) % mesh::ui::pocket::SETTINGS_COUNT;
+        return true;
+      }
+      if (key == KEY_NEXT || key == KEY_RIGHT) {
+        const uint8_t previous_dark = settings.dark, previous_flip = settings.flip;
+        if (_pocket_setting == 0) cyclePocketChannel(1);
+        else mesh::ui::pocket::cycleSetting(settings, _pocket_setting, MAX_GROUP_CHANNELS);
+        _pocket_dirty = true;
+        if (previous_dark != settings.dark || previous_flip != settings.flip) displayForceClean();
+        _pocket.resetScroll();
+        return true;
+      }
+    }
+    if (_page == HomePage::FIRST) {
+      if (key == KEY_ENTER) { _pocket_browsing = !_pocket_browsing; return true; }
+      if (key == KEY_DOWN || key == KEY_UP) {
+        cyclePocketChannel(key == KEY_DOWN ? 1 : -1);
+        flushPocketSettings();
+        return true;
+      }
+      if (_pocket_browsing) {
+        if (key == KEY_NEXT || key == KEY_RIGHT) { _pocket.scrollOlder(_task->pocketBoardCount()); return true; }
+        if (key == KEY_PREV || key == KEY_LEFT) { _pocket.scrollNewer(); return true; }
+      }
+    }
+    if (_page == HomePage::MAP) {
+      if (key == KEY_ENTER) {
+        if (!_pocket_map_located) {
+          _task->showAlert("Set location in app to zoom", 1500);
+          return true;
+        }
+        _pocket_zooming = !_pocket_zooming;
+        if (!_pocket_zooming) flushPocketSettings();
+        return true;
+      }
+      if (_pocket_zooming && (key == KEY_NEXT || key == KEY_RIGHT || key == KEY_PREV || key == KEY_LEFT)) {
+        const bool closer = key == KEY_NEXT || key == KEY_RIGHT;
+        if (mesh::ui::pocket::zoomMap(settings, closer, _pocket_map_located)) {
+          _pocket_dirty = true;
+          displayForceClean();
+        }
+        return true;
+      }
+    }
+#endif
     if (key == KEY_LEFT || key == KEY_PREV) {
       movePage(-1);
       return true;
@@ -1339,8 +1721,15 @@ public:
 #endif
       return true;
     }
-    if (key == KEY_ENTER && _page == HomePage::RADIO_STATUS) {
+    if (key == KEY_ENTER && (_page == HomePage::RADIO_STATUS
+#if UI_POCKET_GUI
+                            || _page == HomePage::STATUS
+#endif
+                            )) {
       _radio_status_page++;
+#if UI_POCKET_GUI
+      displayForceClean();
+#endif
       return true;
     }
 #ifdef COMPANION_EXCLUSIVE_WIFI_BLE
@@ -1369,7 +1758,7 @@ public:
       if (requested != active) _task->shutdown(true);
       return true;
     }
-#else
+#elif defined(BLE_PIN_CODE)
     if (key == KEY_ENTER && _page == HomePage::BLUETOOTH) {
       if (_task->isBluetoothEnabled()) {  // toggle Bluetooth on/off
         _task->disableBluetooth();
@@ -1419,7 +1808,7 @@ public:
 #if UI_SENSORS_PAGE == 1
     if (key == KEY_ENTER && _page == HomePage::SENSORS) {
       _task->toggleGPS();
-      next_sensors_refresh=0;
+      sensors_lpp.reset();
       return true;
     }
 #endif
@@ -1610,6 +1999,19 @@ public:
 #endif
   explicit MsgPreviewScreen(UITask* task)
       : _task(task), view_offset(0), channel_filter(CHANNEL_FILTER_ALL) {}
+#if UI_POCKET_GUI
+  MessageHistory& pocketHistory() { return history; }
+  const MessageHistory& pocketHistory() const { return history; }
+  void addSent(int channel_idx, const char* channel_name, const char* sender,
+               const char* text, size_t length) {
+    char message[UI_MSG_PREVIEW_SIZE];
+    if (length >= sizeof(message)) length = sizeof(message) - 1;
+    memcpy(message, text, length);
+    message[length] = 0;
+    history.add(companionMessageNowMillis(), channel_idx, channel_name, sender,
+                message, -1, true);
+  }
+#endif
 
   bool hasMessages() const {
     for (size_t age = 0; age < history.count(); ++age)
@@ -1947,6 +2349,10 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
 #endif
 
   _node_prefs = node_prefs;
+#if UI_POCKET_GUI
+  the_mesh.loadPocketGuiSettings(_pocket_settings);
+  if (_display) _display->forceFullRefresh();
+#endif
 
   if (_display != NULL) {
     _display->servicePower(_board->isExternalPowered() || _board->isUsbHostConnected(), hasConnection());
@@ -1960,9 +2366,13 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
 
 #if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   vibration.begin();
+  vibration.quiet(_node_prefs->vibe_quiet);
 #endif
 
   ui_started_at = millis();
+  _startup_complete = false;
+  next_batt_chck = _next_refresh = ui_started_at;
+  _alert[0] = 0;
   _alert_expiry = 0;
 
   splash = new SplashScreen(this);
@@ -1976,7 +2386,7 @@ void UITask::serviceWiFiToggleButton() {
   if (wifi_btn.check() == BUTTON_EVENT_CLICK) {
     const bool enabled = toggleCompanionWiFi();
     showAlert(enabled ? "WiFi: ON" : "WiFi: OFF", 1200);
-    _next_refresh = 0;
+    _next_refresh = millis();
   }
 #endif
 }
@@ -1994,7 +2404,13 @@ void UITask::showMessages() {
 void UITask::showReader() {
   if (!_display || isPairingScreenActive()) return;
   if (!_display->isOn()) _display->wake(mesh::ui::DisplayWake::Button);
+#if UI_POCKET_GUI
+  static mesh::ui::pocket::PocketReaderDisplay reader_display(
+      *static_cast<GxEPDDisplay*>(_display));
+  if (!reader) reader = new (std::nothrow) ReaderScreen(this, &reader_display);
+#else
   if (!reader) reader = new (std::nothrow) ReaderScreen(this, _display);
+#endif
   if (!reader) { showAlert("Reader: no memory", 1500); return; }
   static_cast<ReaderScreen*>(reader)->open();
   setCurrScreen(reader);
@@ -2022,6 +2438,50 @@ void UITask::renderMessageSummary(DisplayDriver& display) const {
   static_cast<const MsgPreviewScreen*>(msg_preview)->renderSummary(display);
 }
 
+#if UI_POCKET_GUI
+void UITask::renderPocketBoard(mesh::ui::pocket::PocketGui& gui) const {
+  ChannelDetails channel;
+  char name[32] = {};
+  if (the_mesh.getChannel(_pocket_settings.channel, channel))
+    StrHelper::strncpy(name, channel.name, sizeof(name));
+  gui.renderBoard(static_cast<MsgPreviewScreen*>(msg_preview)->pocketHistory(), name);
+}
+
+unsigned UITask::pocketBoardCount() const {
+  const auto& history = static_cast<const MsgPreviewScreen*>(msg_preview)->pocketHistory();
+  unsigned count = 0;
+  for (size_t age = 0; age < history.count(); ++age)
+    if (history.newest(age)->channel_idx == _pocket_settings.channel) ++count;
+  return count;
+}
+
+void UITask::renderPocketInbox(mesh::ui::pocket::PocketGui& gui) const {
+  const auto& history = static_cast<const MsgPreviewScreen*>(msg_preview)->pocketHistory();
+  int y = gui.bodyTop() + 10;
+  for (size_t age = 0; age < history.count() && y + 13 <= gui.bodyBottom(); ++age) {
+    const auto* entry = history.newest(age);
+    if (mesh::ui::displayPowerPrefs().inbox == mesh::ui::DisplayInboxMode::Pending
+        && entry->queue_index < 0) continue;
+    if (mesh::ui::displayPowerPrefs().inbox == mesh::ui::DisplayInboxMode::Unread
+        && !entry->unread) continue;
+    char label[48];
+    mesh::ui::CompanionMessageHistory<32, UI_MSG_PREVIEW_SIZE>::threadLabel(*entry, label, sizeof(label));
+    mesh::ui::pocket::truncateCharacters(label, 32);
+    gui.label(4, y, label, entry->unread);
+    y += 15;
+  }
+  if (y == gui.bodyTop() + 10) gui.label(4, y, "No messages");
+}
+
+void UITask::channelMessageSent(int channel_idx, const char* channel_name,
+                               const char* sender, const char* text, size_t length) {
+  if (!msg_preview || channel_idx < 0 || channel_idx >= MAX_GROUP_CHANNELS) return;
+  static_cast<MsgPreviewScreen*>(msg_preview)->addSent(channel_idx, channel_name, sender, text, length);
+  static_cast<HomeScreen*>(home)->pocketMessageAdded(channel_idx);
+  if (_display && _display->isOn()) _next_refresh = millis();
+}
+#endif
+
 void UITask::notify(UIEventType t) {
 #if defined(PIN_BUZZER)
 if (_notification_outputs & mesh::notify::Sound) switch(t){
@@ -2043,7 +2503,7 @@ if (_notification_outputs & mesh::notify::Sound) switch(t){
 }
 #endif
 
-#ifdef PIN_VIBRATION
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   // Trigger vibration for all UI events except none
   if ((_notification_outputs & mesh::notify::Vibration) && t != UIEventType::none) {
     vibration.trigger();
@@ -2053,7 +2513,7 @@ if (_notification_outputs & mesh::notify::Sound) switch(t){
 
 void UITask::msgRead(int msgcount) {
   _msgcount = msgcount;
-  _next_refresh = 0;
+  _next_refresh = millis();
 }
 
 void UITask::syncMessageQueue(int msgcount, int removed_index) {
@@ -2070,6 +2530,9 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text,
   ((MsgPreviewScreen *)msg_preview)
       ->addPreview(path_len, from_name, text, channel_idx, channel_name,
                     queue_index, !hasConnection());
+#if UI_POCKET_GUI
+  static_cast<HomeScreen*>(home)->pocketMessageAdded(channel_idx);
+#endif
   if (hasConnection()) {
     // Keep history, but do not change the page or wake for a connected client.
     _deferred_msg_preview = false;
@@ -2084,6 +2547,12 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text,
     _deferred_msg_preview = true;
   }
 #endif
+#if UI_POCKET_GUI
+  else if (channel_idx >= 0 && curr == home && static_cast<HomeScreen*>(home)->isPocketBoard()) {
+    // Keep the live channel board visible while retaining normal notifications.
+    _deferred_msg_preview = false;
+  }
+#endif
   else {
     setCurrScreen(msg_preview);
   }
@@ -2092,33 +2561,39 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text,
     if (shouldWakeDisplayForMessage()) {
       _display->wake(mesh::ui::DisplayWake::Message);
     }
-    if (_display->isOn()) _next_refresh = 0;
+    if (_display->isOn()) _next_refresh = millis();
   }
 }
 
 void UITask::userLedHandler() {
+  if (!mesh::leds::enabled()) return;
   if (_notification_led_owned || !(_notification_outputs & mesh::notify::Led)) return;
 #ifdef PIN_STATUS_LED
-  int cur_time = millis();
-  if (cur_time > next_led_change) {
+  const uint32_t cur_time = millis();
+  // Phase age also survives long notification-owned or disabled intervals.
+  if (static_cast<uint32_t>(cur_time - last_led_change) > led_phase_millis) {
     if (led_state == 0) {
       led_state = 1;
       if (_msgcount > 0) {
-        last_led_increment = LED_ON_MSG_MILLIS;
+        led_phase_millis = LED_ON_MSG_MILLIS;
       } else {
-        last_led_increment = LED_ON_MILLIS;
+        led_phase_millis = LED_ON_MILLIS;
       }
-      next_led_change = cur_time + last_led_increment;
     } else {
       led_state = 0;
-      next_led_change = cur_time + LED_CYCLE_MILLIS - last_led_increment;
+      led_phase_millis = LED_CYCLE_MILLIS - led_phase_millis;
     }
+    last_led_change = cur_time;
     digitalWrite(PIN_STATUS_LED, led_state == LED_STATE_ON);
   }
 #endif
 }
 
 void UITask::setCurrScreen(UIScreen* c) {
+#if UI_POCKET_GUI
+  if (curr == home && c != home) static_cast<HomeScreen*>(home)->flushPocketSettings();
+  if (curr != c && _display) _display->forceFullRefresh();
+#endif
 #if COMPANION_FEATURE_READER
   if (isReaderActive() && c != reader
       && !static_cast<ReaderScreen*>(reader)->flush()) {
@@ -2126,7 +2601,7 @@ void UITask::setCurrScreen(UIScreen* c) {
   }
 #endif
   curr = c;
-  _next_refresh = 100;
+  _next_refresh = millis();
 }
 
 bool UITask::isPairingScreenActive() const {
@@ -2168,7 +2643,7 @@ void UITask::showPairingPin(bool from_button) {
   setCurrScreen(home);
   if (_display != NULL) {
     _display->servicePower(_board->isExternalPowered() || _board->isUsbHostConnected(), hasConnection(), true);
-    _next_refresh = 0;
+    _next_refresh = millis();
   }
 }
 
@@ -2186,7 +2661,7 @@ void UITask::finishPairingScreen(bool timed_out) {
     if (timed_out && _display != NULL) {
       _display->dismiss();
     } else {
-      _next_refresh = 0;
+      _next_refresh = millis();
     }
   }
 }
@@ -2206,7 +2681,7 @@ void UITask::servicePairingState() {
   if (_display != NULL && _display->servicePower(
       _board->isExternalPowered() || _board->isUsbHostConnected(),
       hasConnection(), isPairingScreenActive())) {
-    _next_refresh = 0;
+    _next_refresh = millis();
 #if COMPANION_FEATURE_READER
     if (!_display->isOn() && isReaderActive())
       static_cast<ReaderScreen*>(reader)->flush();
@@ -2266,9 +2741,41 @@ bool UITask::isButtonGesturePending() const {
 #endif
 }
 
+void UITask::syncAlertPreferences() {
+  if (!_node_prefs) return;
+#ifdef PIN_BUZZER
+  if (buzzer.isQuiet() != bool(_node_prefs->buzzer_quiet))
+    buzzer.quiet(_node_prefs->buzzer_quiet);
+#endif
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
+  if (vibration.isQuiet() != bool(_node_prefs->vibe_quiet))
+    vibration.quiet(_node_prefs->vibe_quiet);
+#endif
+}
+
 void UITask::loop() {
+  syncAlertPreferences();
+  // Observe startup expiry even while display/Morse/input defers rendering.
+  if (!_startup_complete && static_cast<uint32_t>(millis() - ui_started_at) >= 8000u) {
+    _startup_complete = true;
+  }
+  const bool morse_timing = mesh::morseTimingActive(&radio_driver);
   serviceWiFiToggleButton();
   servicePairingState();
+
+  // Keep an already-due refresh due while drawing is deferred, without
+  // moving a future throttle or letting it age past half the clock range.
+  const uint32_t refresh_now = millis();
+  if (static_cast<int32_t>(refresh_now - _next_refresh) >= 0) {
+    _next_refresh = refresh_now;
+  }
+
+  // Retire the popup even while sleep, Morse or input prevents drawing.
+  // Its deadline may be zero after wrapping; empty text means inactive.
+  if (_alert[0] && static_cast<int32_t>(millis() - _alert_expiry) >= 0) {
+    _alert[0] = 0;
+    _next_refresh = millis();
+  }
 
   char c = 0;
 #if UI_HAS_JOYSTICK
@@ -2300,12 +2807,16 @@ void UITask::loop() {
   if (ev == BUTTON_EVENT_CLICK) {
     c = checkDisplayOn(KEY_ENTER);
   } else if (ev == BUTTON_EVENT_LONG_PRESS) {
-#if COMPANION_FEATURE_READER
-    if (isReaderActive() || (curr == home && static_cast<HomeScreen*>(home)->isRadioPage()))
+    if (_display == NULL) {
       c = handleLongPress(KEY_ENTER);
-    else
+    } else {
+#if COMPANION_FEATURE_READER
+      if (isReaderActive() || (curr == home && static_cast<HomeScreen*>(home)->isRadioPage()))
+        c = handleLongPress(KEY_ENTER);
+      else
 #endif
-    display.dismiss();
+      display.dismiss();
+    }
   } else if (ev == BUTTON_EVENT_DOUBLE_CLICK) {
     c = handleDoubleClick(KEY_SELECT);
   } else if (ev == BUTTON_EVENT_TRIPLE_CLICK || ev == BUTTON_EVENT_QUADRUPLE_CLICK) {
@@ -2382,7 +2893,7 @@ void UITask::loop() {
               && touch_input.hasSeparateVerticalSwipes(),
           split_transport_selector, reader_touch_bar);
       const int debug_area = mesh::ui::touchDebugAreaAt(debug_areas, _touch_debug_x, _touch_debug_y);
-      if (debug_area != _touch_debug_area || curr != _touch_debug_screen) _next_refresh = 0;
+      if (debug_area != _touch_debug_area || curr != _touch_debug_screen) _next_refresh = millis();
       _touch_debug_area = debug_area;
       _touch_debug_screen = curr;
     }
@@ -2421,13 +2932,17 @@ void UITask::loop() {
   }
 #endif
 #if defined(BACKLIGHT_BTN)
-  if (millis() > next_backlight_btn_check) {
-    static bool was_pressed = false;
+  // First-poll state must not collide with a completed poll at timestamp zero.
+  enum class BacklightButtonState : uint8_t { Unseen, Released, Pressed };
+  static BacklightButtonState button_state = BacklightButtonState::Unseen;
+  const uint32_t backlight_now = millis();
+  if (button_state == BacklightButtonState::Unseen ? backlight_now > 0
+      : static_cast<uint32_t>(backlight_now - last_backlight_btn_check) > 300) {
     const bool pressed = digitalRead(PIN_BUTTON2) == LOW;
-    if (pressed && !was_pressed && _display != NULL)
+    if (pressed && button_state != BacklightButtonState::Pressed && _display != NULL)
       _display->wake(mesh::ui::DisplayWake::Button);
-    was_pressed = pressed;
-    next_backlight_btn_check = millis() + 300;
+    button_state = pressed ? BacklightButtonState::Pressed : BacklightButtonState::Released;
+    last_backlight_btn_check = millis();
   }
 #endif
 
@@ -2444,10 +2959,10 @@ void UITask::loop() {
     c = 0;
   }
 
-  if (c != 0 && curr) {
+  if (c != 0 && curr && _display != NULL) {
     _display->wake(mesh::ui::DisplayWake::Button);
     curr->handleInput(c);
-    _next_refresh = 100;  // trigger refresh
+    _next_refresh = millis();  // trigger refresh
   }
 
   userLedHandler();
@@ -2456,17 +2971,17 @@ void UITask::loop() {
   if (buzzer.isPlaying())  buzzer.loop();
 #endif
 
-  if (curr) curr->poll();
+  if (!morse_timing && curr) curr->poll();
 #if COMPANION_FEATURE_READER
-  if (reader && curr != reader) reader->poll();
+  if (!morse_timing && reader && curr != reader) reader->poll();
 #endif
 
   if (_display != NULL && _display->isOn()) {
-    if (millis() >= _next_refresh && curr && !isButtonGesturePending()) {
+    if (!morse_timing && static_cast<int32_t>(millis() - _next_refresh) >= 0 && curr && !isButtonGesturePending()) {
       _display->startFrame();
       int delay_millis = curr->render(*_display);
       renderPairingBanner();
-      if (millis() < _alert_expiry) {  // render alert popup
+      if (_alert[0] && static_cast<int32_t>(millis() - _alert_expiry) < 0) {  // render alert popup
         _display->setTextSize(1);
         int y = _display->height() / 3;
         int p = _display->height() / 32;
@@ -2508,7 +3023,7 @@ void UITask::loop() {
 #endif
 
 #ifdef AUTO_SHUTDOWN_MILLIVOLTS
-  if (millis() > next_batt_chck) {
+  if (static_cast<int32_t>(millis() - next_batt_chck) >= 0) {
     uint16_t milliVolts = getBattMilliVolts();
     if (milliVolts > 0 && milliVolts < AUTO_SHUTDOWN_MILLIVOLTS) {
       if(!board.isExternalPowered()) {
@@ -2572,20 +3087,20 @@ char UITask::checkDisplayOn(char c) {
       }
       c = 0;
     }
-    _next_refresh = 0;  // trigger refresh
+    _next_refresh = millis();  // trigger refresh
   }
-  return c;
+  return _display != NULL ? c : 0;
 }
 
 char UITask::handleLongPress(char c) {
   // Exit an incoming message preview even during the startup rescue window.
   // The on-screen reader hint must not unexpectedly enter CLI rescue.
-  if (curr == msg_preview) return c;
+  if (_display != NULL && curr == msg_preview) return c;
 #if COMPANION_FEATURE_READER
   // The radio page's reader gesture, including exit, takes precedence over
   // the global early-boot rescue gesture just like the WiFi setup page.
-  if (isReaderActive()) { closeReader(); return 0; }
-  if (curr == home && static_cast<HomeScreen*>(home)->isRadioPage()) {
+  if (_display != NULL && isReaderActive()) { closeReader(); return 0; }
+  if (_display != NULL && curr == home && static_cast<HomeScreen*>(home)->isRadioPage()) {
     showReader();
     return 0;
   }
@@ -2593,30 +3108,33 @@ char UITask::handleLongPress(char c) {
 #if UI_WIFI_SETUP_HOME_PAGE == 1
   // A setup AP may focus this page immediately at boot. Its documented HOLD
   // action must win over the otherwise-global early-boot CLI rescue gesture.
-  if (curr == home && static_cast<HomeScreen*>(home)->isWiFiSetupPage()) {
+  if (_display != NULL && curr == home && static_cast<HomeScreen*>(home)->isWiFiSetupPage()) {
     return c;
   }
 #endif
-  if (millis() - ui_started_at < 8000) {   // long press in first 8 seconds since startup -> CLI/rescue
+  if (!_startup_complete && static_cast<uint32_t>(millis() - ui_started_at) < 8000u) { // early-boot CLI/rescue only
     the_mesh.enterCLIRescue();
     c = 0;   // consume event
   }
-  return c;
+  return _display != NULL ? c : 0;
 }
 
 char UITask::handleDoubleClick(char c) {
   MESH_DEBUG_PRINTLN("UITask: double-click triggered");
   checkDisplayOn(c);
-  return c;
+  return _display != NULL ? c : 0;
 }
 
 char UITask::handleMultiClick(char c, bool backwards) {
   MESH_DEBUG_PRINTLN("UITask: %s-click triggered", backwards ? "quadruple" : "triple");
-  if (curr == msg_preview
+  if (_display != NULL && (curr == msg_preview
 #if COMPANION_FEATURE_READER
       || isReaderActive()
 #endif
-  ) {
+#if UI_POCKET_GUI
+      || (curr == home && static_cast<HomeScreen*>(home)->isPocketBoard())
+#endif
+  )) {
     return checkDisplayOn(backwards ? KEY_UP : KEY_DOWN);
   }
   checkDisplayOn(c);
@@ -2653,7 +3171,7 @@ void UITask::toggleGPS() {
         }
         the_mesh.savePrefs();
         showAlert(_node_prefs->gps_enabled ? "GPS: Enabled" : "GPS: Disabled", 800);
-        _next_refresh = 0;
+        _next_refresh = millis();
         break;
       }
     }
@@ -2673,7 +3191,7 @@ void UITask::toggleBuzzer() {
     the_mesh.setNotificationOutputMute(mesh::notify::Sound, _node_prefs->buzzer_quiet);
     the_mesh.savePrefs();
     showAlert(buzzer.isQuiet() ? "Buzzer: OFF" : "Buzzer: ON", 800);
-    _next_refresh = 0;  // trigger refresh
+    _next_refresh = millis();  // trigger refresh
   #endif
 }
 
@@ -2693,19 +3211,16 @@ uint8_t UITask::notificationCapabilities() const {
 }
 void UITask::notificationMelody(const char* text) {
 #ifdef PIN_BUZZER
-  if (text) buzzer.playNotification(text); else buzzer.stop();
+  if (text) buzzer.playNotification(text); else buzzer.stopNotification();
 #endif
 }
 void UITask::notificationScreen(int8_t mode) {
   if (!_display) return;
   _display->notificationPower(mode);
-  _next_refresh = 0;
+  _next_refresh = millis();
 }
 void UITask::notificationVibration(bool on) {
-#ifdef HAS_DRV2605
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   vibration.pulse(on);
-#elif defined(PIN_VIBRATION)
-  vibration.stop();
-  digitalWrite(PIN_VIBRATION, on ? HIGH : LOW);
 #endif
 }

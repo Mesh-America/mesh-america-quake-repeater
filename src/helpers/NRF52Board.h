@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <MeshCore.h>
 #include <helpers/KeyValueStore.h>
+#include <helpers/RegulatorMode.h>
 
 #if defined(NRF52_PLATFORM)
 
@@ -35,6 +36,9 @@ class NRF52Board : public mesh::MainBoard {
 protected:
   uint8_t startup_reason;
   char *ota_name;
+  bool cpu_dcdc_supported = false;
+  mesh::power::RegulatorMode cpu_regulator_mode = mesh::power::RegulatorMode::Default;
+  bool watchdog_disable_reset_pending = false;
 
 #ifdef NRF52_POWER_MANAGEMENT
   void pwrmgtInit() { initPowerMgr(); }
@@ -57,15 +61,21 @@ public:
       {}
   virtual void begin();
   void loop() override;
+  void applyLedPolicy() override;
   // Feed the hardware main-loop watchdog. The first call starts it, so normal
   // setup (including filesystem mount and radio initialization) is not timed.
   // A loop blocked forever in SoftDevice-backed flash I/O will stop feeding it
   // and be reset automatically.
   void feedWatchdog(bool enabled = true);
   void serviceWatchdog() override;
+  bool getSystemWatchdogRunning(bool& running) const override;
   virtual uint8_t getStartupReason() const override { return startup_reason; }
   virtual float getMCUTemperature() override;
-  virtual void reboot() override { NVIC_SystemReset(); }
+  void reboot() override;
+  uint8_t mcuRegulatorModes() const override;
+  mesh::power::RegulatorMode defaultMcuRegulatorMode() const override;
+  bool applyMcuRegulator(mesh::power::RegulatorMode mode) override;
+  mesh::power::RegulatorMode activeMcuRegulatorMode() const override;
   bool rebootToUf2Bootloader() override;
   virtual void shutdownPeripherals();
   virtual void powerOff() override;
@@ -73,20 +83,35 @@ public:
   virtual bool getBootloaderVersion(char* version, size_t max_len) override;
   virtual bool startOTAUpdate(const char *id, char reply[], bool force_ap = false) override;
   virtual bool stopOTAUpdate(char reply[]) override;
+  // Normal loop-entry preparation must precede all work servicing/checks. The
+  // profile-only second preparation below precedes a complete new guard pass;
+  // authoritative SDK queries and event clearing never belong in sleep().
+  void prepareSleepCycle();
+  // Radio-profile service can set an FPU event after loop entry. This second
+  // preparation belongs BEFORE the complete role sleep predicate, never after
+  // any work/USB/radio checks whose interrupt wake must remain visible.
+  void prepareProfileIdleCycle();
+  // Pure readiness check for the pinned 1024 Hz periodic RTC1 wake contract.
+  // The sketch task stays ready while waiting, so the idle task cannot suppress
+  // this tick. A profile must still reserve this interval plus its own guard.
+  static constexpr uint32_t ProfileIdleTickUs = 977;
+  static constexpr uint32_t ProfileIdleRtcTicks = 32;
+  static bool canIdleRadioProfile();
   virtual void sleep(uint32_t secs) override;
   bool isUserGpioAvailable(uint8_t pin) const override;
   bool isExternalPowered() override;
   bool isUsbDataConnected() override;
   bool isUsbHostConnected() override;
 
-#ifdef NRF52_POWER_MANAGEMENT
-  // Relative to each board's built-in ADC conversion; 1.000 is unchanged.
+  // Power-managed boards use the early-boot voltage policy; other ADC boards
+  // use the shared relative multiplier persisted with their role settings.
   uint16_t calibrateBatteryMillivolts(uint16_t raw_mv) const;
-#endif
+  float getAdcMultiplier() const override;
 
   void attachDynamicPrefs(KeyValueStore* prefs) { (void)prefs; }  // no-op
 
 #ifdef NRF52_POWER_MANAGEMENT
+  bool supportsPowerManagement() const override { return true; }
   uint16_t getBootVoltage() override { return boot_voltage_mv; }
   virtual uint32_t getResetReason() const override { return reset_reason; }
   uint8_t getShutdownReason() const override { return shutdown_reason; }

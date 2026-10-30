@@ -15,6 +15,8 @@ class TechoBoard : public NRF52BoardDCDC {
 public:
   TechoBoard() : NRF52Board("TECHO_OTA") {}
   void begin();
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
 
   const char* getManufacturerName() const override {

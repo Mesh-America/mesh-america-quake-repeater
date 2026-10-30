@@ -14,6 +14,14 @@ pio test -e native                      # all suites except KISS modem
 pio test -e native_kiss_modem           # KISS modem suite
 pio test -e native -f test_webconfig_keys   # a single suite
 python3 test/test_radio_receive_contract.py # real CAD/re-arm/calibration/mode-watchdog methods
+python3 -B test/test_protocol_parser_bounds.py -v # malformed anonymous requests/adverts, ASan/UBSan
+python3 -B test/test_companion_offline_delivery.py -v # full/disconnected requester and shared inbox delivery
+python3 -B test/test_companion_lfs_traversal.py -v # raw LittleFS traversal lock and error cleanup
+python3 -B test/test_room_post_permissions.py -v # all ACL roles, revocation and exact retry ACKs
+python3 -B test/test_contact_clock_bootstrap.py -v # future contact corruption and long-lived clock bounds
+python3 -B test/test_rtc_discovery.py -v # register screening, I2C faults and fallback without device writes
+python3 -B test/test_radio_interrupt_recovery.py -v # real ISR handoff, RX/TX races, LR2021 FIFO/IRQ recovery
+python3 -B test/test_bridge_recovery.py -v # packet-pool exhaustion, ESP-NOW start failure and callback timeout
 python3 test/test_sx126x_receive_mode.py    # pinned RadioLib SPI transport/status-byte regression
 python3 test/test_firmware_ram.py        # every firmware hook, ELF heaps, reservations, RAM report binding
 python3 test/test_indicator_display_profile.py  # Indicator RAM/scale contract
@@ -29,6 +37,9 @@ python3 test/test_companion_pairing_display.py # real OLED pairing wake, USB coe
 python3 test/test_companion_identity_startup.py # real saved/missing/unreadable identity branch and truthful startup phases
 python3 test/test_startup_screen.py            # early display ordering and cooperative entropy progress
 python3 -B test/test_common_prefs_legacy_rxgain.py -v # compact stock gain, appended tails and truncation
+python3 -B test/test_battery_forwarding.py -v # battery relay thresholds, hysteresis, calibration and checked settings records
+python3 -B test/test_battery_calibration.py -v # meter references, ADC correction, reset and invalid-reading rejection
+python3 -B test/test_battery_calibration_store.py -v # saved calibration, corruption and write-failure recovery across filesystems
 python3 test/test_companion_settings_persistence_contract.py  # Atomic settings and appended Bluetooth fields
 python3 test/test_webconfig_ui.py              # Web controls, reboot handling and generated-page consistency
 python3 test/test_webconfig_ui_runtime.py      # Real Chromium, including independent stealth toggle
@@ -159,6 +170,7 @@ does not reflect the GoogleTest count -- run the built binary directly
 | `test_topic_template` | `src/helpers/MQTTTopicTemplate.h` | `{iata}/{device}/{token}/{type}` expansion, overflow/NUL-termination, and a buffer-size fuzz |
 | `test_mqtt_topic_router` | `src/helpers/MQTTTopicRouter.h` | complete preset/custom topic-routing contract; MeshRank all types except raw; required identifiers; invalid inputs/slots; exact buffer boundaries |
 | `test_mqtt_connection_policy` | `src/helpers/MQTTConnectionPolicy.h` | reconnect guard/backoff/stagger and breaker transitions; stable reset; JWT lifetime/renewal policy; exact timing boundaries and 32-bit `millis()` rollover |
+| `test_mqtt_transport_health.py`, `test_mqtt_handshake_scheduler.py` | `src/helpers/MQTTTransportHealth.h`, production `MQTTBridge` methods | oldest outstanding QoS 1 acknowledgment deadline; quiet-session safety; lost/error-only callbacks; serialized stop-before-reconnect recovery; multi-hour scheduling and timer rollover |
 | `test_wifi_reconnect_policy` | `src/helpers/WiFiReconnectPolicy.h` | five-minute forced reconnect cadence, connection resets, duplicate disconnect observations, and 32-bit `millis()` rollover |
 | `test_radio_liveness` | `src/helpers/RadioLivenessTracker.h`, `src/helpers/radiolib/RxBoostedGainDefaults.h` | staged radio recovery, activity reset and rollover handling; target-specific RX boosted-gain defaults and SX126x precedence |
 | `test_lr1110_rx_recovery` | `src/helpers/radiolib/LR1110RxRecovery.h` | LR1110 four-byte RX-buffer shift signature; captured and accumulated shifts; ordinary/scoped packet exclusions |
@@ -297,3 +309,14 @@ unbonded-central rejection test, or a true all-power-removed cold boot. See the
 - Keep logic testable by extracting pure functions into headers (as
   `MQTTObserverValidation.h` / `WebConfigKeys.h` / `MQTTTopicTemplate.h` do) and
   having the firmware call the same functions.
+- nRF52 build recipes: `python3 -B test/test_nrf52_size_profile.py -v` sources
+  the real shell helper without running PlatformIO. It checks repeater, Full
+  Companion, Ethernet, and constrained OTA eligibility; the effective `-Oz`
+  optimizer; retained features and the 8 KiB stack; unchanged excluded targets;
+  the existing measured flood-table limits; and lossless target-name compression
+  scoped to nRF52 Full Companion seeders. `test/test_ota_target_names.py` verifies
+  every decoded name, target ID, bounded chunk, and malformed-record rejection.
+  `test/test_ota_cli_listing.py` runs the actual OTA status/listing dispatcher
+  with plain and compressed tables in seeder and receiver profiles. It checks
+  all target names, bounded replies, pagination and aliases, and keeps decoder
+  calls separate from unrelated control-command stack buffers.

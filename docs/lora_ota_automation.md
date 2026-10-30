@@ -1067,6 +1067,35 @@ TempRadio window ends, or after putting the controller back on that tuple),
 rerunning the same package recognizes its manifest ID and resumes the existing
 session instead of clearing it.
 
+The destination and each controlled relay also receive separate protected
+`target-tempradio-cleanup.json` or `relay-tempradio-cleanup-<full-key>.json`
+records. Each record is flushed before its single one-minute shortening attempt.
+A lost acknowledgement remains unconfirmed; a reply on the temporary channel
+does not establish that the shortening arrived. Restoring the controller or
+reaching the destination through another path does not establish that every
+relay returned either.
+
+Default cleanup succeeds only after the controller is back on its normal
+radio and every owned participant independently returns its bound full public
+key and an inactive `get tempradio` result. Shared Full Companions must also
+report their live TempRadio override inactive; Binary radio settings alone
+show the saved preference. Unresolved participants retain their own record and
+the run reports failure. A deliberately staged `--leave-controller-radio` run
+preserves its windows and records. After an install, that option proves all
+participants during the normal-radio verification interval before returning
+the controller to the requested temporary tuple.
+
+After a process interruption, retain these records and use a new work directory.
+Existing records cannot be overwritten to reset a shortening attempt. Never
+repeat a relative `tempradio` command whose attempt is recorded. On the normal
+route, use the recorded full key and a separately supplied admin password to
+read `get public.key` and `get tempradio`. Both must confirm that same participant
+and an inactive override; a timeout, changed key, active profile, or malformed
+reply leaves its obligation pending. Wait for its original finite lease and
+repeat only these read-only checks. Keep the original record and a separate
+private restoration receipt binding its file hash and successful proofs. These
+records contain no admin passwords and do not authorize reboot or installation.
+
 When a chained run has already proved the newly running body hash, its retained
 previous package can briefly report `verifying staged blocks` after TempRadio
 reactivates the OTA manager. The runner waits only through the configured

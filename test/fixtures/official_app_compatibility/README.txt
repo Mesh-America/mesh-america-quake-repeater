@@ -1,9 +1,12 @@
 Official app compatibility source witness
 
-Source: https://app.meshcore.nz/main.dart.js
-Observed: 2026-10-04
-Bytes: 9494192
-SHA-256: 84bc39a950735aaffa93d912556852a4c22e235d0cc4e4d04790113207f13a68
+Source: https://files.liamcottle.net/MeshCore/v1.50.0/MeshCore-v1.50.0%2B78-b7528a7-web.zip
+Reviewed: 2026-10-23 (official v1.50.0+78, build b7528a7)
+Archive bytes: 16950142
+Archive SHA-256: c28f5549a63ce42a50a8a5bd80081c69ef85aeb1dca221c36bc692b838a92dd7
+Member: web/main.dart.js
+JavaScript bytes: 9491330
+JavaScript SHA-256: aafc714732d1e1af749104da446cd250ea72e288f7cd60ce742f9733da30f309
 
 Run:
   python3 -B test/test_official_app_compatibility.py -v
@@ -13,16 +16,18 @@ under AddressSanitizer and UndefinedBehaviorSanitizer. No PlatformIO or
 hardware is used. The complete web application is not copied into Git.
 
 Default external cache:
-  ~/.cache/meshcore-tests/84bc39a950735aaffa93d912556852a4c22e235d0cc4e4d04790113207f13a68/main.dart.js
+  ~/.cache/meshcore-tests/aafc714732d1e1af749104da446cd250ea72e288f7cd60ce742f9733da30f309/main.dart.js
 
 An optional MESHCORE_OFFICIAL_APP_BUNDLE path selects an existing external
 bundle. Its bytes and SHA must match. Without that variable, a cold cache
-downloads the public source and verifies its exact size and SHA before saving.
+downloads the official versioned archive and verifies both the archive and
+JavaScript's exact size and SHA before saving only the JavaScript member.
 CI should use actions/setup-node with node-version 22 and actions/cache for
-~/.cache/meshcore-tests, keyed by the full SHA above. The public URL is mutable:
-if it changes and no pinned cache exists, the test fails explicitly. Updating
-the source pin and function witnesses requires review; it never silently uses
-the new app or replaces its parsers with test implementations.
+~/.cache/meshcore-tests, keyed by the source-pin tests. The live app URL is no
+longer used, so its deployments cannot break a cold-cache run. Changed archive
+or cached bytes still fail explicitly. Updating the source pin and function
+witnesses requires review; the test never silently uses a new app or replaces
+its parsers with test implementations.
 
 The JS harness extracts and evaluates unmodified compiled app function bodies:
 ACL request builder/decoder, CMD50 builder, binary frame parser, SENT/Binary

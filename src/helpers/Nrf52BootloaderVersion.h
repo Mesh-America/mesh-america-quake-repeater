@@ -141,16 +141,10 @@ inline bool nrf52BootloaderVersion(const uint8_t* image, size_t size,
       identity.continuity_present) {
     const uint32_t version = identity.boot_version;
     const unsigned preview = version & 0xffu;
-    int written;
-    if (preview == 0xffu) {
-      written = snprintf(out, capacity, "OTAFIX%u.%u.%u",
-                         (unsigned)(version >> 24), (unsigned)((version >> 16) & 0xffu),
-                         (unsigned)((version >> 8) & 0xffu));
-    } else {
-      written = snprintf(out, capacity, "OTAFIX%u.%u.%u-preview.%u",
-                         (unsigned)(version >> 24), (unsigned)((version >> 16) & 0xffu),
-                         (unsigned)((version >> 8) & 0xffu), preview);
-    }
+    const int written = snprintf(out, capacity,
+        preview == 0xffu ? "OTAFIX%u.%u.%u" : "OTAFIX%u.%u.%u-preview.%u",
+        (unsigned)(version >> 24), (unsigned)((version >> 16) & 0xffu),
+        (unsigned)((version >> 8) & 0xffu), preview);
     if (written > 0 && (size_t)written < capacity) return true;
     out[0] = 0;
     return false;
@@ -168,7 +162,6 @@ inline bool nrf52BootloaderVersion(const uint8_t* image, size_t size,
     const bool magic0 = ota::ota_boot_rd32(image + offset) == ota::OTA_BOOT_MANIFEST_MAGIC0;
     const bool magic1 = ota::ota_boot_rd32(image + offset + 4u) == ota::OTA_BOOT_MANIFEST_MAGIC1;
     if (magic0 || magic1) {
-      ota::OtaBootloaderIdentity continuity;
       allow_standalone =
           magic0 && magic1 &&
           ota::ota_boot_rd16(image + offset + 8u) == ota::OTA_BOOT_MANIFEST_VERSION &&
@@ -179,8 +172,8 @@ inline bool nrf52BootloaderVersion(const uint8_t* image, size_t size,
           ota::ota_boot_image_crc32(image, size, offset + 40u) ==
               ota::ota_boot_rd32(image + offset + 40u) &&
           ota::ota_bootloader_continuity_parse(image + offset, size - offset,
-                                                continuity) &&
-          continuity.continuity_present;
+                                                identity) &&
+          identity.continuity_present;
     }
   }
   const size_t scan_size = size < ota::OTA_BOOT_IMAGE_SIZE ? size : ota::OTA_BOOT_IMAGE_SIZE;
