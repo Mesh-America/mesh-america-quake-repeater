@@ -13,7 +13,7 @@ Open the [Quake Repeater flasher](https://apps.meshamerica.com/quake-repeater/),
 
 Updates can also be sent over the air (Bluetooth or LoRa) once a repeater is running the firmware: see [Update over the air](ota-updates.md).
 
-A freshly flashed repeater is named `Quake Repeater` until you rename it. `ver` shows the firmware, for example `Quake Repeater v1.17.1.6`.
+A freshly flashed repeater is named `Quake Repeater` until you rename it. `ver` shows the firmware, for example `Quake Repeater v1.18.0.1`.
 
 ## 2. Set the clock
 
