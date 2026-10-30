@@ -8,7 +8,7 @@ This is the same guide as **How to admin your repeater** in the [flasher](https:
 
 | Command | What it does |
 |---|---|
-| `ver` | Show which firmware this is and its version, for example "Quake Repeater v1.17.1.6". The admin tools show the same text as their version. Releases before 1.17.1.3 show just the version number. |
+| `ver` | Show which firmware this is and its version, for example "Quake Repeater v1.18.0.1". The admin tools show the same text as their version. Releases before 1.17.1.3 show just the version number. |
 | `password <new password>` | Change the admin password. |
 | `set name <name>` | Name the repeater. Keep it short: the name is part of every alert. |
 | `set lat <degrees>` | Set the repeater's latitude, for example 47.61. |
