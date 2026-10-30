@@ -15,6 +15,7 @@ enum WisBlockRailHold : uint8_t {
   RadioPower = 1U << 0,
   EthernetPower = 1U << 1,
   ExternalStorage = 1U << 2,
+  SensorPower = 1U << 4,
 };
 
 // Conservative live-service/bus ownership holds, not proof of physical module
@@ -25,6 +26,9 @@ constexpr uint8_t wisBlockCompileRailHolds() {
   return 0
 #if defined(RAK_3401)
       | RadioPower
+#endif
+#if defined(MESHAMERICA_QUAKE_HOLD_SENSOR_RAIL)
+      | SensorPower
 #endif
 #if defined(ETHERNET_ENABLED) || defined(ETHERNET_USE_RAK13800) \
     || defined(RAK4631_COMBINED_ETHERNET)
@@ -89,7 +93,7 @@ class WisBlockSharedPowerPolicy {
     DiscoveryActive = 1U << 3,
   };
   static constexpr uint8_t KnownHolds =
-      RadioPower | EthernetPower | ExternalStorage;
+      RadioPower | EthernetPower | ExternalStorage | SensorPower;
 
   // Retain unknown constructor hold bits fail-closed. They must never become
   // permission to cut power merely because a future owner is not recognized.
