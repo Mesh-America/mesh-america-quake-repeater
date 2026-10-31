@@ -98,9 +98,9 @@ Order is mandatory: **land, observe, add, remove, disable**. Details in [contrac
 3. Add `quake-ci` to the required checks with the narrow endpoint, pinned to the GitHub Actions app, keeping `test`.
 4. Remove `test` from the required checks.
 5. Disable `run-unit-tests.yml` (the only inherited workflow still active). `github-pages.yml` and the rest are already disabled.
-6. Owner decisions recorded in the contract: whether `enforce_admins` is turned on; whether force-push stays allowed on `next`; whether `strict` (up-to-date branch) is turned on. Today both branches have `enforce_admins:false`, `strict:false`, no review requirement, and `next` allows force pushes, so a required check binds non-admins only.
+6. Owner decisions (recorded in the contract, all taken 2026-10-30): `enforce_admins` **on**, so administrators cannot merge around a failed `quake-ci`; force-push on `next` **blocked**; `strict` (up-to-date branch) **on**. Today both branches have `enforce_admins:false`, `strict:false`, no review requirement, and `next` allows force pushes. These are switched on as the **last** cut-over step, after `quake-ci` has gone green on every kind of PR.
 7. Rollback: re-enable, then PATCH the saved `checks` array back (never replay the full protection JSON).
-8. Break-glass: if `quake-ci` cannot run, the owner temporarily removes it from the required list or merges as administrator, notes it on the PR, and restores it afterwards.
+8. Break-glass (no merge-time bypass exists once `enforce_admins` is on): if `quake-ci` cannot run for a reason outside the repository, the owner removes it from the required list by settings change, merges, notes it on the PR, and restores it straight away. A broken `quake-ci.yml` is fixed by a PR that runs its own corrected copy.
 
 ## Phase C: Keymind-merge runbook
 
@@ -141,7 +141,8 @@ The review showed one block per file is not achievable: `MyMesh.cpp` has 8 separ
 | Aggregate check skipped or passing on a failed dependency | separate fail-closed job; red-case tests in Phase A step 7 |
 | Rail test passes with the flag deleted | test reads the real environment definition; proven red on a scratch branch |
 | Required check stuck pending or broken | no path filter; observed before required; break-glass procedure |
-| Bypass: admins, `strict:false`, force-push on `next`, tag-only release | explicit owner decisions in the contract; tag releases gated |
+| Bypass: admins, `strict:false`, force-push on `next`, tag-only release | owner decided: admins bound, `strict` on, force-push blocked; tag releases gated; the only way around the check is a visible settings change |
+| Owner locked out by an untested check once `enforce_admins` is on | switched on last; rollback is `DELETE .../enforce_admins` |
 | Keymind merge cost is episodic, dominated by history rewrites (the 1.18.0.1 merge had 4 conflicting files and a rewritten base) | trial merge before each real merge; seam inventory; none of A to D changes this cost |
 | New or renamed upstream workflow arrives enabled | inventory drift check in each merge window |
 | Stock builds break through shared headers | stock RAK4631 smoke build in `quake-ci` |

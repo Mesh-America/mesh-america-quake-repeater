@@ -15,7 +15,7 @@ Dispositions: **Fixed** = plan or spec changed; **Accepted** = valid, recorded a
 
 | # | Finding | Disposition |
 |---|---------|-------------|
-| 3 | Gate is advisory for the owner: `enforce_admins:false`, `strict:false`, no reviews, force-push on `next` | **Accepted**, made explicit; owner decisions table in the contract (FR-019) |
+| 3 | Gate is advisory for the owner: `enforce_admins:false`, `strict:false`, no reviews, force-push on `next` | **Fixed by owner decision (2026-10-30)**: `enforce_admins` on, `strict` on, force-push on `next` blocked (contract, FR-019) |
 | 4 | Workflow inventory wrong: most inherited workflows were disabled on 2026-10-03; only `run-unit-tests.yml` is active; `github-pages` is not publishing to our site; CodeQL and Dependency graph unmentioned | **Fixed**: spec, plan, contract and research rewritten from `gh workflow list --all` |
 | 5 | Phase A listed 2 of 4 earthquake suites (`test_seismic_alert`, `test_clock_floor` missing); an unmatched `pio test` filter may pass vacuously | **Fixed**: all four, with a suite-count check (FR-002) |
 | 6 | "Correct for each image" only defined for RAK4631; RAK3401 has no stated expectation | **Fixed**: both asserted (FR-002, plan A.4) |

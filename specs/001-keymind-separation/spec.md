@@ -128,7 +128,7 @@ A maintainer who has to resolve a Keymind conflict, or who wants to propose our 
 - **FR-004**: Keymind's full test job MUST NOT be a required check and MUST NOT run on ordinary pull requests or on pushes to `main`.
 - **FR-017**: The required check MUST fail closed: a failed, cancelled or skipped part of the check never produces a passing result, and no status source other than the repository's own automation can satisfy it. (How is in the plan and contract.)
 - **FR-018**: A release triggered by pushing a tag MUST pass the same checks as a normal release, and `quake-ci` MUST also run on pushes to `main`.
-- **FR-019**: A written break-glass procedure MUST exist for when the required check cannot run, covering who may use it, how, and how its use is recorded. Whether administrators are bound by the required check is the owner's decision, recorded in the contract.
+- **FR-019**: A written break-glass procedure MUST exist for when the required check cannot run, covering who may use it, how, and how its use is recorded. Administrators MUST NOT be able to merge around a failed required check; the only way past it is a visible settings change that removes the requirement, and that is recorded.
 - **FR-020**: Pull requests created with the repository's automatic token (which does not start workflows) MUST NOT be used to reach a protected branch, or must be re-triggered by a push from a user.
 - **FR-005**: Keymind's full test suite MUST run, and its result MUST be visible, on every pull request that merges a Keymind release into `next`.
 - **FR-006**: We MUST NOT edit, delete, or trim Keymind's workflow files. The one existing edit (the temporary skip of the stock-app compatibility test) MUST be reverted when that suite is run on Keymind merges.

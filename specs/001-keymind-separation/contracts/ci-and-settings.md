@@ -5,7 +5,7 @@ This is the interface between the repository and GitHub's settings. Anything her
 ## Current state (read from GitHub, 2026-10-30)
 
 - `next` and `main`: required context `test` (app id 15368, GitHub Actions); `strict:false`; `enforce_admins:false`; zero required reviews; no merge queue, no rulesets. `next` also allows force pushes.
-- Consequence: a required check binds non-administrators only. The owner can merge around it.
+- Consequence today: a required check binds non-administrators only. The owner can merge around it. **Target (owner decision, 2026-10-30): administrators must not be able to work around a failed `quake-ci`.**
 
 ## Required checks (target state)
 
@@ -19,7 +19,7 @@ This is the interface between the repository and GitHub's settings. Anything her
 
 | Decision | Options | Answer |
 |----------|---------|--------|
-| Bind administrators (`enforce_admins`) | off (today) / on | _open_ |
+| Bind administrators (`enforce_admins`) | off (today) / on | **on** (owner, 2026-10-30): admins cannot merge around a failed `quake-ci`; turned on as the last cut-over step |
 | Force-push on `next` | allowed (today) / blocked | **blocked** (owner, 2026-10-30) |
 | Require branch up to date (`strict`) | off (today) / on | **on** (owner, 2026-10-30) |
 | First new-scheme version | 2.0.0.0 / other | **2.0.0.0** (owner, 2026-10-30) |
@@ -44,13 +44,14 @@ This is the interface between the repository and GitHub's settings. Anything her
 4. Add `quake-ci` to the required checks, keeping `test`, using `PATCH .../protection/required_status_checks` with `checks:[{context:"quake-ci",app_id:15368},{context:"test",app_id:15368}]`. **Owner approves.**
 5. Remove `test` the same way. **Owner approves.**
 6. `gh workflow disable run-unit-tests.yml`. **Owner approves.**
-7. Rollback: `gh workflow enable run-unit-tests.yml`, then PATCH the saved `checks` array. Never replay the full protection JSON (the PUT body differs from the GET output and would drop settings).
+7. Turn on `strict`, block force-push on `next`, and turn on `enforce_admins` on both branches (`POST/DELETE .../protection/enforce_admins`, the narrow endpoints). Last, so that a not-yet-proven check never locks the owner out. **Owner approves.**
+8. Rollback: `DELETE .../protection/enforce_admins` first, then `gh workflow enable run-unit-tests.yml`, then PATCH the saved `checks` array. Never replay the full protection JSON (the PUT body differs from the GET output and would drop settings).
 
-Never do 6 before 5, 5 before 4, or 4 before 2.
+Never do 6 before 5, 5 before 4, 4 before 2, or 7 before `quake-ci` has gone green on every kind of PR in step 2.
 
 ## Break-glass
 
-If `quake-ci` cannot run (runner outage, renamed job, broken workflow file): the owner removes it from the required list (PATCH as above) or merges as administrator, writes the reason on the PR, and restores the requirement afterwards. Each use is noted in the PR.
+With `enforce_admins` on there is no merge-time bypass. If `quake-ci` cannot run because of something outside the repository (runner or PlatformIO outage): the owner removes `quake-ci` from the required list (PATCH as above), merges, writes the reason on the PR, and restores the requirement immediately afterwards. That is a settings change, visible in the repository's audit log, not a silent merge override. If `quake-ci.yml` itself is broken, a fix PR runs the fixed workflow file (a `pull_request` run uses the PR's own copy), so most breakages heal without using break-glass. Each use is noted in the PR.
 
 ## Keymind merge window
 
