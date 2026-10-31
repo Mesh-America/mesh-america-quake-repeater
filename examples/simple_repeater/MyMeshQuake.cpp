@@ -277,7 +277,11 @@ bool MyMesh::handleQuakeCommand(const char* command, char* reply) {
     // Name the product, not just a number: "Quake Repeater v1.17.1.6". No build date: the date in this
     // build was a fixed default, not the real one. getFirmwareVer() stays the bare version, because adverts, telemetry, the
     // bridges and companion apps all read it and the image's version stamp is parsed from it.
+#ifdef KEYMIND_BASE_VERSION
+    snprintf(reply, 160, "%s %s (Keymind base %s)", FIRMWARE_PRODUCT, getFirmwareVer(), KEYMIND_BASE_VERSION);
+#else
     snprintf(reply, 160, "%s %s", FIRMWARE_PRODUCT, getFirmwareVer());
+#endif
   } else if (strcmp(command, "get earthquake.channel") == 0) {
     snprintf(reply, 160, "> %s", quake_channel[0] ? quake_channel : "<unset>");
   } else if (strncmp(command, "set earthquake.channel ", 23) == 0) {
