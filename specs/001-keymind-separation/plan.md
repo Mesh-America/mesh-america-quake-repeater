@@ -100,10 +100,10 @@ Order: **land, observe, add, remove, disable, tighten**. Exact calls are in [con
 2. Observe on at least three PRs, including docs-only and workflow-only.
 3. Add `quake-ci` (app id 15368) to the required checks on `next`, keeping `test`. On `main`, only after a release has put the workflow file on `main`.
 4. Remove `test`; disable `run-unit-tests.yml`.
-5. Create the tag rule for `quake-v*`.
+5. Set merge methods to merge commits only. No tag rule (decided 2026-10-30): the release workflow creates its own tag with its token and agents work under the owner's identity, so an identity-based rule would either block the release or not distinguish agents from the owner; the protection is that the release `needs` `quake-ci` and the tagged commit must be reachable from `main`.
 6. Last: `strict` on, force-push on `next` blocked, `enforce_admins` on. Force-push has no narrow REST endpoint, so use GraphQL `updateBranchProtectionRule` (field names verified by a read-only query first) or an explicit, diffed full PUT body.
 7. Write the release ritual (below) into the docs before step 6.
-8. Rollback restores every setting changed (checks, `strict`, force-push, `enforce_admins`, tag rule). Rolling `test` back in is valid only before Phase C reverts our skip (otherwise the stock-app step fails).
+8. Rollback restores every setting changed (checks, `strict`, force-push, `enforce_admins`, merge methods). Rolling `test` back in is valid only before Phase C reverts our skip (otherwise the stock-app step fails).
 9. Break-glass: with `enforce_admins` on there is no merge-time bypass; the owner removes `quake-ci` from the required list by settings change, merges, notes it on the PR, and restores it straight away. A broken `quake-ci.yml` is fixed by a PR running its own corrected copy (not by a syntax error, which produces no check).
 
 **Release ritual after cut-over** (needed because `strict` and `enforce_admins` are on):
@@ -152,7 +152,7 @@ Verified: 1.18.0.2 packs to 0x01120002 and 2.0.0.0 to 0x02000000; the build tool
 | Required check stuck pending (syntax error, renamed job) | no path filter, no job `name:`, observed before required, break-glass |
 | Merge-back rejected once admins are bound | merge-back becomes a PR; ritual documented before cut-over |
 | Release blocked by `strict` until merge-back lands | documented in the ritual; accepted |
-| Tag push bypasses branch rules | tag rule; release depends on the same checks; tagged commit reachable from `main` |
+| Tag push bypasses branch rules | no tag rule (it would block the release workflow's own tag); release depends on the same checks; tagged commit reachable from `main`; anyone with write access can still push a tag, but it cannot publish unless the checks pass on a commit on `main` |
 | Merge cost is episodic, dominated by history rewrites (1.18.0.1 had 4 conflicting files and a rewritten base) | trial merge before each real merge; seam inventory; A to D do not change this cost |
 | New or renamed upstream workflow arrives enabled | inventory drift check in each merge window |
 | Unrelated Keymind break turns our native tests red | decide on a `native_quake` environment after measuring |

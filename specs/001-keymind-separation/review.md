@@ -83,7 +83,7 @@ Two fresh reviewers, again given only the files and the repository. Lens 1: whet
 
 | # | Finding | Disposition |
 |---|---------|-------------|
-| R2-5 | Tag pushes bypass every gate (release `needs` only its own build; no rulesets); release on a push to `main` runs in parallel with the checks; FR-019 was false as written | **Fixed**: tag rule, release depends on `quake-ci`, tagged commit must be reachable from `main` (FR-018, FR-019, plan A8) |
+| R2-5 | Tag pushes bypass every gate (release `needs` only its own build; no rulesets); release on a push to `main` runs in parallel with the checks; FR-019 was false as written | **Fixed**: release depends on `quake-ci`, tagged commit must be reachable from `main` (FR-018, FR-019, plan A8). A tag-creation rule was proposed, then dropped by the owner's decision (agents must be able to tag; the release workflow tags with its own token) |
 | R2-6 | Version-ordering check can pass on empty data (shallow checkout, no tags); "changed" undefined; merge-back PRs carry the same version; string vs numeric compare | **Fixed**: full history and tags, merge-base comparison, numeric, merge-back exempt, compare built manifests not `platformio.ini` (plan A5) |
 | R2-7 | `strict` adds a hidden dependency on every release (next is always one commit behind) and every sibling PR must be refreshed; squash and rebase are allowed | **Fixed**: ritual, merge-commit-only proposal, SC-002 counts the merge-back PR (<60 min) |
 | R2-8 | Hotfix PRs cut from a `main` without the workflow file never report | **Fixed**: require on `main` only after a release carries the file (FR-022) |

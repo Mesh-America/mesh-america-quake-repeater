@@ -24,8 +24,8 @@ Consequence today: a required check binds non-administrators only, and a direct 
 | Force-push on `next` | **blocked** (owner, 2026-10-30) |
 | Branch must be up to date (`strict`) | **on** (owner, 2026-10-30) |
 | First new-scheme version | **2.0.0.0** (owner, 2026-10-30) |
-| Repository merge methods | _open_: proposed merge commits only, so a release PR can never be squashed or rebased |
-| Tag rule: who may create `quake-v*` tags | _open_: proposed owner only |
+| Repository merge methods | **merge commits only** (owner, 2026-10-30), so a release PR can never be squashed or rebased |
+| Tag rule restricting who may create `quake-v*` tags | **none** (owner, 2026-10-30: agents acting for the owner must be able to tag, and the release workflow creates its own tag). Protection comes from the workflow instead: the release depends on `quake-ci` and the tagged commit must be reachable from `main` |
 
 ## Required checks (target state)
 
@@ -54,7 +54,6 @@ Consequence today: a required check binds non-administrators only, and a direct 
 - **`enforce_admins`**: `POST` / `DELETE repos/{r}/branches/{b}/protection/enforce_admins`.
 - **Force-push**: no narrow REST endpoint exists (it is settable only through the full PUT body). Use GraphQL `updateBranchProtectionRule`. Verified by query and introspection: the rule fields `allowsForcePushes`, `requiresStrictStatusChecks`, `isAdminEnforced`, `requiredStatusChecks{context, app{databaseId}}` exist, and the mutation input has `allowsForcePushes`, `isAdminEnforced`, `requiresStrictStatusChecks`, `requiredStatusChecks`. Rule IDs: `next` = `BPR_kwDOU5wo6s4FBIyZ`, `main` = `BPR_kwDOU5wo6s4FBUvs`. Not yet verified: that omitted fields in the mutation are left unchanged (test on a throwaway repository first), and a before/after diff of the query result is the check after every change.
 - Never replay the GET output of the REST protection as a PUT body: the shapes differ and a PUT replaces everything, including the "pull request required" rule.
-- **Tag rule**: a repository ruleset restricting creation of `quake-v*` tags to the owner (the repository has no rulesets today).
 - **Merge methods**: repository setting, merge commits only (proposed).
 
 ## Cut-over order (MUST be followed)
@@ -66,9 +65,9 @@ Consequence today: a required check binds non-administrators only, and a direct 
 5. Remove `test`. **Owner approves.**
 6. `gh workflow disable run-unit-tests.yml`. **Owner approves.**
 7. Write the release ritual (below) into the contributor notes.
-8. Create the tag rule and set the merge methods. **Owner approves.**
+8. Set the repository merge methods to merge commits only. **Owner approves.** (No tag rule: the release workflow's own token creates the tag, and agents work under the owner's identity.)
 9. Last: `strict` on, force-push blocked on `next`, `enforce_admins` on, both branches. **Owner approves.**
-10. Rollback: `isAdminEnforced:false`, then `allowsForcePushes` and `requiresStrictStatusChecks` back to the saved values, remove the tag rule, `gh workflow enable run-unit-tests.yml`, then PATCH the saved checks. Restoring `test` as required is valid only before the Keymind-merge window has reverted our skip (afterwards the stock-app step is red by design).
+10. Rollback: `isAdminEnforced:false`, then `allowsForcePushes` and `requiresStrictStatusChecks` back to the saved values, `gh workflow enable run-unit-tests.yml`, then PATCH the saved checks. Restoring `test` as required is valid only before the Keymind-merge window has reverted our skip (afterwards the stock-app step is red by design).
 
 Never do 6 before 5, 5 before 4, 4 before 2, or 9 before `quake-ci` has gone green on every kind of PR.
 
