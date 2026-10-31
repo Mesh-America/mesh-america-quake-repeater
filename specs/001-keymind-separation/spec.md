@@ -140,7 +140,7 @@ A maintainer who has to resolve a Keymind conflict, or who wants to propose our 
 - **FR-012**: Quake Repeater versions MUST sort above 1.18.0.2 and MUST NOT be confusable with the Keymind release they are built on. (No mechanism collides today, since the OTA target ID, tag prefix and repository differ; the goal is to stop humans mistaking one numbering for the other.)
 - **FR-013**: The release flow MUST be unchanged for the maintainer: bump the version in the variant file, merge `next` into `main`, and exactly one release with both images is published; every commit on `main` is merged back into `next`.
 - **FR-014**: The `ver` answer MUST identify both the Quake Repeater version and the Keymind release it is built on. The bare version that adverts, telemetry, bridges and companion apps read MUST NOT change shape. The base-release string MUST be checked in CI against the last merged Keymind release so it cannot go stale, and the flasher's `ver` parser MUST still match.
-- **FR-015**: The new version scheme MUST be verified before any release against the flasher catalog build (using a fixture or pre-release), the release tooling's tag derivation, the version packing, the Mesh America release tooling inherited from Keymind, and the update paths Quake users actually use; if any refuses it, the scheme MUST change before any release.
+- **FR-015**: The new version scheme MUST be verified before any release against the flasher catalog build (using a fixture or pre-release), the release tooling's tag derivation, the version packing, and the update paths Quake users actually use; if any refuses it, the scheme MUST change before any release.
 - **FR-016**: Nothing in this work may add any path between the LoRa mesh and the internet.
 
 ### Key Entities

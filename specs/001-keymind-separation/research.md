@@ -31,7 +31,7 @@ Several inherited workflows were disabled on 2026-10-03; `build-repeater-firmwar
 - `OtaFormat.h`: `ota_trusted_auto_version_allows(running, candidate)` is true only when both are non-zero and `candidate > running`, as unsigned 32-bit values of the packed version `MAJOR<<24 | MINOR<<16 | PATCH<<8 | pre`.
 - Therefore `2.0.0.0` (0x02000000) is accepted as an upgrade over `1.18.0.2` (0x01120002).
 - Read since: manual `ota install` has no version gate; the bootloader continuity gate applies to bootloader packages only; the flasher validator and builder only require distinct versions (the order of `previousReleases` is by hand); the release tooling derives the tag from the packed image version. The trusted auto-install gate is off by default and needs signed packages, which Quake does not use, so Quake's real update paths never consult version order.
-- Still unread: Keymind's `mesh-america/*` and `scripts/generate_mesh_america_release.py` (they changed upstream recently and ship in our tree).
+- Keymind's `mesh-america/*` and `scripts/generate_mesh_america_release.py` were flagged by a reviewer but are out of scope: per the owner they are how Keymind reaches the Mesh America Device Configurator app and are unrelated to Quake releases.
 
 **Decision**: 2.x is about avoiding human confusion, not preventing a mechanical collision (OTA target ID, tag prefix and repository already differ). Candidate `2.0.0.0`; Phase E verification gates the first release.
 **Alternatives**: keep `1.18.x.y` and add 100 to the last field (stays inside Keymind's space, so collisions remain possible); letter or fifth-number suffixes (rejected earlier: the 4-byte packing ignores them and the release workflow would skip the tag).
@@ -56,4 +56,4 @@ Measured with `gh workflow list --all`: `github-pages`, `pr-build-check`, `sync-
 2. R4: flasher validator and manual OTA ordering; `ver` base-version reporting.
 3. Cold-cache run time of `quake-ci` and of `pio test -e native`; whether `pio test` with an unmatched filter exits 0.
 4. Whether official apps feature-gate on the repeater version string (major 1 to 2).
-5. Keymind's `mesh-america/*` tooling and its version assumptions.
+5. (none further; the Device Configurator tooling is out of scope.)
