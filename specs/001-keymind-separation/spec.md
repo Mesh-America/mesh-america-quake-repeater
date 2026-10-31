@@ -16,7 +16,7 @@ Three things now cost us more than they should:
 
 - **Slow gate.** The one required check on `next` and `main` is Keymind's full test job (57 serial steps, 1 to 1.6 hours). It runs on every pull request and again on every push to `main`, so a release takes about three hours of waiting, almost all of it testing features that no Quake Repeater image ships.
 - **Wrong coverage.** The gate is large but does not test our hardware combinations. Release 1.18.0.1 shipped with the RAK4631 sensor power rail switched off by default, so the earthquake sensor and environment sensor vanished from telemetry. Keymind's suite passed, and we needed an emergency 1.18.0.2.
-- **Shared version space.** Our firmware version uses Keymind's four-number format. A future Keymind release can land on a number we already used or plan to use, which forced an awkward version choice for 1.18.0.2.
+- **Shared version space.** Our firmware version uses Keymind's four-number format. Nothing mechanical collides (the update target ID, tag prefix and repository all differ), but the two numberings are easy to confuse, and choosing a number for 1.18.0.2 without clashing with a possible Keymind 1.18.0.2 was awkward.
 
 Most inherited automation was already switched off in repository settings on 2026-10-03 (observer, companion, room-server and repeater builds, the documentation-site publisher, and others). The one inherited workflow still active is the full test suite itself.
 
@@ -123,10 +123,10 @@ A maintainer who has to resolve a Keymind conflict, or who wants to propose our 
 ### Functional Requirements
 
 - **FR-001**: The repository MUST have a Quake Repeater check that is required to merge into `next` and `main`, and that always reports a result on every pull request, including documentation-only ones.
-- **FR-002**: The Quake Repeater check MUST verify that: both images build; one stock (non-Quake) RAK4631 image still builds with the earthquake sensor switched off, because our hooks sit in shared headers; the sensor-rail hold in each image's real build configuration matches the expected hold for that image, read from the build definition and not supplied by the test (RAK4631 holds the sensor rail; the RAK3401 expectation is stated and asserted too); all four earthquake test suites (sensor driver, wire-level driver, alert policy, clock floor) ran, with a check that the number of suites run is not zero; and the release metadata is consistent, including both images carrying the same version and that version being higher than every existing release.
+- **FR-002**: The Quake Repeater check MUST verify that: both images build; one stock (non-Quake) RAK4631 image still builds with the earthquake sensor switched off, because our hooks sit in shared headers; the sensor-rail hold in each image's real build configuration matches the expected hold for that image, read from the build definition and not supplied by the test (RAK4631 holds the sensor rail; the RAK3401 expectation is stated and asserted too); all four earthquake test suites (sensor driver, wire-level driver, alert policy, clock floor) ran, with a check that the number of suites run is not zero; and the release metadata is consistent, including both images carrying the same version and, on a pull request that changes the version, that version being higher than every existing release.
 - **FR-003**: The Quake Repeater check MUST complete in 15 minutes or less at the 90th percentile, measured with a cold build cache.
 - **FR-004**: Keymind's full test job MUST NOT be a required check and MUST NOT run on ordinary pull requests or on pushes to `main`.
-- **FR-017**: The required check MUST fail closed: it is a separate, non-matrix job that always runs and fails unless every job it depends on succeeded. Its context is pinned to the GitHub Actions app so no other status source can satisfy it.
+- **FR-017**: The required check MUST fail closed: a failed, cancelled or skipped part of the check never produces a passing result, and no status source other than the repository's own automation can satisfy it. (How is in the plan and contract.)
 - **FR-018**: A release triggered by pushing a tag MUST pass the same checks as a normal release, and `quake-ci` MUST also run on pushes to `main`.
 - **FR-019**: A written break-glass procedure MUST exist for when the required check cannot run, covering who may use it, how, and how its use is recorded. Whether administrators are bound by the required check is the owner's decision, recorded in the contract.
 - **FR-020**: Pull requests created with the repository's automatic token (which does not start workflows) MUST NOT be used to reach a protected branch, or must be re-triggered by a push from a user.
@@ -147,7 +147,7 @@ A maintainer who has to resolve a Keymind conflict, or who wants to propose our 
 
 - **Required check**: the named check that branch protection demands on `next` and `main`. Attributes: name, what it verifies, run time, whether it ever reports "skipped".
 - **Inherited workflow**: automation that comes from Keymind. Attributes: trigger, enabled state, whether it applies to us, how it was turned off.
-- **Hook block**: a marked region in a Keymind file holding our additions. Attributes: file, purpose, whether it is generic enough to upstream.
+- **Seam**: one of our edits to a Keymind file. Attributes: file, purpose, whether it adds lines or edits an existing Keymind line, how often upstream changes that file, whether it is generic enough to upstream.
 - **Quake Repeater version**: the number that identifies a release. Attributes: value, ordering relative to earlier releases, Keymind base release.
 - **Keymind merge**: a pull request bringing a Keymind release into `next`. Attributes: Keymind release, conflicts, full-suite result.
 

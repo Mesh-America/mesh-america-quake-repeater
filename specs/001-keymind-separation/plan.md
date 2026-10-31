@@ -14,7 +14,7 @@ Make our own fast check the gate, keep Keymind's full suite for the moment it ma
 | B | Cut-over: observe, then require `quake-ci`, then drop `test`, then disable `run-unit-tests.yml` | repository settings only | none |
 | C | Keymind-merge runbook; revert our `if: false` edit inside the first merge window | one existing file reverted to Keymind's text | removes one conflict site |
 | D | Workflow inventory plus a drift-check script | new files | none |
-| E | Version scheme and the `ver` base-release string | variant file, one Keymind-file hook, apps repo | low to medium (see E) |
+| E | Version scheme and the `ver` base-release string | variant file, our own `MyMeshQuake.cpp`, apps repo | low |
 | F | Seam inventory; minimal consolidation only if trial merges justify it | Keymind code files | can add as much as it removes |
 
 A to D answer the three costs in the spec. E and F are separable and can wait.
@@ -71,7 +71,7 @@ variants/meshamerica_quake/platformio.ini   # version, KEYMIND_BASE_VERSION (E)
 apps repo: quake-repeater/catalog/catalog.source.json   # previousReleases edit at the first 2.x release (E)
 ```
 
-**Structure Decision**: new automation is additive; everything else is a repository setting or a revert. The only Keymind-file edits are the `ver` hook (E) and anything F justifies.
+**Structure Decision**: new automation is additive; everything else is a repository setting or a revert. The only Keymind-file edits would be whatever F justifies.
 
 ## Phase A: our fast check
 
@@ -82,7 +82,7 @@ apps repo: quake-repeater/catalog/catalog.source.json   # previousReleases edit 
    - `test_rak_gps_power.py` (the stock policy fixture and lifecycle harness).
    - `pio test -e native` for the four suites, with a check that the number of suites that ran equals four (a filter that matches nothing must fail).
    - `test_quake_rail_default.py` (below).
-   - **Version consistency**: both `FIRMWARE_VERSION` values in `variants/meshamerica_quake/platformio.ini` are equal and, if different from the base branch, greater than the highest existing `quake-v*` tag. This catches today's hand-synchronised mismatch before the merge to `main` instead of after.
+   - **Version consistency**: both `FIRMWARE_VERSION` values in `variants/meshamerica_quake/platformio.ini` are equal and, on a **pull request that changes the version**, greater than the highest existing `quake-v*` tag. The ordering part runs on `pull_request` only: on a push to `main` the release job creates the tag for that same push, so the version would equal the newest tag and the check would fail. This catches today's hand-synchronised mismatch before the merge to `main` instead of after.
 4. **`test_quake_rail_default.py`** (fixes the review's blocker on the rail test): it **reads the `build_flags` of each real quake environment** from `variants/meshamerica_quake/platformio.ini` (by parsing the file or `pio project config`), then feeds those defines into the existing lifecycle harness under the default `gps-only` mode. It asserts the RAK4631 expectation (sensor rail held, so the rail stays enabled and the sensors stay in telemetry) and states and asserts the RAK3401 expectation (radio-power hold only; its sensor path is unchanged by this work). Deleting `MESHAMERICA_QUAKE_HOLD_SENSOR_RAIL` from the real file turns it red. It depends on the harness's source anchors in Keymind's `EnvironmentSensorManager.cpp`; an anchor change after a Keymind merge is a known cost, recorded in the seam inventory.
 5. **Stock smoke build**: one stock RAK4631 repeater environment (as in Keymind's own nRF52 sensor smoke job) built with the earthquake sensor off, because our hooks sit in shared headers (`SensorManager.h`) and a break there would otherwise appear only in a merge window and be blamed on Keymind.
 6. **Build reuse**: `quake-repeater-release.yml` already builds both images; `quake-ci` builds them again. Decide in the task list between (a) accept the duplicate, (b) make the release workflow call a shared reusable build. Measure cold-cache time first.
@@ -123,7 +123,7 @@ Verified: the packed value of 1.18.0.2 is 0x01120002 and of 2.0.0.0 is 0x0200000
 
 Therefore the case for 2.x is **avoiding human confusion**, not a collision mechanism. Tasks:
 1. Read `mesh-america/*` and `scripts/generate_mesh_america_release.py` (Keymind's own release tooling in our tree) for assumptions about version shape or order.
-2. `KEYMIND_BASE_VERSION` macro in our variant file, used only in the `ver` text (a Keymind-file hook in `MyMesh.cpp`/`.h`; counts as a seam), keeping the bare version unchanged for adverts, telemetry and bridges. CI check that it matches the last merged Keymind release. Keep a suffix after the version so the flasher's `ver` regex still matches.
+2. `KEYMIND_BASE_VERSION` macro in our variant file, used only in the `ver` text. The `ver` reply is built in our own `examples/simple_repeater/MyMeshQuake.cpp:280` (`FIRMWARE_PRODUCT` plus `getFirmwareVer()`), so this adds no seam in `MyMesh.cpp`/`.h`. The owner-info reply (`MyMesh.cpp:997`) also prints product and version; leave it unchanged, keeping the bare version for adverts, telemetry and bridges. CI check that it matches the last merged Keymind release. Keep a suffix after the version so the flasher's `ver` regex still matches.
 3. Monotonicity check in `quake-ci` (Phase A item 3).
 4. Apps repo: at the first 2.x release, pin the new tag and move 1.18.0.2 to the front of `previousReleases` for all three variants. FR-015 verification uses a fixture or pre-release because the catalog build downloads real release assets.
 5. Test on hardware: USB/Bluetooth DFU and manual `ota install` from 1.18.0.2.

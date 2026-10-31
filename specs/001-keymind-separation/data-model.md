@@ -13,7 +13,7 @@ No stored data. These are the states the work moves through.
 - **name / file**: e.g. `run-unit-tests.yml`, `github-pages.yml`
 - **triggers**, **applies to us** (yes/no)
 - **state**: active → disabled; `run-unit-tests.yml` additionally enabled-for-Keymind-merge (temporary)
-- **invariant**: the file is byte-identical to Keymind's after Phase C.
+- **invariant**: after Phase C the file is byte-identical to the last merged Keymind tip (blob 59d00855 against the old 03214a16 base).
 
 ## Seam (Phase F)
 - **file**, **purpose**, **kind** (adds lines / edits an existing Keymind line), **upstream churn** (commits since 2026-10-01), **generic** (yes/no), **upstream decision** (pending / offered / declined)
