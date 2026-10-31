@@ -199,8 +199,14 @@ jobs:
           python3 scripts/check_quake_version.py --manifests dist --event "$EVENT" \
             --base-ref "${{ github.base_ref }}" --head-ref "${{ github.head_ref }}"
 
+      # Keymind's release tags are not in this repository, so fetch them (read-only) from upstream. The base
+      # string can only go stale when Keymind is merged, so this runs only for those pull requests; a network
+      # failure fails the check rather than skipping it.
       - name: The reported Keymind base version is the newest Keymind release merged in
-        run: python3 scripts/check_keymind_base.py
+        if: ${{ startsWith(github.head_ref, 'merge/keymind-') }}
+        run: |
+          git fetch --quiet --no-recurse-submodules https://github.com/mikecarper/MeshCore.git 'refs/tags/*:refs/tags/*'
+          python3 scripts/check_keymind_base.py
 
       # A pull request that merges a Keymind release into next must not pass until Keymind's full
       # suite has completed on the same commit (the maintainer then records a verdict on the pull
