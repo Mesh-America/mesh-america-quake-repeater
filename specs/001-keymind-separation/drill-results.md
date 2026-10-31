@@ -53,3 +53,29 @@ still 1.18.0.2).
   tested).
 - The positive path of the release guard (a commit that *is* on `main`): first real release after merge.
 - A tag push.
+
+## Settings-behaviour drill (task qr-fgy.3, 2026-10-31)
+
+Run in a throwaway public repository (`tjdownes/quake-settings-drill`; never in this repository). Observed with
+`gh` against live GitHub:
+
+| Question | Result |
+|----------|--------|
+| Does a manually disabled workflow stay disabled when its file's contents change? | **Yes.** State stayed `disabled_manually`, and the push started no run of it. |
+| Does it stay disabled when the file is renamed? | **No.** The renamed file is a new workflow, `active`. |
+| Is a newly added workflow file enabled? | **Yes**, `active` immediately. |
+| Does `gh workflow list --all` show a workflow file that exists only on a non-default branch? | **Yes**, once the branch is pushed (it showed `active`). |
+| Does GraphQL `updateBranchProtectionRule` leave omitted fields unchanged? | **Yes.** Setting only `isAdminEnforced`, then only `allowsForcePushes` + `requiresStrictStatusChecks`, left the required checks, review count and the other flags as they were. |
+| Does REST `PATCH .../required_status_checks` with only `checks` change `strict`? | **No**, `strict` kept its previous value. (The contract still sends both together, which is harmless.) |
+
+Consequences:
+
+- A Keymind merge that **renames** `run-unit-tests.yml` or `github-pages.yml`, or adds a workflow, brings an
+  **enabled** workflow. The inventory check (`scripts/check_workflow_inventory.py`) is what catches this; it
+  must stay a part of every Keymind merge window.
+- A workflow added on any pushed branch is registered and listed, so the inventory check should treat
+  unexpected entries from `--all` as errors regardless of branch.
+- The tag-ruleset case was not run: that rule was dropped by owner decision.
+
+The throwaway repository could not be deleted from here (the token has no `delete_repo` scope); delete it from
+the GitHub UI.
