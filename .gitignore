@@ -77,10 +77,3 @@ quake-site/src/
 quake-site/node_modules/
 quake-site/.vitepress/dist/
 quake-site/.vitepress/cache/
-
-# Beads / Dolt files (added by bd init)
-.dolt/
-*.db
-.beads-credential-key
-.beads/proxieddb/
-*.gate.lock*
