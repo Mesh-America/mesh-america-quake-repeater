@@ -5,7 +5,8 @@ No stored data. These are the states the work moves through.
 ## Required check
 - **name**: `quake-ci` (new), `test` (Keymind's, being retired)
 - **applies to**: branches `next`, `main`
-- **states**: `quake-ci`: absent → observed (runs, not required) → required. `test`: required → optional → retired.
+- **states**: `quake-ci`: absent → landed and observed (runs, not required) → required. `test`: required → optional → retired.
+- **shape**: `quake-ci` is a separate non-matrix job that always runs and fails unless every dependency succeeded.
 - **invariant**: at every moment each protected branch has at least one required check guaranteed to report on every PR.
 
 ## Inherited workflow
@@ -14,8 +15,8 @@ No stored data. These are the states the work moves through.
 - **state**: active → disabled; `run-unit-tests.yml` additionally enabled-for-Keymind-merge (temporary)
 - **invariant**: the file is byte-identical to Keymind's after Phase C.
 
-## Hook block (Phase F)
-- **file**, **marker**, **purpose** (one line), **generic** (yes/no), **upstream decision** (pending / offered / declined)
+## Seam (Phase F)
+- **file**, **purpose**, **kind** (adds lines / edits an existing Keymind line), **upstream churn** (commits since 2026-10-01), **generic** (yes/no), **upstream decision** (pending / offered / declined)
 
 ## Quake Repeater version
 - **value** (`MAJOR.MINOR.PATCH.pre`), **packed form** (u32), **tag** (`quake-v<value>`), **keymind base** (release id)

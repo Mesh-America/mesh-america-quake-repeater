@@ -1,47 +1,47 @@
 # Implementation Plan: Separate the Quake Repeater from Keymind's Test and Release Cycle
 
-**Branch**: `spec/keymind-separation` | **Date**: 2026-10-30 | **Spec**: [spec.md](spec.md)
+**Branch**: `spec/keymind-separation` | **Date**: 2026-10-30 (revised after hostile review, see [review.md](review.md)) | **Spec**: [spec.md](spec.md)
 
 **Input**: Feature specification from `specs/001-keymind-separation/spec.md`
 
 ## Summary
 
-Make our own fast check the gate, keep Keymind's full suite for the moment it matters (a Keymind merge), and stop sharing a version space with Keymind. Every step is ordered by merge cost, cheapest first, and nothing edits a Keymind workflow file.
+Make our own fast check the gate, keep Keymind's full suite for the moment it matters (a Keymind merge), and stop confusing our version numbers with Keymind's. Every step is ordered by merge cost, cheapest first, and nothing edits a Keymind workflow file.
 
 | Phase | What changes | Where | Cost at next Keymind merge |
 |-------|--------------|-------|----------------------------|
-| A | New `quake-ci.yml` plus one new test; runs alongside Keymind's `test`, not yet required | new files only | none |
-| B | Cut over: require `quake-ci`, drop `test` from required, disable two inherited workflows | repository settings only | none |
-| C | Keymind-merge runbook: re-enable the full suite for the merge window; revert our `if: false` edit | one existing file, reverted to Keymind's text | none (removes a conflict) |
-| D | Workflow inventory document | new file | none |
-| E | Version scheme 2.x, reported next to the Keymind base version | our variant file, release tooling, flasher | low |
-| F | Consolidate the 7 code seams into marked blocks; optionally upstream | Keymind code files | reduces future conflicts; some risk now |
+| A | New `quake-ci.yml`, a rail-hold test that reads the real build definitions, a version-consistency check, a stock-build smoke | new files only | none |
+| B | Cut-over: observe, then require `quake-ci`, then drop `test`, then disable `run-unit-tests.yml` | repository settings only | none |
+| C | Keymind-merge runbook; revert our `if: false` edit inside the first merge window | one existing file reverted to Keymind's text | removes one conflict site |
+| D | Workflow inventory plus a drift-check script | new files | none |
+| E | Version scheme and the `ver` base-release string | variant file, one Keymind-file hook, apps repo | low to medium (see E) |
+| F | Seam inventory; minimal consolidation only if trial merges justify it | Keymind code files | can add as much as it removes |
 
-Phases A to D are the answer to the three costs in the spec (slow gate, wrong coverage, inherited automation). E and F are separable and can wait.
+A to D answer the three costs in the spec. E and F are separable and can wait.
 
 ## Technical Context
 
-**Language/Version**: GitHub Actions YAML, Python 3.13 (existing release tooling), C++ (the policy fixture is compiled with the host `g++` by `test/test_rak_gps_power.py`), PlatformIO for the two images.
+**Language/Version**: GitHub Actions YAML, Python 3.13, C++ (host `g++` for the policy fixtures), PlatformIO.
 
-**Primary Dependencies**: PlatformIO (`pio run -e MeshAmerica_Quake_Repeater_RAK3401`, `..._RAK4631`), the existing `scripts/quake_release_manifest.py`, `gh` CLI for settings changes.
+**Primary Dependencies**: `pio run -e MeshAmerica_Quake_Repeater_RAK3401` and `..._RAK4631`; a stock RAK4631 repeater environment for the smoke build; `scripts/quake_release_manifest.py`; `gh` CLI for settings.
 
-**Storage**: N/A. State lives in repository settings (branch protection, workflow enabled state).
+**Storage**: N/A. State lives in repository settings.
 
-**Testing**: existing `test/test_quake_release_manifest.py`, `test/test_rak_gps_power.py` (compiles `test/fixtures/wisblock_shared_power_policy.cpp`), `pio test -e native` suites `test_d7s` and `test_d7s_wire`; one new test for the quake-image rail default (see research R3).
+**Testing**: `test/test_quake_release_manifest.py`; `test/test_rak_gps_power.py` and its lifecycle harness; `pio test -e native` for **four** suites: `test_d7s`, `test_d7s_wire`, `test_seismic_alert`, `test_clock_floor`; new `test/test_quake_rail_default.py`.
 
-**Target Platform**: GitHub-hosted `ubuntu-latest` runners; firmware targets nRF52840 (RAK3401, RAK4631).
+**Target Platform**: GitHub-hosted `ubuntu-latest`; nRF52840 firmware (RAK3401, RAK4631).
 
-**Project Type**: firmware repository (CI, release process, build metadata); no new runtime service.
+**Project Type**: firmware repository CI, release and build metadata.
 
-**Performance Goals**: required check at or under 15 minutes (measured baseline: our release workflow builds both images in 2 to 6 minutes); full release wait under 45 minutes.
+**Performance Goals**: required check at or under 15 minutes (90th percentile, cold cache). Baseline: the release workflow builds both images in 2 to 6 minutes warm. Cold-cache time and test time are not yet measured.
 
-**Constraints**: never edit or delete a Keymind workflow file; each settings change approved by the owner and reversible; the required check must never be skipped; the release flow and flasher catalog pins (tag `quake-vX.Y.Z.W`) keep working; nothing touches the mesh/internet boundary.
+**Constraints**: never edit a Keymind workflow file; each settings change approved by the owner and reversible; the required check never pending and never passes on a failed dependency; release flow and flasher catalog pins (tag `quake-vX.Y.Z.W`) keep working; no mesh/internet path.
 
-**Scale/Scope**: 2 images, 2 protected branches, 15 workflows (3 are ours), 7 code seams.
+**Scale/Scope**: 2 images, 2 protected branches, 15 workflow files (2 ours today, 3 with `quake-ci.yml`) plus 2 active default-setup checks (code scanning, dependency graph), 11 modified Keymind files.
 
 ## Constitution Check
 
-The project constitution (`.specify/memory/constitution.md`) is still the unfilled template, so no project principles exist to gate against. The binding constraints are therefore the ones recorded by the maintainer and carried into the spec: Keymind merges stay easy; Keymind workflow files untouched; every commit on `main` merged back into `next`; no internet gateway for the mesh. All are respected by the design below. **Gate: pass.** Recommendation: fill in the constitution from those four rules so later features are gated on them.
+`.specify/memory/constitution.md` is still the unfilled template, so there are no project principles to gate on. The binding constraints are the four maintainer rules carried into the spec: Keymind merges stay easy; Keymind workflow files untouched; every commit on `main` merged back into `next`; no internet gateway for the mesh. The design respects all four. **Gate: pass.** Recommendation: fill in the constitution from those rules.
 
 ## Project Structure
 
@@ -49,82 +49,103 @@ The project constitution (`.specify/memory/constitution.md`) is still the unfill
 
 ```text
 specs/001-keymind-separation/
-├── plan.md              # This file
-├── research.md          # Phase 0: decisions and evidence
-├── data-model.md        # Phase 1: the entities and their states
-├── quickstart.md        # Phase 1: how to verify each phase
-├── contracts/
-│   └── ci-and-settings.md   # required-check names, workflow states, cut-over order
+├── plan.md, research.md, data-model.md, quickstart.md
+├── review.md            # hostile review findings and how each was handled
+├── contracts/ci-and-settings.md
 ├── checklists/requirements.md
-└── tasks.md             # Next step (/speckit-tasks), not created here
+└── tasks.md             # next step (/speckit-tasks), not created here
 ```
 
 ### Source Code (repository root)
 
 ```text
 .github/workflows/
-├── quake-ci.yml                 # NEW (Phase A): the required check
-├── quake-repeater-release.yml   # existing, ours; keeps its path filter, never required
-├── quake-docs-pages.yml         # existing, ours
-├── run-unit-tests.yml           # Keymind's; Phase C reverts our `if: false` edit; disabled in settings
-└── github-pages.yml             # Keymind's; disabled in settings, file untouched
-docs/                            # NOT used for the inventory (mkdocs may publish it)
-design/ or .github/              # workflow inventory lives beside the workflows (Phase D)
-test/
-└── test_quake_rail_default.py   # NEW (Phase A): quake image keeps 3V3_S powered under gps-only
-variants/meshamerica_quake/platformio.ini   # version scheme (Phase E)
-tools/mota/, scripts/quake_release_manifest.py   # checked for the 2.x scheme (Phase E)
-src/helpers/sensors/, examples/simple_repeater/  # the 7 seams (Phase F)
+├── quake-ci.yml                  # NEW (A): required check
+├── quake-repeater-release.yml    # ours; path-filtered on PRs; never required
+├── quake-docs-pages.yml          # ours
+└── run-unit-tests.yml            # Keymind's; our `if: false` reverted in C; disabled in settings
+.github/WORKFLOWS.md              # NEW (D): inventory (not under docs/, which mkdocs may publish)
+scripts/check_workflow_inventory.py   # NEW (D): compares `gh workflow list --all` with the inventory
+test/test_quake_rail_default.py       # NEW (A)
+variants/meshamerica_quake/platformio.ini   # version, KEYMIND_BASE_VERSION (E)
+apps repo: quake-repeater/catalog/catalog.source.json   # previousReleases edit at the first 2.x release (E)
 ```
 
-**Structure Decision**: all new automation is additive (new files), and everything else is a repository setting or a revert to Keymind's text. The only edits to Keymind-owned files are in Phase F, which is optional and last.
+**Structure Decision**: new automation is additive; everything else is a repository setting or a revert. The only Keymind-file edits are the `ver` hook (E) and anything F justifies.
 
 ## Phase A: our fast check
 
-1. `quake-ci.yml` triggers on `pull_request` to `main` and `next` and on `push` to `next`, with **no workflow-level `paths:` filter**. Cheap steps run unconditionally. Expensive steps use job-level conditions only if needed, and a skipped step must still let the job succeed (the job, not the step, is the check).
-2. One job named `quake-ci` runs: the release-manifest test, the policy fixture test (`test_rak_gps_power.py`), the new rail-default test, `pio test -e native` filtered to the D7S suites, and a build matrix of both images.
-3. Keep the build in a matrix job but expose **one** aggregate check (`quake-ci`) so branch protection names a single stable context.
-4. The new `test_quake_rail_default.py` compiles the policy fixture with `MESHAMERICA_QUAKE_HOLD_SENSOR_RAIL` defined and with it undefined, and asserts the rail stays enabled under `gps-only` for the quake case and would be cut for the stock case. This is the test that would have caught 1.18.0.1.
-5. Prove it: revert the sensor-rail hold on a scratch branch and confirm `quake-ci` fails (SC-003).
-6. Run `quake-ci` next to Keymind's `test` for several PRs before Phase B. Do not make it required yet.
+1. **Triggers**: `pull_request` to `main` and `next`, and `push` to `next` and `main`, with **no workflow-level `paths:` filter**. Tag-triggered releases call the same tests (a reusable workflow, or the same steps) so a tag-only release is also gated (FR-018).
+2. **Job structure** (fixes the review's blocker): job `tests` (rail, native suites, manifest, version consistency) and job `build` (matrix of the two images plus one stock RAK4631 smoke build) both run first. A separate non-matrix job `quake-ci` has `needs: [tests, build]`, `if: ${{ always() }}`, and one step that fails unless every `needs.*.result` equals `success`. No `concurrency: cancel-in-progress` on it (a cancelled run reports as a failure). The required context is exactly `quake-ci`.
+3. **Tests job contents**:
+   - `test_quake_release_manifest.py`.
+   - `test_rak_gps_power.py` (the stock policy fixture and lifecycle harness).
+   - `pio test -e native` for the four suites, with a check that the number of suites that ran equals four (a filter that matches nothing must fail).
+   - `test_quake_rail_default.py` (below).
+   - **Version consistency**: both `FIRMWARE_VERSION` values in `variants/meshamerica_quake/platformio.ini` are equal and, if different from the base branch, greater than the highest existing `quake-v*` tag. This catches today's hand-synchronised mismatch before the merge to `main` instead of after.
+4. **`test_quake_rail_default.py`** (fixes the review's blocker on the rail test): it **reads the `build_flags` of each real quake environment** from `variants/meshamerica_quake/platformio.ini` (by parsing the file or `pio project config`), then feeds those defines into the existing lifecycle harness under the default `gps-only` mode. It asserts the RAK4631 expectation (sensor rail held, so the rail stays enabled and the sensors stay in telemetry) and states and asserts the RAK3401 expectation (radio-power hold only; its sensor path is unchanged by this work). Deleting `MESHAMERICA_QUAKE_HOLD_SENSOR_RAIL` from the real file turns it red. It depends on the harness's source anchors in Keymind's `EnvironmentSensorManager.cpp`; an anchor change after a Keymind merge is a known cost, recorded in the seam inventory.
+5. **Stock smoke build**: one stock RAK4631 repeater environment (as in Keymind's own nRF52 sensor smoke job) built with the earthquake sensor off, because our hooks sit in shared headers (`SensorManager.h`) and a break there would otherwise appear only in a merge window and be blamed on Keymind.
+6. **Build reuse**: `quake-repeater-release.yml` already builds both images; `quake-ci` builds them again. Decide in the task list between (a) accept the duplicate, (b) make the release workflow call a shared reusable build. Measure cold-cache time first.
+7. **Prove it** on scratch branches: remove the rail hold; break the alert test; make the two versions differ; break one matrix leg. Each must turn `quake-ci` **red** (not skipped, not pending). Also a docs-only and a workflow-only PR must go green.
+8. Run `quake-ci` beside Keymind's `test` for at least three PRs before Phase B.
 
-## Phase B: cut-over (repository settings, owner approves each step)
+## Phase B: cut-over (repository settings; owner approves each step)
 
-The order is mandatory: **add, observe, remove, disable**. See [contracts/ci-and-settings.md](contracts/ci-and-settings.md).
+Order is mandatory: **land, observe, add, remove, disable**. Details in [contracts/ci-and-settings.md](contracts/ci-and-settings.md).
 
-1. Add `quake-ci` to required checks on `next` and `main` (alongside `test`).
-2. Confirm `quake-ci` has reported on at least three PRs, including a docs-only one.
-3. Remove `test` from required checks.
-4. Only now, `gh workflow disable` `run-unit-tests.yml` and `github-pages.yml`.
-5. Before step 4, verify on a throwaway repository or fork that a disabled workflow stays disabled after a push that changes its file (research R2).
-6. Rollback at any step is the reverse single command. Record the previous protection JSON before the first change.
+1. Land `quake-ci.yml`. Make sure no open PR predates it (push or reopen any that do).
+2. Observe `quake-ci` on at least three PRs including a docs-only one and a workflow-only one.
+3. Add `quake-ci` to the required checks with the narrow endpoint, pinned to the GitHub Actions app, keeping `test`.
+4. Remove `test` from the required checks.
+5. Disable `run-unit-tests.yml` (the only inherited workflow still active). `github-pages.yml` and the rest are already disabled.
+6. Owner decisions recorded in the contract: whether `enforce_admins` is turned on; whether force-push stays allowed on `next`; whether `strict` (up-to-date branch) is turned on. Today both branches have `enforce_admins:false`, `strict:false`, no review requirement, and `next` allows force pushes, so a required check binds non-admins only.
+7. Rollback: re-enable, then PATCH the saved `checks` array back (never replay the full protection JSON).
+8. Break-glass: if `quake-ci` cannot run, the owner temporarily removes it from the required list or merges as administrator, notes it on the PR, and restores it afterwards.
 
 ## Phase C: Keymind-merge runbook
 
-`run-unit-tests.yml` cannot be dispatched while disabled, and it triggers on `pull_request`. The runbook for a merge window: enable it, open the `merge/keymind-*` PR (it runs), read the result, merge, disable it again. The temporary `if: false` skip we added to the stock-app compatibility test is reverted at the same time (the file returns to Keymind's text); if that test fails for reasons unrelated to us, the maintainer records it in the PR and proceeds, because the full suite is advisory on Keymind merges and `quake-ci` stays the gate.
+Triggers of `run-unit-tests.yml`: `pull_request` (no filter), `push` to `main`/`master`/`keymindCascade`, `workflow_dispatch`.
 
-## Phase D: inventory
+1. Create `merge/keymind-<release>` from `next`; resolve conflicts; keep the PR mergeable (a PR with conflicts does not start `pull_request` workflows).
+2. `gh workflow enable run-unit-tests.yml`, then push or reopen the PR, or `gh workflow run run-unit-tests.yml --ref merge/keymind-<release>` (enabling alone does not run anything on an open PR).
+3. Expect a red stock-app compatibility step if our `if: false` skip has been reverted (upstream has not fixed that test). A failure counts as "unrelated" only if the same step fails on the pristine Keymind tag; record the verdict in the PR before merging.
+4. Revert our `if: ${{ false }}` edit inside the first merge window, not before: reverting while `test` is still required would block every PR. After a clean merge the file equals the Keymind tip's blob; against the old base it equals blob `59d00855`.
+5. Merge, then `gh workflow disable run-unit-tests.yml`, then run the inventory check (D). While enabled, the suite also starts on other PRs; keep the window short.
+6. Record the working time and conflict list (SC-005, SC-008).
 
-A short table of all 15 workflows: trigger, enabled state, why. Placed beside the workflows (not under `docs/`, which mkdocs may publish).
+## Phase D: inventory and drift check
+
+`.github/WORKFLOWS.md` lists every workflow from `gh workflow list --all` (state, trigger, why), including the two default-setup jobs. `scripts/check_workflow_inventory.py` fails if the live list contains a workflow that is missing from the inventory or is enabled when the inventory says disabled. Run it in each Keymind merge window and from `quake-ci` on a schedule or manually.
 
 ## Phase E: version scheme
 
-Evidence so far (research R4): auto-install requires `candidate > running` as an unsigned 32-bit compare of the packed version, so 2.0.0.0 (0x02000000) is accepted over 1.18.0.2 (0x01120002). Open items to verify before any release: the flasher catalog validator's ordering rule; `tools/mota/pio_endf.py`; the release workflow's tag derivation; the `ver` command output carrying the Keymind base release. First candidate: `2.0.0.0`.
+Verified: the packed value of 1.18.0.2 is 0x01120002 and of 2.0.0.0 is 0x02000000; build tooling, tag derivation and the flasher accept 2.x (the flasher only checks that versions are distinct, and `previousReleases` order is by hand). The only numeric ordering on devices is the trusted auto-install gate, which is off by default and needs signed packages, which Quake does not use. Real update paths (USB/Bluetooth DFU, manual on-air install) have no version gate.
 
-## Phase F: code seams
+Therefore the case for 2.x is **avoiding human confusion**, not a collision mechanism. Tasks:
+1. Read `mesh-america/*` and `scripts/generate_mesh_america_release.py` (Keymind's own release tooling in our tree) for assumptions about version shape or order.
+2. `KEYMIND_BASE_VERSION` macro in our variant file, used only in the `ver` text (a Keymind-file hook in `MyMesh.cpp`/`.h`; counts as a seam), keeping the bare version unchanged for adverts, telemetry and bridges. CI check that it matches the last merged Keymind release. Keep a suffix after the version so the flasher's `ver` regex still matches.
+3. Monotonicity check in `quake-ci` (Phase A item 3).
+4. Apps repo: at the first 2.x release, pin the new tag and move 1.18.0.2 to the front of `previousReleases` for all three variants. FR-015 verification uses a fixture or pre-release because the catalog build downloads real release assets.
+5. Test on hardware: USB/Bluetooth DFU and manual `ota install` from 1.18.0.2.
+6. The release workflow has no ordering guard (it only asks whether the tag exists and always passes `--latest`); the monotonicity check in `quake-ci` is the guard.
+Open owner decision: confirm 2.0.0.0, or choose another scheme (for example a high major).
 
-Inventory each of the 7 files' additions (about 200 lines), wrap each in one marked block, rebuild both images, and compare telemetry/alert/power behaviour before and after. Offering generic hooks (sensor-rail hold, extra telemetry source) to Keymind is the maintainer's decision, taken after the blocks exist and not before.
+## Phase F: seams
+
+The review showed one block per file is not achievable: `MyMesh.cpp` has 8 separate hunks, `MyMesh.h` 4 (including an include and the product-name define), `WisBlockSharedPowerPolicy.h` 3, and four of our lines edit existing Keymind lines. Upstream rewrote about 700 lines of `MyMesh.cpp` and `.h` in six days and the current layout still merged with **0 conflicts**. Moving code could make conflicts worse. So Phase F is first an inventory, ranked by upstream churn (commits since 2026-10-01: `run-unit-tests.yml` 332, `MyMesh.cpp` 96, `MyMesh.h` 67, `mkdocs.yml` 38, `platformio.ini` 37, `EnvironmentSensorManager.cpp` 14, the rest under 7). Consolidate only where trial merges show a recurring conflict, keeping logic in our own files (`MyMeshQuake.cpp`, `D7S*`) and short `#if ENV_INCLUDE_D7S` hooks. Offering generic hooks (sensor-rail hold, seismic reading) to Keymind remains the maintainer's decision.
 
 ## Risks
 
 | Risk | Mitigation |
 |------|------------|
-| A required check that stays "pending" blocks all merges | no workflow-level path filter; one aggregate job; observed on a docs-only PR before cut-over |
-| Disabling the wrong workflow, or in the wrong order, blocks every PR | contract fixes the order; protection JSON saved first; each step one reversible command |
-| A disabled workflow comes back after a Keymind merge | verified on a throwaway repo first; checked again after the first real Keymind merge (SC-006) |
-| Fast check misses a Keymind regression that matters to us | full suite runs on every Keymind merge PR; plus a release-time smoke build |
-| A 2.x version breaks the flasher or OTA | verified against validator and update path before the first release (FR-015) |
-| Seam consolidation changes behaviour | before/after build comparison; phase F is optional and last |
+| Aggregate check skipped or passing on a failed dependency | separate fail-closed job; red-case tests in Phase A step 7 |
+| Rail test passes with the flag deleted | test reads the real environment definition; proven red on a scratch branch |
+| Required check stuck pending or broken | no path filter; observed before required; break-glass procedure |
+| Bypass: admins, `strict:false`, force-push on `next`, tag-only release | explicit owner decisions in the contract; tag releases gated |
+| Keymind merge cost is episodic, dominated by history rewrites (the 1.18.0.1 merge had 4 conflicting files and a rewritten base) | trial merge before each real merge; seam inventory; none of A to D changes this cost |
+| New or renamed upstream workflow arrives enabled | inventory drift check in each merge window |
+| Stock builds break through shared headers | stock RAK4631 smoke build in `quake-ci` |
+| 2.x breaks release or flasher tooling | Phase E verification before the first release |
 
 ## Complexity Tracking
 

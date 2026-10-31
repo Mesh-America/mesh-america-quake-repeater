@@ -31,5 +31,6 @@
 
 ## Notes
 
+- Revised after three independent hostile reviews; see [review.md](../review.md). Spec now has FR-001 to FR-020 and SC-001 to SC-008.
 - FR-002 and FR-015 name checks whose existence is unverified (the on-air update ordering rule, whether the rail-off regression is reproducible in a fast test); the plan must resolve both.
 - SC-002 (under 45 minutes per release) and FR-003 (15 minutes) are targets; the plan must measure the real build times of both images.

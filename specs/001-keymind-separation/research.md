@@ -14,25 +14,26 @@ Run times from the repository's own history (`gh run list`):
 **Decision**: our check is the existing build plus the tests that cover our code; target 15 minutes with margin.
 **Alternatives rejected**: trimming `test` to the nRF52 steps (edits a Keymind workflow file, conflicts at every merge, and was declined earlier); parallelising it (same).
 
-## R2. Does a disabled workflow stay disabled after its file changes? — Unverified
+## R2. Does a disabled workflow stay disabled after its file changes? — Partly measured
 
-Expected: GitHub keeps the "disabled manually" state per workflow, but this is not confirmed here. **Decision**: verify on a throwaway repository (disable, push a change to the file, list state) before Phase B step 5, and re-check after the first real Keymind merge.
-**Fallback if it does not hold**: leave the workflow enabled but not required (it triggers on every PR regardless and costs build minutes), or as a last resort carry a one-line guard in the file (a Keymind-file edit).
+Several inherited workflows were disabled on 2026-10-03; `build-repeater-firmwares.yml` was changed by a later merge (commit cc4bcb9ca, 2026-10-05) and is still `disabled_manually`. State is keyed by workflow ID, so an **added or renamed** upstream workflow file arrives enabled, and a deleted-and-re-added one is new. **Decision**: re-check after the next real merge, and run the inventory drift check (Phase D) in every merge window.
+**Fallback if a workflow comes back**: disable it again; the drift check flags it.
 
 ## R3. Why the 1.18.0.1 rail regression was not caught — Read
 
-- Keymind's `test` job does run the policy fixture (`test_rak_gps_power.py`, step near line 885), but the fixture exercises the policy class alone.
-- No test models the **quake image configuration** (`MESHAMERICA_QUAKE_HOLD_SENSOR_RAIL`, default mode `gps-only`) and asserts the 3V3_S rail stays on. So the suite passed while the image dropped the sensors from telemetry.
+- Keymind's `test` job runs `test_rak_gps_power.py` (step near line 885). The policy fixture only checks the compile-time hold mask against a value the test supplies; the `gps-only` rail behaviour lives in a lifecycle harness that extracts function bodies from `EnvironmentSensorManager.cpp` using hard-coded source anchors.
+- Nothing reads the **real quake environment definition** (`variants/meshamerica_quake/platformio.ini`) and asserts the sensor rail stays on under the default `gps-only` mode. A test that passes the define itself stays green even if the define is deleted from the real file (a hostile reviewer pointed this out).
 
-**Decision**: add `test/test_quake_rail_default.py` (our file) that compiles the policy fixture with the quake flag, in the default `gps-only` mode, and asserts the rail is enabled, plus the inverse for the stock build. This is the single most valuable test in the new check.
+**Decision**: `test/test_quake_rail_default.py` (our file) parses each quake environment's `build_flags`, feeds those defines to the lifecycle harness under `gps-only`, and asserts the expected rail for each image. Cost: it shares the harness's source anchors in Keymind code, so an anchor change after a merge breaks it; the seam inventory records that.
 
 ## R4. Version ordering on the update path — Read (partly)
 
 - `OtaFormat.h`: `ota_trusted_auto_version_allows(running, candidate)` is true only when both are non-zero and `candidate > running`, as unsigned 32-bit values of the packed version `MAJOR<<24 | MINOR<<16 | PATCH<<8 | pre`.
 - Therefore `2.0.0.0` (0x02000000) is accepted as an upgrade over `1.18.0.2` (0x01120002).
-- Not yet read: whether manual `ota install` or the flasher catalog validator applies its own ordering rule (earlier observation: the apps validator rejects repeated versions); how `ver` could report the Keymind base release.
+- Read since: manual `ota install` has no version gate; the bootloader continuity gate applies to bootloader packages only; the flasher validator and builder only require distinct versions (the order of `previousReleases` is by hand); the release tooling derives the tag from the packed image version. The trusted auto-install gate is off by default and needs signed packages, which Quake does not use, so Quake's real update paths never consult version order.
+- Still unread: Keymind's `mesh-america/*` and `scripts/generate_mesh_america_release.py` (they changed upstream recently and ship in our tree).
 
-**Decision**: candidate scheme `2.x.y.z`; the verification tasks in Phase E gate the first release.
+**Decision**: 2.x is about avoiding human confusion, not preventing a mechanical collision (OTA target ID, tag prefix and repository already differ). Candidate `2.0.0.0`; Phase E verification gates the first release.
 **Alternatives**: keep `1.18.x.y` and add 100 to the last field (stays inside Keymind's space, so collisions remain possible); letter or fifth-number suffixes (rejected earlier: the 4-byte packing ignores them and the release workflow would skip the tag).
 
 ## R5. Changing required checks — Read (GitHub behaviour)
@@ -47,11 +48,12 @@ Branch protection names checks by their job/context name. `next` and `main` curr
 
 ## R7. Inherited automation — Read
 
-Triggers on our branches: `run-unit-tests.yml` (push main, every PR) and `github-pages.yml` (push main, publishes Keymind's mkdocs site to `gh-pages`) are the two that act on us. The others (`build-companion`, `build-observer*`, `build-repeater`, `build-room-server`, `check-mqtt-preset-parity`) trigger only on tags or branches we do not use. `pr-build-check.yml` targets `main`/`dev` PRs with a path filter. Whether `github-pages.yml` currently succeeds or what it publishes has not been checked.
+Measured with `gh workflow list --all`: `github-pages`, `pr-build-check`, `sync-flasher-content`, `stale-bot`, the observer, companion, repeater and room-server builds, and `check-mqtt-preset-parity` have been `disabled_manually` since 2026-10-03. Active: `run-unit-tests`, `firmware-builder` (`workflow_call` only), our two Quake workflows, and the default-setup code scanning and dependency graph. Our live documentation site is deployed by `quake-docs-pages.yml` (Pages build type: workflow); the `gh-pages` branch was last written on 2026-10-03 and is not what is served. So only `run-unit-tests.yml` acts on us.
 
 ## Open questions carried into tasks
 
 1. R2: disabled-state persistence (verify before cut-over).
 2. R4: flasher validator and manual OTA ordering; `ver` base-version reporting.
-3. `pr-build-check.yml`: decide disable vs. keep after reading what it builds (it may duplicate `quake-ci`).
-4. Whether `github-pages.yml` has been publishing wrong content (check `gh-pages` before disabling).
+3. Cold-cache run time of `quake-ci` and of `pio test -e native`; whether `pio test` with an unmatched filter exits 0.
+4. Whether official apps feature-gate on the repeater version string (major 1 to 2).
+5. Keymind's `mesh-america/*` tooling and its version assumptions.
