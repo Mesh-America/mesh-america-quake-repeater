@@ -1,0 +1,237 @@
+name: Quake CI
+
+# The required check for the Mesh America Quake Repeater. The plan, the settings contract and the
+# reasoning are in specs/001-keymind-separation/. In short:
+#
+#   * One required context, `quake-ci`, produced by the last job below. It is a separate, non-matrix
+#     job that always runs and fails unless every job it depends on succeeded, so a failed, cancelled
+#     or skipped dependency can never produce a passing check.
+#   * No workflow-level `paths:` filter and no `name:` on the aggregate job: a required check that is
+#     skipped by a filter stays pending forever and blocks documentation-only pull requests.
+#   * Keymind's own full suite (run-unit-tests.yml) is not part of this. It runs on Keymind merge
+#     pull requests only; the `release-metadata` job fails such a pull request until it has run.
+#
+#   pull request to main or next -> run
+#   push to next                 -> run
+#   push to main, quake-v* tag   -> run by quake-repeater-release.yml through workflow_call, and the
+#                                   release only publishes if this passed for the same commit
+
+on:
+  pull_request:
+    branches: [main, next]
+  push:
+    branches: [next]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v6
+
+      - name: Init Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio-quake-ci-tests
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install PlatformIO and build dependencies
+        run: pip install --upgrade platformio -r requirements-build.txt intelhex==2.3.0
+
+      - name: Test the release manifest script
+        run: python3 -B test/test_quake_release_manifest.py -v
+
+      - name: Test the version, report and inventory checkers
+        run: |
+          python3 -B test/test_quake_version_check.py -v
+          python3 -B test/test_junit_suite_check.py -v
+          python3 -B test/test_workflow_inventory_check.py -v
+
+      # Reads the real environment definitions, so deleting the sensor-rail hold from either image's
+      # build flags turns this red. This is the test that would have caught release 1.18.0.1.
+      - name: Quake images keep the WisBlock sensor rail powered
+        run: python3 -B test/test_quake_rail_default.py -v
+
+      # Exactly these four suites must run and pass. The report is counted by the checker, so a filter
+      # that selects nothing fails even if pio exits 0.
+      - name: Earthquake sensor suites (driver, wire level, alert policy, clock floor)
+        run: |
+          pio test -e native \
+            -f test_d7s -f test_d7s_wire -f test_seismic_alert -f test_clock_floor \
+            --junit-output-path junit-quake-native.xml
+          python3 scripts/check_junit_suites.py junit-quake-native.xml \
+            test_d7s test_d7s_wire test_seismic_alert test_clock_floor
+
+  # The two Quake images, built exactly as the release builds them. The manifests feed the
+  # release-metadata job.
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - env: MeshAmerica_Quake_Repeater_RAK3401
+            manifest: manifest.json
+          - env: MeshAmerica_Quake_Repeater_RAK4631
+            manifest: manifest-MeshAmerica_Quake_Repeater_RAK4631.json
+    env:
+      PIO_ENV: ${{ matrix.env }}
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v6
+
+      - name: Init Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio-quake-${{ matrix.env }}
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install PlatformIO and build dependencies
+        run: |
+          pip install --upgrade platformio -r requirements-build.txt intelhex==2.3.0
+          python -c "import intelhex; print('intelhex importable from', intelhex.__file__)"
+
+      - name: Build firmware
+        run: pio run -e "$PIO_ENV"
+
+      - name: Verify the package and write the manifest
+        run: |
+          python3 scripts/quake_release_manifest.py \
+            --zip ".pio/build/${PIO_ENV}/firmware.zip" \
+            --hex ".pio/build/${PIO_ENV}/firmware.hex" \
+            --env "$PIO_ENV" \
+            --commit "$GITHUB_SHA" \
+            --manifest-name "${{ matrix.manifest }}" \
+            --out dist
+
+      - name: Upload manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: quake-ci-manifest-${{ matrix.env }}
+          path: dist/manifest*.json
+          if-no-files-found: error
+
+  # Our hooks live in shared headers (SensorManager.h and others), so a stock image that does not use
+  # them must still build. This catches a break there on our pull request instead of in a Keymind
+  # merge window, where it would be blamed on Keymind.
+  stock-smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - RAK_4631_repeater_lora_ota_no_external_sensors
+          - RAK_3401_repeater_lora_ota_no_external_sensors
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v6
+
+      - name: Init Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio-quake-stock-${{ matrix.env }}
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install PlatformIO and build dependencies
+        run: pip install --upgrade platformio -r requirements-build.txt intelhex==2.3.0
+
+      - name: Build a stock image without the earthquake sensor
+        run: pio run -e "${{ matrix.env }}"
+
+  release-metadata:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      # Full history and tags: the version must be compared with every existing quake-v* tag, and the
+      # base branch's version is read from origin/<base>.
+      - name: Clone Repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download manifests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: quake-ci-manifest-*
+          merge-multiple: true
+          path: dist
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Both images carry one version, and it is not lower than any release
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then EVENT=tag
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then EVENT=pull_request
+          else EVENT=push; fi
+          python3 scripts/check_quake_version.py --manifests dist --event "$EVENT" \
+            --base-ref "${{ github.base_ref }}" --head-ref "${{ github.head_ref }}"
+
+      # A pull request that merges a Keymind release into next must not pass until Keymind's full
+      # suite has completed on the same commit (the maintainer then records a verdict on the pull
+      # request). The suite is disabled in settings the rest of the time; enable it, then push or
+      # reopen the pull request.
+      - name: Keymind merge pull requests need a completed run of the full suite
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'merge/keymind-')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          DONE=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/run-unit-tests.yml/runs?head_sha=${SHA}" \
+            --jq '[.workflow_runs[] | select(.status == "completed")] | length')
+          echo "completed run-unit-tests runs for ${SHA}: ${DONE}"
+          if [[ "${DONE}" -lt 1 ]]; then
+            echo "::error::No completed run of Keymind's full suite (run-unit-tests.yml) exists for ${SHA}. Enable the workflow, push or reopen this pull request, wait for the run, and record the verdict on the pull request."
+            exit 1
+          fi
+
+  quake-ci:
+    needs: [tests, build, stock-smoke, release-metadata]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job this check depends on must have succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          for name, info in sorted(needs.items()):
+              print(f"{info['result']:10} {name}")
+          bad = sorted(n for n, i in needs.items() if i["result"] != "success")
+          if bad:
+              print("::error::not successful: " + ", ".join(bad))
+              sys.exit(1)
+          PY
