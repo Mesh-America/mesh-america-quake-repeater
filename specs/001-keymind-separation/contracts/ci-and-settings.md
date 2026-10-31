@@ -20,9 +20,9 @@ This is the interface between the repository and GitHub's settings. Anything her
 | Decision | Options | Answer |
 |----------|---------|--------|
 | Bind administrators (`enforce_admins`) | off (today) / on | _open_ |
-| Force-push on `next` | allowed (today) / blocked | _open_ |
-| Require branch up to date (`strict`) | off (today) / on | _open_ |
-| First new-scheme version | 2.0.0.0 / other | _open_ |
+| Force-push on `next` | allowed (today) / blocked | **blocked** (owner, 2026-10-30) |
+| Require branch up to date (`strict`) | off (today) / on | **on** (owner, 2026-10-30) |
+| First new-scheme version | 2.0.0.0 / other | **2.0.0.0** (owner, 2026-10-30) |
 
 ## Workflow states (target; from `gh workflow list --all`)
 
