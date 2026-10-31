@@ -58,6 +58,7 @@ jobs:
           python3 -B test/test_quake_version_check.py -v
           python3 -B test/test_junit_suite_check.py -v
           python3 -B test/test_workflow_inventory_check.py -v
+          python3 -B test/test_keymind_base_check.py -v
 
       # Reads the real environment definitions, so deleting the sensor-rail hold from either image's
       # build flags turns this red. This is the test that would have caught release 1.18.0.1.
@@ -197,6 +198,9 @@ jobs:
           else EVENT=push; fi
           python3 scripts/check_quake_version.py --manifests dist --event "$EVENT" \
             --base-ref "${{ github.base_ref }}" --head-ref "${{ github.head_ref }}"
+
+      - name: The reported Keymind base version is the newest Keymind release merged in
+        run: python3 scripts/check_keymind_base.py
 
       # A pull request that merges a Keymind release into next must not pass until Keymind's full
       # suite has completed on the same commit (the maintainer then records a verdict on the pull
