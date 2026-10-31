@@ -1,50 +1,44 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+# Mesh America Quake Repeater Constitution
+
+The firmware in this repository is Keymind Cascade plus the Mesh America Quake Repeater additions. These
+principles come from decisions the maintainer has already made; the specification and plan for the
+current work are in `specs/001-keymind-separation/`.
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. Keymind merges stay easy
+Staying current with Keymind Cascade is a standing requirement. Prefer new files of our own over edits to
+Keymind files; where a Keymind file must change, the edit is short, guarded by `ENV_INCLUDE_D7S` or an
+equivalent, and listed in `.github/SEAMS.md`. A change is judged by what it costs at the next Keymind merge.
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+### II. Keymind workflow files are never edited
+No Keymind workflow file is trimmed, forked or deleted, even for speed. Workflows that do not apply to us
+are switched off in repository settings, and new automation goes in files of our own. The one temporary edit
+(the stock-app test skip) is reverted in the first Keymind merge window.
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+### III. Every commit on `main` goes back into `next`
+After anything lands on `main` (release pull requests, bot commits), `main` is merged back into `next`, in
+this repository and in the apps repository. With administrators bound, the merge-back is a pull request.
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### IV. The mesh is never bridged to the internet
+No feature, side benefit or convenience may add an internet gateway to the LoRa mesh.
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+### V. A gate must fail closed and be proven red
+A check that can pass vacuously is worse than none. Required checks fail when a dependency is skipped,
+cancelled or empty, report on every pull request, and are proven by deliberately breaking what they
+protect. Safety tests read the real build definitions rather than restating them.
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+### VI. Settings changes need the owner
+Branch protection, required checks, rulesets, merge methods and workflow enablement are changed only with
+the owner's explicit approval, one step at a time, in an order that cannot leave a pull request
+unmergeable, with the previous state saved and a rollback written down.
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+## Working agreements
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+- Tasks are tracked in Beads (`bd`, prefix `qr`), not in a Spec Kit tasks file.
+- Anything long-running or shared on the maintainer's machine (containers, builds) targets only what it
+  started, by name.
+- Release flow: work lands on `next`; a merge-commit pull request from `next` to `main` is the release;
+  a release happens only when `FIRMWARE_VERSION` is bumped.
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
-
-## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
-
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
-
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+**Version**: 1.0.0 | **Ratified**: 2026-10-31 (proposed; the maintainer has not yet reviewed this wording)
