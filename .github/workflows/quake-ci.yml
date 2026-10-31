@@ -65,6 +65,15 @@ jobs:
       - name: Quake images keep the WisBlock sensor rail powered
         run: python3 -B test/test_quake_rail_default.py -v
 
+      # Keymind's own host-only tests of the shared code our rail hold sits in (GPS/shared-rail policy,
+      # terminal shutdown hooks, RAK3401 on-board radio). A few seconds each; the rest of Keymind's suite
+      # is not run here.
+      - name: Keymind shared WisBlock power code tests
+        run: |
+          python3 -B test/test_rak_gps_power.py -v
+          python3 -B test/test_rak_shutdown_power.py -v
+          python3 -B test/test_rak3401_onboard_radio.py -v
+
       # Exactly these four suites must run and pass. The report is counted by the checker, so a filter
       # that selects nothing fails even if pio exits 0.
       - name: Earthquake sensor suites (driver, wire level, alert policy, clock floor)
