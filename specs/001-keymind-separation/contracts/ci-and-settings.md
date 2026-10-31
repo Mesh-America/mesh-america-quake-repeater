@@ -4,60 +4,93 @@ This is the interface between the repository and GitHub's settings. Anything her
 
 ## Current state (read from GitHub, 2026-10-30)
 
-- `next` and `main`: required context `test` (app id 15368, GitHub Actions); `strict:false`; `enforce_admins:false`; zero required reviews; no merge queue, no rulesets. `next` also allows force pushes.
-- Consequence today: a required check binds non-administrators only. The owner can merge around it. **Target (owner decision, 2026-10-30): administrators must not be able to work around a failed `quake-ci`.**
+| Setting | `next` | `main` |
+|---------|--------|--------|
+| Required context | `test` (app id 15368) | `test` (app id 15368) |
+| `strict` (branch must be up to date) | off | off |
+| `enforce_admins` | off | off |
+| Force-push | allowed | blocked |
+| Pull request required | yes, 0 approvals | yes, 0 approvals |
+
+Repository merge methods: merge commits, squash and rebase are all allowed. No rulesets, no merge queue, no tag protection.
+
+Consequence today: a required check binds non-administrators only, and a direct push by the owner (as used for merge-back) is allowed.
+
+## Owner decisions
+
+| Decision | Answer |
+|----------|--------|
+| Administrators cannot merge around a failed `quake-ci` (`enforce_admins` on) | **on** (owner, 2026-10-30), switched on as the last cut-over step |
+| Force-push on `next` | **blocked** (owner, 2026-10-30) |
+| Branch must be up to date (`strict`) | **on** (owner, 2026-10-30) |
+| First new-scheme version | **2.0.0.0** (owner, 2026-10-30) |
+| Repository merge methods | _open_: proposed merge commits only, so a release PR can never be squashed or rebased |
+| Tag rule: who may create `quake-v*` tags | _open_: proposed owner only |
 
 ## Required checks (target state)
 
 | Branch | Required context | Source |
 |--------|------------------|--------|
-| `next`, `main` | `quake-ci`, app id 15368 | job `quake-ci` in `.github/workflows/quake-ci.yml` |
+| `next` | `quake-ci`, app id 15368 | job id `quake-ci`, no `name:`, in `.github/workflows/quake-ci.yml` |
+| `main` | `quake-ci`, app id 15368 | the same, but only after a release has put the workflow file on `main` (a PR cut from a `main` without the file never reports it) |
 
-`quake-ci` MUST be a separate, non-matrix job with `needs: [tests, build]`, `if: ${{ always() }}`, and a step that fails unless every `needs.*.result` is `success`. It MUST NOT use a workflow-level `paths:` filter, a job-level `if:` on itself, or `concurrency: cancel-in-progress`. Matrix legs get decorated names such as `build (MeshAmerica_Quake_Repeater_RAK4631)`; only the aggregate is ever required.
+`quake-ci` MUST be a separate, non-matrix job with `needs: [tests, build, release-metadata]`, a job condition of exactly `${{ always() }}` and no other, and one step that fails unless every `needs.*.result` is `success`. It MUST NOT use a workflow-level `paths:` filter, a `name:`, or `concurrency: cancel-in-progress`. Matrix legs get decorated names such as `build (MeshAmerica_Quake_Repeater_RAK4631)`; only the aggregate is ever required. The context is the job's `name:` or, without one, its id, so no second workflow may define a job with the same name.
 
-## Owner decisions (record the answer here before Phase B)
-
-| Decision | Options | Answer |
-|----------|---------|--------|
-| Bind administrators (`enforce_admins`) | off (today) / on | **on** (owner, 2026-10-30): admins cannot merge around a failed `quake-ci`; turned on as the last cut-over step |
-| Force-push on `next` | allowed (today) / blocked | **blocked** (owner, 2026-10-30) |
-| Require branch up to date (`strict`) | off (today) / on | **on** (owner, 2026-10-30) |
-| First new-scheme version | 2.0.0.0 / other | **2.0.0.0** (owner, 2026-10-30) |
-
-## Workflow states (target; from `gh workflow list --all`)
+## Workflow states (from `gh workflow list --all`)
 
 | Workflow | State now | Target |
 |----------|-----------|--------|
 | `quake-ci.yml` | does not exist | enabled, required |
-| `quake-repeater-release.yml` | active | enabled, not required (PR trigger is path-filtered) |
+| `quake-repeater-release.yml` | active | enabled, not required; release job depends on `quake-ci` |
 | `quake-docs-pages.yml` | active | enabled |
 | `run-unit-tests.yml` | active | disabled; enabled only during a Keymind merge window |
 | `firmware-builder.yml` | active (`workflow_call` only) | unchanged |
-| Code scanning, Dependency graph (default setup, not file-backed) | active | unchanged |
+| Code scanning, Dependency graph (default setup) | active | unchanged |
 | `github-pages`, `pr-build-check`, `sync-flasher-content`, `stale-bot`, `build-companion`, `build-observer*`, `build-repeater`, `build-room-server`, `check-mqtt-preset-parity` | `disabled_manually` since 2026-10-03 | unchanged |
+
+## How settings are changed (verified read-only on 2026-10-30)
+
+- **Required checks and `strict`**: `PATCH repos/{r}/branches/{b}/protection/required_status_checks` with `strict` and `checks:[{context,app_id}]` together every time (the docs do not promise that omitted fields are kept). The PATCH replaces the list. It accepts a context that has never reported without error, so the observation step is the only safety net.
+- **`enforce_admins`**: `POST` / `DELETE repos/{r}/branches/{b}/protection/enforce_admins`.
+- **Force-push**: no narrow REST endpoint exists (it is settable only through the full PUT body). Use GraphQL `updateBranchProtectionRule`. Verified by query and introspection: the rule fields `allowsForcePushes`, `requiresStrictStatusChecks`, `isAdminEnforced`, `requiredStatusChecks{context, app{databaseId}}` exist, and the mutation input has `allowsForcePushes`, `isAdminEnforced`, `requiresStrictStatusChecks`, `requiredStatusChecks`. Rule IDs: `next` = `BPR_kwDOU5wo6s4FBIyZ`, `main` = `BPR_kwDOU5wo6s4FBUvs`. Not yet verified: that omitted fields in the mutation are left unchanged (test on a throwaway repository first), and a before/after diff of the query result is the check after every change.
+- Never replay the GET output of the REST protection as a PUT body: the shapes differ and a PUT replaces everything, including the "pull request required" rule.
+- **Tag rule**: a repository ruleset restricting creation of `quake-v*` tags to the owner (the repository has no rulesets today).
+- **Merge methods**: repository setting, merge commits only (proposed).
 
 ## Cut-over order (MUST be followed)
 
-1. Land `quake-ci.yml`. No open PR may predate it; push to or reopen any that do.
-2. Observe: `quake-ci` reports on at least 3 PRs, including one docs-only and one workflow-only.
-3. Save the current required checks (`gh api repos/Mesh-America/mesh-america-quake-repeater/branches/{next,main}/protection/required_status_checks`). Keep the full protection JSON only as a record.
-4. Add `quake-ci` to the required checks, keeping `test`, using `PATCH .../protection/required_status_checks` with `checks:[{context:"quake-ci",app_id:15368},{context:"test",app_id:15368}]`. **Owner approves.**
-5. Remove `test` the same way. **Owner approves.**
+1. Land `quake-ci.yml` on `next`. Push to or reopen any PR that predates it.
+2. Observe: `quake-ci` reports on at least 3 PRs, including one docs-only and one workflow-only. Also check what a YAML syntax error does (no check at all, so the check hangs).
+3. Save the current protection: the GraphQL query result for both rules, and the REST `required_status_checks`.
+4. On `next`: add `quake-ci` (app id 15368), keeping `test`. **Owner approves.** `main` waits until the first release carries the workflow file.
+5. Remove `test`. **Owner approves.**
 6. `gh workflow disable run-unit-tests.yml`. **Owner approves.**
-7. Turn on `strict`, block force-push on `next`, and turn on `enforce_admins` on both branches (`POST/DELETE .../protection/enforce_admins`, the narrow endpoints). Last, so that a not-yet-proven check never locks the owner out. **Owner approves.**
-8. Rollback: `DELETE .../protection/enforce_admins` first, then `gh workflow enable run-unit-tests.yml`, then PATCH the saved `checks` array. Never replay the full protection JSON (the PUT body differs from the GET output and would drop settings).
+7. Write the release ritual (below) into the contributor notes.
+8. Create the tag rule and set the merge methods. **Owner approves.**
+9. Last: `strict` on, force-push blocked on `next`, `enforce_admins` on, both branches. **Owner approves.**
+10. Rollback: `isAdminEnforced:false`, then `allowsForcePushes` and `requiresStrictStatusChecks` back to the saved values, remove the tag rule, `gh workflow enable run-unit-tests.yml`, then PATCH the saved checks. Restoring `test` as required is valid only before the Keymind-merge window has reverted our skip (afterwards the stock-app step is red by design).
 
-Never do 6 before 5, 5 before 4, 4 before 2, or 7 before `quake-ci` has gone green on every kind of PR in step 2.
+Never do 6 before 5, 5 before 4, 4 before 2, or 9 before `quake-ci` has gone green on every kind of PR.
+
+## Release ritual once step 9 is done
+
+1. Feature PRs into `next` with merge commits.
+2. Release PR from `next` into `main`, merge commit only.
+3. After it lands, `main` is one commit ahead of `next`. **Merge-back is a pull request**: branch `merge/main-into-next-<n>` from `next`, merge `main` into it, open a PR into `next`, wait for `quake-ci`, merge. Never a PR with head `main`. Direct pushes to `next` are rejected.
+4. The next release PR cannot merge until step 3 has landed (the up-to-date rule).
+5. Every other open PR into `next` must be refreshed after each merge.
 
 ## Break-glass
 
-With `enforce_admins` on there is no merge-time bypass. If `quake-ci` cannot run because of something outside the repository (runner or PlatformIO outage): the owner removes `quake-ci` from the required list (PATCH as above), merges, writes the reason on the PR, and restores the requirement immediately afterwards. That is a settings change, visible in the repository's audit log, not a silent merge override. If `quake-ci.yml` itself is broken, a fix PR runs the fixed workflow file (a `pull_request` run uses the PR's own copy), so most breakages heal without using break-glass. Each use is noted in the PR.
+With `enforce_admins` on there is no merge-time bypass. If `quake-ci` cannot run for a reason outside the repository (runner or PlatformIO outage): the owner removes `quake-ci` from the required list (PATCH, `strict` kept), merges, writes the reason on the PR, and restores the requirement immediately. That is a settings change, visible in the audit log. If `quake-ci.yml` itself is broken, a fix PR runs its own corrected copy from its merge ref (a conflicted PR runs nothing, and a syntax error produces no check, so the fix PR must be conflict-free and up to date). Each use is noted in the PR.
+
+Known limit: a pull request runs its own copy of `quake-ci.yml`, so it can change its own check. The owner reviews any diff touching `.github/**` and `scripts/` for that reason.
 
 ## Keymind merge window
 
 1. `gh workflow enable run-unit-tests.yml`.
-2. Branch `merge/keymind-<release>`; resolve conflicts so the PR is mergeable (a conflicted PR starts no `pull_request` workflows).
-3. Push or reopen the PR, or `gh workflow run run-unit-tests.yml --ref merge/keymind-<release>`.
-4. Record the verdict on the PR: pass, or failure shown to be the same on the pristine Keymind tag. Expect the stock-app compatibility step to be red after our `if: false` skip is reverted.
-5. Merge; `gh workflow disable run-unit-tests.yml`; run `scripts/check_workflow_inventory.py`.
-6. Merge `main` back into `next` if needed; record time and conflicts.
+2. Branch `merge/keymind-<release>` from `next`; resolve conflicts so the PR is mergeable (a conflicted PR starts no `pull_request` workflows).
+3. **Push or reopen** the PR. Dispatching with `gh workflow run run-unit-tests.yml --ref merge/keymind-<release>` is a fallback only, and it tests the branch tip, not the merge ref against `next`.
+4. Record the verdict on the PR: pass, or the same failure on the pristine Keymind tag. Expect the stock-app compatibility step to be red after our `if: false` skip is reverted. `quake-ci` fails the PR until a completed run exists for its head commit.
+5. Merge; `gh workflow disable run-unit-tests.yml`; run `scripts/check_workflow_inventory.py` (window mode off).
+6. Merge-back as in the ritual; record time and conflicts.

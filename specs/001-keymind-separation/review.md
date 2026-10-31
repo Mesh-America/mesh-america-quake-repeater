@@ -62,3 +62,55 @@ Dispositions: **Fixed** = plan or spec changed; **Accepted** = valid, recorded a
 ## Verified true (do not re-litigate)
 
 1.18.0.2 = 0x01120002; 2.0.0.0 = 0x02000000; build tooling, tag derivation, manifest and flasher accept 2.x; the 11-file / 114-file counts; `test` is the only required context; `run-unit-tests.yml` triggers; the only divergence in that file is our 7-line skip; neither new file name clashes with upstream; the cut-over order never deadlocks `test` against the disable.
+
+
+---
+
+# Round 2: re-review of the revisions
+
+Two fresh reviewers, again given only the files and the repository. Lens 1: whether the settings contract can be executed exactly as written against GitHub's real API and behaviour (read-only calls). Lens 2: spec/plan traceability and feasibility of the code-level claims. Dispositions as above.
+
+## Blockers
+
+| # | Finding | Disposition |
+|---|---------|-------------|
+| R2-1 | Merge-back (`chore: merge main back into next`) is a direct push of a merge commit with no PR (six or more times); with `enforce_admins` on and a PR required it is rejected, and a fresh merge commit never has a green check | **Fixed**: merge-back becomes a PR with a documented release ritual (FR-021, contract, plan Phase B) |
+| R2-2 | No executable command for blocking force-push on `next`: no narrow REST endpoint; a hand-built PUT can drop settings including "pull request required"; rollback never restored `strict` or force-push | **Fixed**: GraphQL `updateBranchProtectionRule`; field names and rule IDs verified read-only (contract); full rollback list; "omitted fields unchanged" still to be tested on a throwaway repo |
+| R2-3 | Contract contradicted itself on `if: always()` (a "job-level `if:`" banned and required) | **Fixed**: "a job condition of exactly `${{ always() }}` and no other" |
+| R2-4 | The rail test cannot go red as designed: the lifecycle harness compares against `compile_held` computed from the same macro, and the real `build_flags` cannot be handed to the host compiler | **Fixed**: whitelist of rail-relevant defines, expected masks 16 / 1 fixed in the test, existing fixture's `static_assert` (plan A4, R3) |
+
+## High
+
+| # | Finding | Disposition |
+|---|---------|-------------|
+| R2-5 | Tag pushes bypass every gate (release `needs` only its own build; no rulesets); release on a push to `main` runs in parallel with the checks; FR-019 was false as written | **Fixed**: tag rule, release depends on `quake-ci`, tagged commit must be reachable from `main` (FR-018, FR-019, plan A8) |
+| R2-6 | Version-ordering check can pass on empty data (shallow checkout, no tags); "changed" undefined; merge-back PRs carry the same version; string vs numeric compare | **Fixed**: full history and tags, merge-base comparison, numeric, merge-back exempt, compare built manifests not `platformio.ini` (plan A5) |
+| R2-7 | `strict` adds a hidden dependency on every release (next is always one commit behind) and every sibling PR must be refreshed; squash and rebase are allowed | **Fixed**: ritual, merge-commit-only proposal, SC-002 counts the merge-back PR (<60 min) |
+| R2-8 | Hotfix PRs cut from a `main` without the workflow file never report | **Fixed**: require on `main` only after a release carries the file (FR-022) |
+| R2-9 | Runbook dispatch tests the branch tip, not the merge ref | **Fixed**: push or reopen is primary; dispatch a fallback |
+| R2-10 | FR-005 only procedural; nothing fails if the Keymind window is skipped | **Fixed**: `quake-ci` fails a `merge/keymind-*` PR until a completed run exists for its head SHA |
+| R2-11 | `ver` consumers misdescribed (no advert/telemetry code reads the version; owner-info would disagree with `ver`; official-app behaviour on major 2 not tasked) | **Fixed**: real consumer list, owner-info decision, open question tasked (plan E) |
+
+## Medium / Low
+
+| # | Finding | Disposition |
+|---|---------|-------------|
+| R2-12 | Rollback to `test` invalid after Phase C reverts the skip; numbering differed between plan and contract | **Fixed** (contract step 10) |
+| R2-13 | FR-017 overclaim: a PR can edit `quake-ci.yml` itself | **Accepted**, stated as a known limit; owner reviews `.github/**` diffs |
+| R2-14 | Conflicted PR and syntax-error behaviour | **Fixed**: edge cases, cut-over step 2 |
+| R2-15 | Three different fault lists (SC-003, plan, quickstart); smoke build and ordering had no red case; RAK3401 "sensor-rail hold" is not a thing (its hold is radio power) | **Fixed**: one list F1 to F8 and masks 16 / 1 |
+| R2-16 | Suite counting contradictory (`not zero` vs `four`); unfiltered `native` is about 114 suites; four suites still compile ~40 Keymind sources | **Fixed**: exactly four, from a report; `native_quake` decided after measuring |
+| R2-17 | Smoke build under-specified (Keymind's uses `build.sh`, two profiles, 13 min; `RAK_4631_repeater` differs on OTA) | **Fixed**: plain `pio run` of a named sibling, chosen in tasks |
+| R2-18 | Keymind regression tests beyond the policy test drop out of the gate | **Accepted, listed**: candidates named, chosen in tasks |
+| R2-19 | `KEYMIND_BASE_VERSION` has no source of truth; `FIRMWARE_VERSION` is hand-copied per environment | **Fixed**: shared `[quake_version]` section, `git tag --merged HEAD` |
+| R2-20 | Inventory drift check misses on-disk files, needs a window mode and `actions: read`; not scheduled from `quake-ci` | **Fixed** (plan D) |
+| R2-21 | Checklist boxes not honest; stale statements (owner decision "open", one inherited workflow active, file counts 86 + 28, churn figures not reproducible) | **Fixed**: checklist rewritten; counts corrected; churn reference required |
+| R2-22 | FR numbering out of order; FR-012 and US3 title overclaim | **Fixed**: reordered, FR-012 reworded (assumes Keymind stays on major 1) |
+
+## Verified by the second round (do not re-litigate)
+
+`enforce_admins` POST/DELETE exist; `app_id` 15368 is the Actions pin; no rulesets or merge queue exist; conflicted PRs run no `pull_request` workflows; a separate non-matrix aggregate job gives a context named exactly `quake-ci`; the push-to-`main` ordering race is avoided by the pull-request-only rule; `MyMeshQuake.cpp:280` builds `ver`; 114 / 11 / 206 and the hunk counts reproduce.
+
+## Still unverified
+
+PlatformIO config resolution in CI and the unmatched-filter exit status (neither reviewer had `pio`); GraphQL "omitted fields unchanged"; whether `gh workflow list --all` shows a workflow file that exists only on a branch; whether the legacy `_cli.handleCommand` call at `MyMesh.cpp:12786` is compiled out of the quake image; `gh` cold-cache timing of `quake-ci`; whether official apps change behaviour on repeater major version 2.

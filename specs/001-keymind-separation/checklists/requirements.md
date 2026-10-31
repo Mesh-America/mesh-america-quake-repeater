@@ -1,36 +1,37 @@
 # Specification Quality Checklist: Separate the Quake Repeater from Keymind's Test and Release Cycle
 
-**Purpose**: Validate specification completeness and quality before proceeding to planning
-**Created**: 2026-10-30
+**Purpose**: Validate specification completeness and quality before planning/tasks
+**Created**: 2026-10-30 (rewritten after two review rounds; the first version ticked boxes that were not true)
 **Feature**: [spec.md](../spec.md)
+
+This is an infrastructure feature for maintainers, so some boxes from the generic template cannot be met literally. Each is marked honestly.
 
 ## Content Quality
 
-- [x] No implementation details (languages, frameworks, APIs) — the subject is repository automation, so terms like "required check" and "workflow" name the thing being changed; no commands, file formats or code appear
-- [x] Focused on user value and business needs
-- [x] Written for non-technical stakeholders — maintainer-level language
+- [ ] No implementation details: **not met, accepted.** The subject is repository automation, so the spec names `quake-ci`, `next`/`main`, the `ver` command and the two images; mechanics (job structure, API calls) are in the plan and contract.
+- [x] Focused on maintainer value (speed, safety, merge cost)
+- [ ] Written for non-technical stakeholders: **not met, accepted.** The audience is the maintainer.
 - [x] All mandatory sections completed
 
 ## Requirement Completeness
 
 - [x] No [NEEDS CLARIFICATION] markers remain
-- [x] Requirements are testable and unambiguous
-- [x] Success criteria are measurable
-- [x] Success criteria are technology-agnostic (no implementation details)
-- [x] All acceptance scenarios are defined
-- [x] Edge cases are identified
-- [x] Scope is clearly bounded
+- [ ] Requirements are testable and unambiguous: **mostly.** FR-011 (maintainer decision) and FR-016 (negative, review only) are not testable by a check; FR-012 depends on an assumption about Keymind's version.
+- [x] Success criteria are measurable (SC-001 to SC-008, with sample definitions)
+- [ ] Success criteria are technology-agnostic: **not met, accepted.** They name the check and the commands users run.
+- [x] All acceptance scenarios are defined for the user stories
+- [x] Edge cases are identified (tag pushes, merge-back, up-to-date rule, conflicted PRs, syntax errors)
+- [x] Scope is clearly bounded (Device Configurator tooling and the mesh/internet boundary excluded)
 - [x] Dependencies and assumptions identified
 
 ## Feature Readiness
 
-- [x] All functional requirements have clear acceptance criteria
+- [ ] All functional requirements have acceptance scenarios: **no.** FR-011, FR-012, FR-013, FR-016, FR-018, FR-020 to FR-022 are verified by quickstart steps and tasks rather than by user-story scenarios.
 - [x] User scenarios cover primary flows
-- [x] Feature meets measurable outcomes defined in Success Criteria
-- [x] No implementation details leak into specification
+- [ ] Feature meets measurable outcomes: **not assessable until built.**
+- [ ] No implementation details leak into the specification: see first item.
 
 ## Notes
 
-- Revised after three independent hostile reviews; see [review.md](../review.md). Spec now has FR-001 to FR-020 and SC-001 to SC-008.
-- FR-002 and FR-015 name checks whose existence is unverified (the on-air update ordering rule, whether the rail-off regression is reproducible in a fast test); the plan must resolve both.
-- SC-002 (under 45 minutes per release) and FR-003 (15 minutes) are targets; the plan must measure the real build times of both images.
+- Revised after two independent hostile review rounds; see [review.md](../review.md). Spec has FR-001 to FR-022 and SC-001 to SC-008.
+- Tasks live in Beads, not in a tasks file.
