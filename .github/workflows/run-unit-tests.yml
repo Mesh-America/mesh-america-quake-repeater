@@ -805,12 +805,6 @@ jobs:
           path: ~/.cache/meshcore-tests
           key: official-clients-${{ hashFiles('test/test_official_app_compatibility.py', 'test/test_official_config_gui.py', 'test/test_official_web_console.py') }}
 
-      # TEMPORARILY SKIPPED (Mesh America): the test downloads the live official app (app.meshcore.nz/main.dart.js)
-      # and compares it with a pinned hash. Keymind passes through a cached copy of the pinned bundle, which
-      # this repository does not have, and the live app no longer matches the pin (checked 2026-10-29), so
-      # a fresh run here fails. Remove this `if` when the pin can be satisfied (a cached or archived copy of
-      # the pinned bundle, or a newer pin that matches the live app). See the tracking issue
-      # "Re-enable the official app compatibility test".
       - name: Verify stock app radio, Access Control and room compatibility
         if: ${{ false }}
         run: |
