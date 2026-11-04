@@ -806,7 +806,6 @@ jobs:
           key: official-clients-${{ hashFiles('test/test_official_app_compatibility.py', 'test/test_official_config_gui.py', 'test/test_official_web_console.py') }}
 
       - name: Verify stock app radio, Access Control and room compatibility
-        if: ${{ false }}
         run: |
           node --version
           python3 -B test/test_official_app_compatibility.py -v
